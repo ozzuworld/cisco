@@ -21,6 +21,7 @@ from app.models import (
 from app.profiles import CollectionProfile, get_profile_catalog
 from app.prompt_responder import PromptResponder, build_file_get_command
 from app.ssh_client import CUCMSSHClient, CUCMSSHClientError
+from app.artifact_manager import list_artifacts_for_job
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class Job:
         self.created_at = datetime.utcnow()
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
+        self.cancelled = False  # v0.3: cancellation flag
 
         # Node states
         self.node_statuses: Dict[str, NodeJobStatus] = {}
@@ -98,6 +100,7 @@ class Job:
             "nodes": self.nodes_list,
             "profile": self.profile.name,
             "status": self.status.value,
+            "cancelled": self.cancelled,  # v0.3
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
@@ -124,7 +127,7 @@ class Job:
         self.status = new_status
         if new_status == JobStatus.RUNNING and not self.started_at:
             self.started_at = datetime.utcnow()
-        elif new_status in [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.PARTIAL]:
+        elif new_status in [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.PARTIAL, JobStatus.CANCELLED]:
             self.completed_at = datetime.utcnow()
         self.save()
 
@@ -136,7 +139,7 @@ class Job:
                 self.node_statuses[node].error = error
             if status == NodeStatus.RUNNING:
                 self.node_statuses[node].started_at = datetime.utcnow()
-            elif status in [NodeStatus.SUCCEEDED, NodeStatus.FAILED]:
+            elif status in [NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED]:
                 self.node_statuses[node].completed_at = datetime.utcnow()
             self.save()
 
@@ -151,6 +154,7 @@ class JobManager:
     def __init__(self):
         """Initialize job manager"""
         self.jobs: Dict[str, Job] = {}
+        self.running_tasks: Dict[str, asyncio.Task] = {}  # v0.3: track tasks for cancellation
         self.settings = get_settings()
         self._load_existing_jobs()
 
@@ -260,6 +264,50 @@ class JobManager:
         jobs.sort(key=lambda j: j.created_at, reverse=True)
         return jobs[:limit]
 
+    def cancel_job(self, job_id: str) -> bool:
+        """
+        Cancel a running job (best-effort).
+
+        Args:
+            job_id: Job to cancel
+
+        Returns:
+            True if job was found and cancellation initiated, False otherwise
+        """
+        job = self.get_job(job_id)
+        if not job:
+            logger.warning(f"Cannot cancel job {job_id}: not found")
+            return False
+
+        # Mark job as cancelled
+        job.cancelled = True
+
+        # If job is queued or not started yet, mark as cancelled immediately
+        if job.status == JobStatus.QUEUED:
+            job.update_status(JobStatus.CANCELLED)
+            logger.info(f"Job {job_id} cancelled (was queued)")
+            return True
+
+        # If job is running, try to cancel the task
+        if job_id in self.running_tasks:
+            task = self.running_tasks[job_id]
+            if not task.done():
+                task.cancel()
+                logger.info(f"Job {job_id} cancellation requested (task cancelled)")
+            else:
+                logger.info(f"Job {job_id} already completed")
+        else:
+            logger.warning(f"Job {job_id} has no running task to cancel")
+
+        # Mark pending nodes as cancelled
+        for node, node_status in job.node_statuses.items():
+            if node_status.status == NodeStatus.PENDING:
+                job.update_node_status(node, NodeStatus.CANCELLED)
+
+        job.save()
+        logger.info(f"Job {job_id} marked for cancellation")
+        return True
+
     async def execute_job(self, job_id: str):
         """
         Execute a job asynchronously.
@@ -272,6 +320,12 @@ class JobManager:
             logger.error(f"Job not found: {job_id}")
             return
 
+        # Check if already cancelled
+        if job.cancelled:
+            logger.info(f"Job {job_id} was cancelled before execution started")
+            job.update_status(JobStatus.CANCELLED)
+            return
+
         logger.info(f"Starting execution of job {job_id}")
         job.update_status(JobStatus.RUNNING)
 
@@ -280,6 +334,10 @@ class JobManager:
             semaphore = asyncio.Semaphore(self.settings.max_concurrency_per_job)
 
             async def process_with_semaphore(node):
+                # Check cancellation before processing
+                if job.cancelled:
+                    job.update_node_status(node, NodeStatus.CANCELLED)
+                    return
                 async with semaphore:
                     await self._process_node(job, node)
 
@@ -291,7 +349,13 @@ class JobManager:
 
             # Determine final job status
             node_statuses = [ns.status for ns in job.node_statuses.values()]
-            if all(s == NodeStatus.SUCCEEDED for s in node_statuses):
+            if job.cancelled:
+                # Check if any nodes succeeded before cancellation
+                if any(s == NodeStatus.SUCCEEDED for s in node_statuses):
+                    job.update_status(JobStatus.PARTIAL)
+                else:
+                    job.update_status(JobStatus.CANCELLED)
+            elif all(s == NodeStatus.SUCCEEDED for s in node_statuses):
                 job.update_status(JobStatus.SUCCEEDED)
             elif all(s == NodeStatus.FAILED for s in node_statuses):
                 job.update_status(JobStatus.FAILED)
@@ -300,9 +364,24 @@ class JobManager:
 
             logger.info(f"Job {job_id} completed with status {job.status}")
 
+        except asyncio.CancelledError:
+            logger.info(f"Job {job_id} was cancelled")
+            job.cancelled = True
+            # Mark any still-pending nodes as cancelled
+            for node, ns in job.node_statuses.items():
+                if ns.status == NodeStatus.PENDING:
+                    job.update_node_status(node, NodeStatus.CANCELLED)
+            job.update_status(JobStatus.CANCELLED)
+            raise  # Re-raise to properly handle task cancellation
+
         except Exception as e:
             logger.exception(f"Unexpected error in job {job_id}: {e}")
             job.update_status(JobStatus.FAILED)
+
+        finally:
+            # Remove from running tasks
+            if job_id in self.running_tasks:
+                del self.running_tasks[job_id]
 
     async def _process_node(self, job: Job, node: str):
         """
@@ -419,39 +498,24 @@ class JobManager:
         """
         Discover artifacts that were collected for a node.
 
+        Uses artifact_manager to generate stable artifact IDs (v0.3).
+
         Args:
             job_id: Job identifier
             node: Node name
 
         Returns:
-            List of discovered artifacts
+            List of discovered artifacts with artifact_id populated
         """
-        artifacts = []
-        artifact_dir = self.settings.artifacts_dir / job_id / node
+        # Use artifact_manager which includes stable artifact_id generation
+        artifacts = list_artifacts_for_job(job_id)
 
-        if not artifact_dir.exists():
-            logger.warning(f"Artifact directory not found: {artifact_dir}")
-            return artifacts
+        # Filter to this specific node
+        node_artifacts = [a for a in artifacts if a.node == node]
 
-        try:
-            for file_path in artifact_dir.rglob("*"):
-                if file_path.is_file():
-                    stat = file_path.stat()
-                    artifact = Artifact(
-                        node=node,
-                        path=str(file_path),
-                        filename=file_path.name,
-                        size_bytes=stat.st_size,
-                        created_at=datetime.fromtimestamp(stat.st_mtime)
-                    )
-                    artifacts.append(artifact)
+        logger.info(f"Discovered {len(node_artifacts)} artifacts for job {job_id}, node {node}")
 
-            logger.info(f"Discovered {len(artifacts)} artifacts for job {job_id}, node {node}")
-
-        except Exception as e:
-            logger.error(f"Error discovering artifacts: {e}")
-
-        return artifacts
+        return node_artifacts
 
 
 # Global job manager instance

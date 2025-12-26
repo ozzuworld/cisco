@@ -4,7 +4,7 @@ import asyncio
 import logging
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import ValidationError
 
 from app.models import (
@@ -20,7 +20,8 @@ from app.models import (
     ProfileResponse,
     JobsListResponse,
     JobSummary,
-    JobStatus as JobStatusEnum
+    JobStatus as JobStatusEnum,
+    CancelJobResponse  # v0.3
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -32,6 +33,8 @@ from app.ssh_client import (
 from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
 from app.job_manager import get_job_manager
+from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
+from app.artifact_manager import get_artifact_path, get_transcript_path  # v0.3
 
 
 # Configure logging
@@ -48,8 +51,12 @@ logging.getLogger('asyncssh').setLevel(logging.WARNING)
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.2.0"
+    version="0.3.0"  # v0.3: Auth, Downloads, Cancellation
 )
+
+# Wire up middleware (v0.3)
+app.add_middleware(RequestIDMiddleware)  # Must be first - adds request_id
+app.add_middleware(APIKeyAuthMiddleware)  # Auth (if API_KEY env set)
 
 # Maximum size for raw output in responses (40KB)
 MAX_RAW_OUTPUT_SIZE = 40 * 1024
@@ -60,7 +67,7 @@ async def root():
     """Health check endpoint"""
     return {
         "service": "CUCM Log Collector",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "status": "running"
     }
 
@@ -98,7 +105,7 @@ async def health():
         }
     }
 )
-async def discover_nodes(request: DiscoverNodesRequest):
+async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
     """
     Discover nodes in a CUCM cluster.
 
@@ -106,7 +113,8 @@ async def discover_nodes(request: DiscoverNodesRequest):
     and parses the output to extract cluster node information.
 
     Args:
-        request: DiscoverNodesRequest with connection parameters
+        req_body: DiscoverNodesRequest with connection parameters
+        request: FastAPI request object
 
     Returns:
         DiscoverNodesResponse with list of nodes
@@ -114,9 +122,10 @@ async def discover_nodes(request: DiscoverNodesRequest):
     Raises:
         HTTPException: With appropriate status code and error details
     """
+    request_id = get_request_id(request)
     logger.info(
-        f"Node discovery request for {request.publisher_host}:{request.port} "
-        f"as user {request.username}"
+        f"Node discovery request for {req_body.publisher_host}:{req_body.port} "
+        f"as user {req_body.username} (request_id={request_id})"
     )
     # NEVER log the password
 
@@ -126,12 +135,12 @@ async def discover_nodes(request: DiscoverNodesRequest):
     try:
         # Run the SSH command
         raw_output = await run_show_network_cluster(
-            host=request.publisher_host,
-            port=request.port,
-            username=request.username,
-            password=request.password,
-            connect_timeout=float(request.connect_timeout_sec),
-            command_timeout=float(request.command_timeout_sec)
+            host=req_body.publisher_host,
+            port=req_body.port,
+            username=req_body.username,
+            password=req_body.password,
+            connect_timeout=float(req_body.connect_timeout_sec),
+            command_timeout=float(req_body.command_timeout_sec)
         )
 
         logger.debug(f"Raw output length: {len(raw_output)} bytes")
@@ -154,22 +163,24 @@ async def discover_nodes(request: DiscoverNodesRequest):
         return response
 
     except CUCMAuthError as e:
-        logger.error(f"Authentication failed: {str(e)}")
+        logger.error(f"Authentication failed: {str(e)} (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
                 "error": "AUTH_FAILED",
-                "message": "Authentication failed. Please check username and password."
+                "message": "Authentication failed. Please check username and password.",
+                "request_id": request_id
             }
         )
 
     except CUCMCommandTimeoutError as e:
-        logger.error(f"Command timeout: {str(e)}")
+        logger.error(f"Command timeout: {str(e)} (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={
                 "error": "COMMAND_TIMEOUT",
-                "message": f"Command execution timed out after {request.command_timeout_sec}s"
+                "message": f"Command execution timed out after {req_body.command_timeout_sec}s",
+                "request_id": request_id
             }
         )
 
@@ -178,44 +189,48 @@ async def discover_nodes(request: DiscoverNodesRequest):
 
         # Check if it's a timeout
         if "timeout" in error_msg:
-            logger.error(f"Connection timeout: {str(e)}")
+            logger.error(f"Connection timeout: {str(e)} (request_id={request_id})")
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail={
                     "error": "CONNECT_TIMEOUT",
-                    "message": f"Connection timeout to {request.publisher_host}:{request.port}"
+                    "message": f"Connection timeout to {req_body.publisher_host}:{req_body.port}",
+                    "request_id": request_id
                 }
             )
         else:
             # Other network errors (unreachable, refused, etc)
-            logger.error(f"Connection error: {str(e)}")
+            logger.error(f"Connection error: {str(e)} (request_id={request_id})")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail={
                     "error": "NETWORK_ERROR",
-                    "message": f"Cannot connect to {request.publisher_host}:{request.port}. "
-                               f"Please check host is reachable and SSH is available."
+                    "message": f"Cannot connect to {req_body.publisher_host}:{req_body.port}. "
+                               f"Please check host is reachable and SSH is available.",
+                    "request_id": request_id
                 }
             )
 
     except CUCMSSHClientError as e:
-        logger.error(f"SSH client error: {str(e)}")
+        logger.error(f"SSH client error: {str(e)} (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "error": "SSH_ERROR",
-                "message": "SSH client error occurred"
+                "message": "SSH client error occurred",
+                "request_id": request_id
             }
         )
 
     except Exception as e:
-        logger.exception(f"Unexpected error during node discovery: {str(e)}")
+        logger.exception(f"Unexpected error during node discovery: {str(e)} (request_id={request_id})")
         # In production, don't expose internal error details
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "error": "INTERNAL_ERROR",
-                "message": "An unexpected error occurred during node discovery"
+                "message": "An unexpected error occurred during node discovery",
+                "request_id": request_id
             }
         )
 
@@ -261,15 +276,16 @@ async def list_profiles():
     response_model=CreateJobResponse,
     status_code=status.HTTP_202_ACCEPTED
 )
-async def create_job(request: CreateJobRequest, background_tasks: BackgroundTasks):
+async def create_job(req_body: CreateJobRequest, background_tasks: BackgroundTasks, request: Request):
     """
     Create a new log collection job.
 
     The job will be executed asynchronously in the background.
 
     Args:
-        request: Job creation request
+        req_body: Job creation request
         background_tasks: FastAPI background tasks
+        request: FastAPI request object
 
     Returns:
         CreateJobResponse with job ID and initial status
@@ -277,18 +293,19 @@ async def create_job(request: CreateJobRequest, background_tasks: BackgroundTask
     Raises:
         HTTPException: If profile not found or other validation error
     """
-    logger.info(f"Creating job for profile '{request.profile}' with {len(request.nodes)} nodes")
+    request_id = get_request_id(request)
+    logger.info(f"Creating job for profile '{req_body.profile}' with {len(req_body.nodes)} nodes (request_id={request_id})")
 
     try:
         job_manager = get_job_manager()
 
         # Create the job
-        job = job_manager.create_job(request)
+        job = job_manager.create_job(req_body)
 
         # Schedule execution in background
         background_tasks.add_task(job_manager.execute_job, job.job_id)
 
-        logger.info(f"Job {job.job_id} created and queued for execution")
+        logger.info(f"Job {job.job_id} created and queued for execution (request_id={request_id})")
 
         return CreateJobResponse(
             job_id=job.job_id,
@@ -298,21 +315,23 @@ async def create_job(request: CreateJobRequest, background_tasks: BackgroundTask
 
     except ValueError as e:
         # Profile not found or validation error
-        logger.error(f"Validation error creating job: {e}")
+        logger.error(f"Validation error creating job: {e} (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={
                 "error": "INVALID_REQUEST",
-                "message": str(e)
+                "message": str(e),
+                "request_id": request_id
             }
         )
     except Exception as e:
-        logger.exception(f"Error creating job: {e}")
+        logger.exception(f"Error creating job: {e} (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "error": "INTERNAL_ERROR",
-                "message": "Failed to create job"
+                "message": "Failed to create job",
+                "request_id": request_id
             }
         )
 
@@ -322,12 +341,13 @@ async def create_job(request: CreateJobRequest, background_tasks: BackgroundTask
     response_model=JobStatusResponse,
     status_code=status.HTTP_200_OK
 )
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, request: Request):
     """
     Get the status of a log collection job.
 
     Args:
         job_id: Job identifier
+        request: FastAPI request object
 
     Returns:
         JobStatusResponse with job status and node details
@@ -335,15 +355,18 @@ async def get_job_status(job_id: str):
     Raises:
         HTTPException: If job not found
     """
+    request_id = get_request_id(request)
     job_manager = get_job_manager()
     job = job_manager.get_job(job_id)
 
     if not job:
+        logger.warning(f"Job {job_id} not found (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "error": "JOB_NOT_FOUND",
-                "message": f"Job {job_id} not found"
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
             }
         )
 
@@ -363,12 +386,13 @@ async def get_job_status(job_id: str):
     response_model=ArtifactsResponse,
     status_code=status.HTTP_200_OK
 )
-async def get_job_artifacts(job_id: str):
+async def get_job_artifacts(job_id: str, request: Request):
     """
     Get all artifacts collected by a job.
 
     Args:
         job_id: Job identifier
+        request: FastAPI request object
 
     Returns:
         ArtifactsResponse with list of artifacts
@@ -376,15 +400,18 @@ async def get_job_artifacts(job_id: str):
     Raises:
         HTTPException: If job not found
     """
+    request_id = get_request_id(request)
     job_manager = get_job_manager()
     job = job_manager.get_job(job_id)
 
     if not job:
+        logger.warning(f"Job {job_id} not found for artifacts (request_id={request_id})")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
                 "error": "JOB_NOT_FOUND",
-                "message": f"Job {job_id} not found"
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
             }
         )
 
@@ -429,6 +456,116 @@ async def list_jobs(limit: int = 20):
     ]
 
     return JobsListResponse(jobs=summaries)
+
+
+# ============================================================================
+# v0.3 Endpoints - Downloads and Cancellation
+# ============================================================================
+
+
+@app.get(
+    "/artifacts/{artifact_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Artifact file download"},
+        404: {
+            "description": "Artifact not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_artifact(artifact_id: str, request: Request):
+    """
+    Download an artifact by its stable ID (v0.3).
+
+    Args:
+        artifact_id: Stable artifact identifier
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with artifact file
+
+    Raises:
+        HTTPException: If artifact not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Artifact download request: {artifact_id} (request_id={request_id})")
+
+    file_path = get_artifact_path(artifact_id)
+    if not file_path:
+        logger.warning(f"Artifact {artifact_id} not found (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "ARTIFACT_NOT_FOUND",
+                "message": f"Artifact {artifact_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return FileResponse(
+        file_path,
+        filename=file_path.name,
+        media_type="application/octet-stream"
+    )
+
+
+@app.post(
+    "/jobs/{job_id}/cancel",
+    response_model=CancelJobResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Job cancellation initiated",
+            "model": CancelJobResponse
+        },
+        404: {
+            "description": "Job not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def cancel_job(job_id: str, request: Request):
+    """
+    Cancel a running job (best-effort) (v0.3).
+
+    This will stop scheduling new nodes and attempt to cancel the running task.
+    Nodes that are already being processed may complete.
+
+    Args:
+        job_id: Job identifier
+        request: FastAPI request object
+
+    Returns:
+        CancelJobResponse with cancellation status
+
+    Raises:
+        HTTPException: If job not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Job cancellation request: {job_id} (request_id={request_id})")
+
+    job_manager = get_job_manager()
+    success = job_manager.cancel_job(job_id)
+
+    if not success:
+        logger.warning(f"Job {job_id} not found for cancellation (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    job = job_manager.get_job(job_id)
+    return CancelJobResponse(
+        job_id=job.job_id,
+        status=job.status,
+        cancelled=job.cancelled,
+        message="Job cancellation initiated"
+    )
 
 
 # ============================================================================
