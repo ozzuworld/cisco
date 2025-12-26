@@ -341,11 +341,19 @@ class JobManager:
                 async with semaphore:
                     await self._process_node(job, node)
 
-            # Process all nodes
-            await asyncio.gather(
-                *[process_with_semaphore(node) for node in job.nodes_list],
-                return_exceptions=True
-            )
+            # v0.3.2: Process all nodes (removed return_exceptions to allow cancellation)
+            # Each node handles its own errors, so we want CancelledError to propagate
+            tasks = [asyncio.create_task(process_with_semaphore(node)) for node in job.nodes_list]
+            try:
+                await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                # Cancel all remaining tasks
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                # Wait for all tasks to finish cancelling
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise  # Re-raise to be caught by outer handler
 
             # Determine final job status
             node_statuses = [ns.status for ns in job.node_statuses.values()]
@@ -367,11 +375,17 @@ class JobManager:
         except asyncio.CancelledError:
             logger.info(f"Job {job_id} was cancelled")
             job.cancelled = True
-            # Mark any still-pending nodes as cancelled
+            # v0.3.2: Mark any non-completed nodes as cancelled
             for node, ns in job.node_statuses.items():
-                if ns.status == NodeStatus.PENDING:
+                if ns.status in [NodeStatus.PENDING, NodeStatus.RUNNING]:
                     job.update_node_status(node, NodeStatus.CANCELLED)
-            job.update_status(JobStatus.CANCELLED)
+
+            # Determine final status based on what completed
+            node_statuses = [ns.status for ns in job.node_statuses.values()]
+            if any(s == NodeStatus.SUCCEEDED for s in node_statuses):
+                job.update_status(JobStatus.PARTIAL)
+            else:
+                job.update_status(JobStatus.CANCELLED)
             raise  # Re-raise to properly handle task cancellation
 
         except Exception as e:
@@ -401,6 +415,12 @@ class JobManager:
         transcript_lines = []
 
         try:
+            # v0.3.2: Check cancellation before connecting
+            if job.cancelled:
+                logger.info(f"[Job {job.job_id}][{node}] Cancelled before connect")
+                job.update_node_status(node, NodeStatus.CANCELLED)
+                return
+
             # Prepare SFTP directory for this node
             sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}"
 
@@ -415,8 +435,22 @@ class JobManager:
 
                 transcript_lines.append(f"Connected to {node}\n")
 
+                # v0.3.2: Check cancellation after connect
+                if job.cancelled:
+                    logger.info(f"[Job {job.job_id}][{node}] Cancelled after connect")
+                    transcript_lines.append("\n[CANCELLED]\n")
+                    job.update_node_status(node, NodeStatus.CANCELLED)
+                    return
+
                 # Process each path in the profile
                 for path in job.profile.paths:
+                    # v0.3.2: Check cancellation before each path
+                    if job.cancelled:
+                        logger.info(f"[Job {job.job_id}][{node}] Cancelled during path processing")
+                        transcript_lines.append(f"\n[CANCELLED before processing {path}]\n")
+                        job.update_node_status(node, NodeStatus.CANCELLED)
+                        return
+
                     # Determine options (use overrides if provided)
                     reltime = job.options.reltime_minutes or job.profile.reltime_minutes
                     compress = job.options.compress if job.options.compress is not None else job.profile.compress
@@ -482,6 +516,20 @@ class JobManager:
             # Mark as succeeded
             job.update_node_status(node, NodeStatus.SUCCEEDED)
             logger.info(f"[Job {job.job_id}][{node}] Completed successfully - {len(artifacts)} artifacts collected")
+
+        except asyncio.CancelledError:
+            # v0.3.2: Handle task cancellation gracefully
+            logger.info(f"[Job {job.job_id}][{node}] Task cancelled")
+            transcript_lines.append("\n[TASK CANCELLED]\n")
+
+            # Write transcript
+            with open(transcript_path, 'w') as f:
+                f.writelines(transcript_lines)
+
+            # Mark node as cancelled with completed timestamp
+            job.update_node_status(node, NodeStatus.CANCELLED)
+            # Re-raise to propagate cancellation
+            raise
 
         except Exception as e:
             logger.error(f"[Job {job.job_id}][{node}] Failed: {e}")

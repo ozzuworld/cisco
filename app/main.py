@@ -53,7 +53,7 @@ logging.getLogger('asyncssh').setLevel(logging.WARNING)
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.3.1"  # v0.3.1: Request ID hardening, error normalization
+    version="0.3.2"  # v0.3.2: Job cancellation finalization fix
 )
 
 # Wire up middleware (v0.3)
@@ -157,7 +157,7 @@ async def root():
     """Health check endpoint"""
     return {
         "service": "CUCM Log Collector",
-        "version": "0.3.1",
+        "version": "0.3.2",
         "status": "running"
     }
 
