@@ -93,6 +93,10 @@ class ErrorResponse(BaseModel):
 
     error: str = Field(..., description="Error code")
     message: str = Field(..., description="Human-readable error message")
+    request_id: Optional[str] = Field(
+        default=None,
+        description="Request ID for tracing (v0.3)"
+    )
     details: Optional[str] = Field(
         default=None,
         description="Additional error details (only in debug mode)"
@@ -111,6 +115,7 @@ class JobStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     PARTIAL = "partial"  # Some nodes succeeded, some failed
+    CANCELLED = "cancelled"  # Job was cancelled (v0.3)
 
 
 class NodeStatus(str, Enum):
@@ -119,6 +124,7 @@ class NodeStatus(str, Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"  # Node processing was cancelled (v0.3)
 
 
 class CollectionOptions(BaseModel):
@@ -201,10 +207,14 @@ class Artifact(BaseModel):
     """Represents a collected log file artifact"""
 
     node: str = Field(..., description="Node that generated this artifact")
-    path: str = Field(..., description="Full path to the artifact file")
+    path: str = Field(..., description="Relative path to the artifact file")
     filename: str = Field(..., description="Artifact filename")
     size_bytes: int = Field(..., description="File size in bytes")
     created_at: datetime = Field(..., description="File creation timestamp")
+    artifact_id: Optional[str] = Field(
+        default=None,
+        description="Stable artifact ID for downloads (v0.3)"
+    )
 
 
 class NodeJobStatus(BaseModel):
@@ -303,3 +313,17 @@ class JobsListResponse(BaseModel):
         default_factory=list,
         description="List of recent jobs"
     )
+
+
+# ============================================================================
+# v0.3 Models - Cancellation
+# ============================================================================
+
+
+class CancelJobResponse(BaseModel):
+    """Response for job cancellation request"""
+
+    job_id: str = Field(..., description="Job identifier")
+    status: JobStatus = Field(..., description="Job status after cancellation")
+    cancelled: bool = Field(..., description="Whether cancellation was successful")
+    message: str = Field(..., description="Cancellation status message")
