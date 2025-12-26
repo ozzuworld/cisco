@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
+    # Authentication (v0.3)
+    api_key: Optional[str] = None  # If set, enables API key auth
+
     # SFTP Server Settings (where CUCM pushes logs)
     sftp_host: str
     sftp_port: int = 22
@@ -31,6 +34,15 @@ class Settings(BaseSettings):
 
     # Profiles
     profiles_path: Path = Path("./profiles.yaml")
+
+    # Input Validation Limits (v0.4)
+    max_reltime_minutes: int = 1440  # 24 hours max
+    max_nodes_per_job: int = 20  # Max nodes per job
+    max_concurrency_limit: int = 5  # Max concurrency setting
+
+    # Retention & Cleanup (v0.4)
+    retention_days: int = 7  # Keep jobs for 7 days
+    cleanup_enabled: bool = True  # Enable automatic cleanup
 
     model_config = SettingsConfigDict(
         env_file=".env",
