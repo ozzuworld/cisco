@@ -5,6 +5,8 @@ import logging
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import ValidationError
 
 from app.models import (
@@ -51,12 +53,100 @@ logging.getLogger('asyncssh').setLevel(logging.WARNING)
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.3.0"  # v0.3: Auth, Downloads, Cancellation
+    version="0.3.1"  # v0.3.1: Request ID hardening, error normalization
 )
 
 # Wire up middleware (v0.3)
 app.add_middleware(RequestIDMiddleware)  # Must be first - adds request_id
 app.add_middleware(APIKeyAuthMiddleware)  # Auth (if API_KEY env set)
+
+
+# ============================================================================
+# Exception Handlers (v0.3.1)
+# ============================================================================
+
+
+@app.exception_handler(StarletteHTTPException)
+async def starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """
+    Handle Starlette HTTP exceptions (e.g., 404 Not Found).
+
+    Ensures consistent error format with request_id.
+    """
+    request_id = get_request_id(request)
+
+    # Map status code to error code
+    error_code = "NOT_FOUND" if exc.status_code == 404 else "HTTP_ERROR"
+
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": error_code,
+            "message": exc.detail or "An error occurred",
+            "request_id": request_id
+        },
+        headers={"X-Request-ID": request_id}
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """
+    Handle FastAPI HTTP exceptions.
+
+    Ensures consistent error format with request_id.
+    """
+    request_id = get_request_id(request)
+
+    # If detail is already a dict with our format, use it
+    if isinstance(exc.detail, dict):
+        detail = exc.detail
+        # Ensure request_id is set
+        if "request_id" not in detail:
+            detail["request_id"] = request_id
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=detail,
+            headers={"X-Request-ID": request_id}
+        )
+
+    # Otherwise, wrap string detail in our format
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": "HTTP_ERROR",
+            "message": str(exc.detail),
+            "request_id": request_id
+        },
+        headers={"X-Request-ID": request_id}
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Handle Pydantic validation errors (422 Unprocessable Entity).
+
+    Ensures consistent error format with request_id.
+    """
+    request_id = get_request_id(request)
+
+    # Extract first error for simplicity
+    first_error = exc.errors()[0] if exc.errors() else {}
+    field = " -> ".join(str(loc) for loc in first_error.get("loc", []))
+    message = first_error.get("msg", "Validation error")
+
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={
+            "error": "VALIDATION_ERROR",
+            "message": f"Validation failed for {field}: {message}" if field else message,
+            "request_id": request_id,
+            "details": exc.errors()  # Include full validation errors
+        },
+        headers={"X-Request-ID": request_id}
+    )
+
 
 # Maximum size for raw output in responses (40KB)
 MAX_RAW_OUTPUT_SIZE = 40 * 1024
@@ -67,7 +157,7 @@ async def root():
     """Health check endpoint"""
     return {
         "service": "CUCM Log Collector",
-        "version": "0.3.0",
+        "version": "0.3.1",
         "status": "running"
     }
 

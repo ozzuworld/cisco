@@ -192,12 +192,13 @@ def test_request_id_in_error_responses(client_no_auth):
 
     assert response.status_code == 404
     data = response.json()
-    # FastAPI wraps error detail in "detail" field
-    assert "detail" in data
-    assert "request_id" in data["detail"]
+    # v0.3.1: Consistent error format at top level
+    assert "error" in data
+    assert "message" in data
+    assert "request_id" in data
 
     # request_id in body should match header
-    assert data["detail"]["request_id"] == response.headers["X-Request-ID"]
+    assert data["request_id"] == response.headers["X-Request-ID"]
 
 
 def test_request_id_unique_per_request(client_no_auth):
@@ -224,10 +225,11 @@ def test_download_artifact_not_found(client_no_auth):
 
     assert response.status_code == 404
     data = response.json()
-    assert "detail" in data
-    assert data["detail"]["error"] == "ARTIFACT_NOT_FOUND"
-    assert "request_id" in data["detail"]
-    assert artifact_id in data["detail"]["message"]
+    # v0.3.1: Consistent error format at top level
+    assert "error" in data
+    assert data["error"] == "ARTIFACT_NOT_FOUND"
+    assert "request_id" in data
+    assert artifact_id in data["message"]
 
 
 def test_download_artifact_success(client_no_auth, temp_storage):
@@ -285,10 +287,11 @@ def test_cancel_job_not_found(client_no_auth):
 
     assert response.status_code == 404
     data = response.json()
-    assert "detail" in data
-    assert data["detail"]["error"] == "JOB_NOT_FOUND"
-    assert "request_id" in data["detail"]
-    assert job_id in data["detail"]["message"]
+    # v0.3.1: Consistent error format at top level
+    assert "error" in data
+    assert data["error"] == "JOB_NOT_FOUND"
+    assert "request_id" in data
+    assert job_id in data["message"]
 
 
 @patch("app.job_manager.run_file_get_command")
@@ -368,12 +371,113 @@ def test_cancel_job_persists_cancelled_state(client_no_auth):
 # ============================================================================
 
 
-def test_api_version_is_v03(client_no_auth):
-    """API should report version 0.3.0"""
+def test_api_version_is_v031(client_no_auth):
+    """API should report version 0.3.1"""
     response = client_no_auth.get("/")
     assert response.status_code == 200
     data = response.json()
-    assert data["version"] == "0.3.0"
+    assert data["version"] == "0.3.1"
+
+
+# ============================================================================
+# v0.3.1 Tests - Request ID Hardening
+# ============================================================================
+
+
+def test_404_includes_request_id(client_no_auth):
+    """404 Not Found should include request_id in body and header"""
+    response = client_no_auth.get("/nonexistent-endpoint-12345")
+
+    assert response.status_code == 404
+    assert "X-Request-ID" in response.headers
+
+    request_id = response.headers["X-Request-ID"]
+    assert request_id != "unknown"
+    assert len(request_id) == 36  # UUID length
+
+    # Check body has request_id
+    data = response.json()
+    assert "error" in data
+    assert "message" in data
+    assert "request_id" in data
+    assert data["request_id"] == request_id
+    assert data["request_id"] != "unknown"
+
+
+def test_422_validation_error_includes_request_id(client_no_auth):
+    """422 Validation Error should include request_id in body and header"""
+    # Send invalid JSON body to create job endpoint
+    response = client_no_auth.post(
+        "/jobs",
+        json={
+            "profile": "basic_platform",
+            "nodes": [],  # Invalid: must have at least 1 node
+            "publisher_host": "test.example.com",
+            "username": "admin",
+            "password": "pass"
+        }
+    )
+
+    assert response.status_code == 422
+    assert "X-Request-ID" in response.headers
+
+    request_id = response.headers["X-Request-ID"]
+    assert request_id != "unknown"
+    assert len(request_id) == 36  # UUID length
+
+    # Check body has request_id
+    data = response.json()
+    assert "error" in data
+    assert data["error"] == "VALIDATION_ERROR"
+    assert "message" in data
+    assert "request_id" in data
+    assert data["request_id"] == request_id
+    assert data["request_id"] != "unknown"
+
+
+def test_401_auth_error_includes_request_id_no_unknown(client_with_auth):
+    """401 auth errors must have request_id (never 'unknown')"""
+    # This test verifies the v0.3.1 fix for "unknown" request_id in 401s
+    response = client_with_auth.get("/profiles")
+
+    # If auth is disabled in test, skip
+    if response.status_code == 200:
+        pytest.skip("Auth middleware not active")
+
+    assert response.status_code == 401
+    assert "X-Request-ID" in response.headers
+
+    request_id = response.headers["X-Request-ID"]
+    assert request_id != "unknown"
+    assert len(request_id) == 36  # UUID length
+
+    # Check body has request_id and it's not "unknown"
+    data = response.json()
+    assert "error" in data
+    assert "message" in data
+    assert "request_id" in data
+    assert data["request_id"] == request_id
+    assert data["request_id"] != "unknown"
+
+
+def test_all_success_responses_have_request_id_header(client_no_auth):
+    """All 200 responses should include X-Request-ID header"""
+    # Test multiple endpoints
+    endpoints = [
+        "/",
+        "/health",
+        "/profiles",
+        "/jobs"
+    ]
+
+    for endpoint in endpoints:
+        response = client_no_auth.get(endpoint)
+        assert response.status_code == 200, f"Endpoint {endpoint} failed"
+        assert "X-Request-ID" in response.headers, f"Endpoint {endpoint} missing X-Request-ID"
+
+        request_id = response.headers["X-Request-ID"]
+        assert request_id != "unknown"
+        assert len(request_id) == 36  # UUID length
 
 
 if __name__ == "__main__":

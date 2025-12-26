@@ -74,7 +74,14 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
 
         if self.auth_enabled:
             # Get request_id from request state (set by RequestIDMiddleware)
-            request_id = getattr(request.state, 'request_id', 'unknown')
+            # If missing (race condition), generate one defensively (v0.3.1)
+            request_id = getattr(request.state, 'request_id', None)
+            if not request_id:
+                request_id = str(uuid.uuid4())
+                request.state.request_id = request_id
+                logger.warning(
+                    f"Request ID missing in auth middleware, generated {request_id}"
+                )
 
             # Check Authorization header
             auth_header = request.headers.get("Authorization")
@@ -128,10 +135,18 @@ def get_request_id(request: Request) -> str:
     """
     Get the request ID from the request state.
 
+    If missing (edge case), generates a new UUID and attaches it (v0.3.1).
+
     Args:
         request: FastAPI request object
 
     Returns:
-        Request ID string
+        Request ID string (always a valid UUID)
     """
-    return getattr(request.state, 'request_id', 'unknown')
+    request_id = getattr(request.state, 'request_id', None)
+    if not request_id:
+        # Defensive: generate UUID if missing (should not happen with middleware)
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
+        logger.warning(f"Request ID missing, generated {request_id}")
+    return request_id
