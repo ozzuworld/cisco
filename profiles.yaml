@@ -1,0 +1,95 @@
+# CUCM Log Collection Profiles
+# Each profile defines which logs to collect and default options
+
+profiles:
+  - name: basic_platform
+    description: "Basic platform logs (syslog, core dumps, install logs)"
+    paths:
+      - "platform/log/syslog"
+      - "platform/log/messages"
+      - "install"
+    reltime_minutes: 120
+    compress: true
+    recurs: false
+    match: null
+
+  - name: callmanager_full
+    description: "Complete CallManager application logs"
+    paths:
+      - "cm/trace/ccm"
+      - "cm/trace/sdl"
+      - "cm/trace/dbl"
+      - "cm/trace/ser"
+    reltime_minutes: 60
+    compress: true
+    recurs: true
+    match: null
+
+  - name: callmanager_sdl
+    description: "CallManager SDL (Signal Distribution Layer) logs only"
+    paths:
+      - "cm/trace/sdl"
+    reltime_minutes: 60
+    compress: true
+    recurs: false
+    match: ".*\\.txt$"
+
+  - name: tomcat_logs
+    description: "Tomcat web application server logs"
+    paths:
+      - "tomcat/logs"
+    reltime_minutes: 120
+    compress: true
+    recurs: true
+    match: null
+
+  - name: database_logs
+    description: "Database diagnostic and error logs"
+    paths:
+      - "informix/log"
+      - "platform/log/postgres"
+    reltime_minutes: 240
+    compress: true
+    recurs: true
+    match: null
+
+  - name: cups_logs
+    description: "Cisco Unity Presence Service logs"
+    paths:
+      - "cups/log"
+      - "presence/log"
+    reltime_minutes: 60
+    compress: true
+    recurs: true
+    match: null
+
+  - name: emergency_debug
+    description: "Emergency troubleshooting - all recent logs"
+    paths:
+      - "platform/log"
+      - "cm/trace"
+      - "tomcat/logs"
+    reltime_minutes: 30
+    compress: true
+    recurs: true
+    match: null
+
+  - name: install_upgrade
+    description: "Installation and upgrade logs for troubleshooting"
+    paths:
+      - "install"
+      - "platform/log/install"
+    reltime_minutes: 1440  # 24 hours
+    compress: true
+    recurs: true
+    match: null
+
+  - name: security_audit
+    description: "Security and audit logs"
+    paths:
+      - "platform/log/audit"
+      - "platform/log/secure"
+    reltime_minutes: 1440  # 24 hours
+    compress: true
+    recurs: true
+    match: null

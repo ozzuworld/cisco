@@ -1,8 +1,9 @@
 """FastAPI application for CUCM Log Collector"""
 
+import asyncio
 import logging
 from typing import Optional
-from fastapi import FastAPI, HTTPException, status, Request
+from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -10,7 +11,16 @@ from app.models import (
     DiscoverNodesRequest,
     DiscoverNodesResponse,
     ErrorResponse,
-    ClusterNode
+    ClusterNode,
+    CreateJobRequest,
+    CreateJobResponse,
+    JobStatusResponse,
+    ArtifactsResponse,
+    ProfilesResponse,
+    ProfileResponse,
+    JobsListResponse,
+    JobSummary,
+    JobStatus as JobStatusEnum
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -20,6 +30,8 @@ from app.ssh_client import (
     CUCMSSHClientError
 )
 from app.parsers import parse_show_network_cluster
+from app.profiles import get_profile_catalog
+from app.job_manager import get_job_manager
 
 
 # Configure logging
@@ -29,11 +41,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Reduce AsyncSSH library noise
+logging.getLogger('asyncssh').setLevel(logging.WARNING)
+
 # Create FastAPI app
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.1.0"
+    version="0.2.0"
 )
 
 # Maximum size for raw output in responses (40KB)
@@ -45,7 +60,7 @@ async def root():
     """Health check endpoint"""
     return {
         "service": "CUCM Log Collector",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "status": "running"
     }
 
@@ -203,6 +218,222 @@ async def discover_nodes(request: DiscoverNodesRequest):
                 "message": "An unexpected error occurred during node discovery"
             }
         )
+
+
+# ============================================================================
+# Job Management Endpoints (v0.2)
+# ============================================================================
+
+
+@app.get(
+    "/profiles",
+    response_model=ProfilesResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_profiles():
+    """
+    List all available log collection profiles.
+
+    Returns:
+        ProfilesResponse with list of profiles
+    """
+    catalog = get_profile_catalog()
+    profiles_list = catalog.list_profiles()
+
+    profile_responses = [
+        ProfileResponse(
+            name=p.name,
+            description=p.description,
+            paths=p.paths,
+            reltime_minutes=p.reltime_minutes,
+            compress=p.compress,
+            recurs=p.recurs,
+            match=p.match
+        )
+        for p in profiles_list
+    ]
+
+    return ProfilesResponse(profiles=profile_responses)
+
+
+@app.post(
+    "/jobs",
+    response_model=CreateJobResponse,
+    status_code=status.HTTP_202_ACCEPTED
+)
+async def create_job(request: CreateJobRequest, background_tasks: BackgroundTasks):
+    """
+    Create a new log collection job.
+
+    The job will be executed asynchronously in the background.
+
+    Args:
+        request: Job creation request
+        background_tasks: FastAPI background tasks
+
+    Returns:
+        CreateJobResponse with job ID and initial status
+
+    Raises:
+        HTTPException: If profile not found or other validation error
+    """
+    logger.info(f"Creating job for profile '{request.profile}' with {len(request.nodes)} nodes")
+
+    try:
+        job_manager = get_job_manager()
+
+        # Create the job
+        job = job_manager.create_job(request)
+
+        # Schedule execution in background
+        background_tasks.add_task(job_manager.execute_job, job.job_id)
+
+        logger.info(f"Job {job.job_id} created and queued for execution")
+
+        return CreateJobResponse(
+            job_id=job.job_id,
+            status=job.status,
+            created_at=job.created_at
+        )
+
+    except ValueError as e:
+        # Profile not found or validation error
+        logger.error(f"Validation error creating job: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "INVALID_REQUEST",
+                "message": str(e)
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Error creating job: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "Failed to create job"
+            }
+        )
+
+
+@app.get(
+    "/jobs/{job_id}",
+    response_model=JobStatusResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_job_status(job_id: str):
+    """
+    Get the status of a log collection job.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        JobStatusResponse with job status and node details
+
+    Raises:
+        HTTPException: If job not found
+    """
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found"
+            }
+        )
+
+    return JobStatusResponse(
+        job_id=job.job_id,
+        status=job.status,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+        profile=job.profile.name,
+        nodes=list(job.node_statuses.values())
+    )
+
+
+@app.get(
+    "/jobs/{job_id}/artifacts",
+    response_model=ArtifactsResponse,
+    status_code=status.HTTP_200_OK
+)
+async def get_job_artifacts(job_id: str):
+    """
+    Get all artifacts collected by a job.
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        ArtifactsResponse with list of artifacts
+
+    Raises:
+        HTTPException: If job not found
+    """
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found"
+            }
+        )
+
+    # Collect all artifacts from all nodes
+    all_artifacts = []
+    for node_status in job.node_statuses.values():
+        all_artifacts.extend(node_status.artifacts)
+
+    return ArtifactsResponse(
+        job_id=job.job_id,
+        artifacts=all_artifacts
+    )
+
+
+@app.get(
+    "/jobs",
+    response_model=JobsListResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_jobs(limit: int = 20):
+    """
+    List recent jobs.
+
+    Args:
+        limit: Maximum number of jobs to return (default 20)
+
+    Returns:
+        JobsListResponse with list of job summaries
+    """
+    job_manager = get_job_manager()
+    jobs = job_manager.list_jobs(limit=limit)
+
+    summaries = [
+        JobSummary(
+            job_id=job.job_id,
+            status=job.status,
+            profile=job.profile.name,
+            created_at=job.created_at,
+            node_count=len(job.nodes_list)
+        )
+        for job in jobs
+    ]
+
+    return JobsListResponse(jobs=summaries)
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
 
 
 def _truncate_output(output: str) -> tuple[str, bool]:

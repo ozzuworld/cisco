@@ -9,6 +9,9 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.5
 pydantic-settings==2.7.1
 
+# Configuration
+PyYAML==6.0.2
+
 # SSH Client
 asyncssh==2.18.0
 

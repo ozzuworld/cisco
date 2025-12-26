@@ -1,418 +1,353 @@
-# CUCM Log Collector Backend (MVP v0.1)
+# CUCM Log Collector Backend (v0.2.0)
 
-A Python backend service for discovering and managing Cisco Unified Communications Manager (CUCM) cluster nodes via SSH.
+A Python backend service for discovering Cisco Unified Communications Manager (CUCM) cluster nodes and collecting logs via automated SSH sessions.
 
-## Features (MVP v0.1)
+## Features
 
+### v0.1 - Node Discovery
 - 🔍 **Node Discovery**: Connect to CUCM Publisher and discover all cluster nodes
 - 🔐 **Secure SSH**: AsyncSSH-based interactive shell sessions with robust timeout handling
 - 📊 **REST API**: FastAPI-powered endpoints for integration with frontend applications
 - 🧪 **Well-tested**: Comprehensive unit tests with sample CUCM output
-- 🚀 **Production-ready**: Proper error handling, logging, and type safety
+
+### v0.2 - Log Collection (Current)
+- 📁 **Profiles**: Pre-defined log collection profiles for common scenarios
+- 🔄 **Job Management**: Create and track asynchronous log collection jobs
+- 📝 **Transcripts**: Complete session transcripts for troubleshooting
+- 📦 **Artifact Tracking**: Automatic discovery and cataloging of collected files
+- ⚡ **Concurrency Control**: Configurable parallel execution per job
+- 🎯 **Interactive Prompts**: Automatic response to CUCM CLI prompts
+
+## Quick Start
+
+```bash
+# 1. Install
+pip install -r requirements.txt
+
+# 2. Configure
+cp .env.example .env
+# Edit .env with your SFTP and CUCM settings
+
+# 3. Run
+uvicorn app.main:app --reload
+
+# 4. Test
+curl http://localhost:8000/profiles
+```
+
+See full documentation below for detailed setup and usage.
 
 ## Architecture
 
 ```
 app/
-├── main.py          # FastAPI application with /discover-nodes endpoint
-├── ssh_client.py    # AsyncSSH interactive shell client for CUCM CLI
-├── parsers.py       # Parser for 'show network cluster' command output
-└── models.py        # Pydantic request/response models
+├── main.py              # FastAPI app (v0.2)
+├── config.py            # Configuration management
+├── models.py            # Pydantic models
+├── ssh_client.py        # AsyncSSH client
+├── parsers.py           # CLI parsers
+├── profiles.py          # Profile catalog
+├── prompt_responder.py  # Interactive prompts
+└── job_manager.py       # Job execution
 
 tests/
-└── test_parser.py   # Unit tests for parser logic
+├── test_parser.py
+├── test_profiles.py
+└── test_prompt_responder.py
+
+profiles.yaml            # Profile definitions
 ```
 
-## Requirements
+## Installation & Configuration
 
-- Python 3.11 or higher
-- CUCM Publisher accessible via SSH (TCP port 22)
-- OS Admin credentials for CUCM
+See full README.md for detailed installation steps.
 
-## Installation
+**Key Requirements:**
+- Python 3.11+
+- SFTP server (CUCM pushes logs here)
+- CUCM OS Admin credentials
 
-### 1. Clone the repository
+**SFTP Server Setup (Critical):**
+
+CUCM **pushes** logs to an SFTP server. Configure in `.env`:
 
 ```bash
-git clone <repository-url>
-cd cisco
+SFTP_HOST=your-sftp-server.com
+SFTP_PORT=22
+SFTP_USERNAME=cucm-collector
+SFTP_PASSWORD=your-password
+SFTP_REMOTE_BASE_DIR=/cucm-logs
 ```
 
-### 2. Create virtual environment
-
+Quick SFTP server for testing (Docker):
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+docker run -p 2222:22 -d \
+  -e SFTP_USERS='cucm:password:1001' \
+  -v $(pwd)/storage/received:/home/cucm/upload \
+  atmoz/sftp
 ```
 
-### 3. Install dependencies
+## API Reference
 
-```bash
-pip install -r requirements.txt
-```
+### Node Discovery (v0.1)
 
-## Running the Service
+**POST /discover-nodes** - Discover cluster nodes
 
-### Development Mode
-
-```bash
-# Run with auto-reload enabled
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-Or use the built-in runner:
-
-```bash
-python -m app.main
-```
-
-### Production Mode
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
-```
-
-The API will be available at:
-- **API**: http://localhost:8000
-- **Interactive Docs**: http://localhost:8000/docs
-- **Alternative Docs**: http://localhost:8000/redoc
-
-## Running Tests
-
-### Unit Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with verbose output
-pytest -v
-
-# Run with coverage
-pytest --cov=app tests/
-```
-
-### Test Parser Only
-
-```bash
-pytest tests/test_parser.py -v
-```
-
-## API Endpoints
-
-### Health Check
-
-```bash
-GET /health
-```
-
-Response:
+Request:
 ```json
 {
-  "status": "healthy"
+  "publisher_host": "10.10.10.10",
+  "port": 22,
+  "username": "admin",
+  "password": "your-password"
 }
 ```
 
-### Discover Nodes
+### Profiles (v0.2)
 
-```bash
-POST /discover-nodes
-```
+**GET /profiles** - List available profiles
 
-**Request Body:**
+Response includes built-in profiles:
+- `basic_platform` - Syslog, install logs
+- `callmanager_full` - All CM logs
+- `emergency_debug` - All logs, last 30 min
+- And more...
 
+### Jobs (v0.2)
+
+**POST /jobs** - Create log collection job
+
+Request:
 ```json
 {
   "publisher_host": "10.10.10.10",
   "port": 22,
   "username": "admin",
   "password": "your-password",
-  "connect_timeout_sec": 30,
-  "command_timeout_sec": 120
+  "nodes": ["10.10.10.10", "10.10.10.11"],
+  "profile": "basic_platform",
+  "options": {
+    "reltime_minutes": 60
+  }
 }
 ```
 
-**Success Response (200):**
-
+Response (202):
 ```json
 {
-  "nodes": [
-    {
-      "ip": "104.156.46.16",
-      "fqdn": "den01wx051ccm01.wx051.webexcce.com",
-      "host": "den01wx051ccm01",
-      "role": "Publisher",
-      "product": "callmanager",
-      "dbrole": "DBPub",
-      "raw": "104.156.46.16 den01wx051ccm01.wx051.webexcce.com den01wx051ccm01 Publisher callmanager DBPub authenticated"
-    },
-    {
-      "ip": "104.156.46.17",
-      "fqdn": "den02wx051ccm01.wx051.webexcce.com",
-      "host": "den02wx051ccm01",
-      "role": "Subscriber",
-      "product": "callmanager",
-      "dbrole": "DBSub",
-      "raw": "104.156.46.17 den02wx051ccm01.wx051.webexcce.com den02wx051ccm01 Subscriber callmanager DBSub authenticated using TCP since Fri Mar 28 06:07:43 2025"
-    }
-  ],
-  "raw_output": null,
-  "raw_output_truncated": false
+  "job_id": "550e8400-...",
+  "status": "queued",
+  "created_at": "2025-12-26T10:00:00Z"
 }
 ```
 
-**No Nodes Found (200 with empty list):**
+**GET /jobs/{job_id}** - Get job status
 
-If parsing returns zero nodes, the response includes raw output for debugging:
+**GET /jobs/{job_id}/artifacts** - List collected files
 
-```json
-{
-  "nodes": [],
-  "raw_output": "admin:show network cluster\n[command output here]",
-  "raw_output_truncated": false
-}
-```
+**GET /jobs** - List recent jobs
 
-**Error Responses:**
+## Usage Examples
 
-- **401 Unauthorized**: Authentication failed
-  ```json
-  {
-    "error": "AUTH_FAILED",
-    "message": "Authentication failed. Please check username and password."
-  }
-  ```
-
-- **502 Bad Gateway**: Network error (host unreachable, connection refused)
-  ```json
-  {
-    "error": "NETWORK_ERROR",
-    "message": "Cannot connect to 10.10.10.10:22. Please check host is reachable and SSH is available."
-  }
-  ```
-
-- **504 Gateway Timeout**: Connection or command timeout
-  ```json
-  {
-    "error": "CONNECT_TIMEOUT",
-    "message": "Connection timeout to 10.10.10.10:22"
-  }
-  ```
-
-- **500 Internal Server Error**: Unexpected error
-  ```json
-  {
-    "error": "INTERNAL_ERROR",
-    "message": "An unexpected error occurred during node discovery"
-  }
-  ```
-
-## Manual Testing with Real CUCM
-
-### Prerequisites
-
-1. CUCM Publisher reachable on TCP port 22
-2. Valid OS Admin CLI credentials
-3. Service running locally (see "Running the Service")
-
-### Test Steps
-
-#### 1. Test with curl
+### Example 1: Basic Log Collection
 
 ```bash
+# 1. Discover nodes
 curl -X POST http://localhost:8000/discover-nodes \
   -H "Content-Type: application/json" \
+  -d '{"publisher_host": "10.10.10.10", "port": 22, "username": "admin", "password": "pass"}'
+
+# 2. List profiles
+curl http://localhost:8000/profiles
+
+# 3. Create job
+JOB_ID=$(curl -X POST http://localhost:8000/jobs \
+  -H "Content-Type: application/json" \
   -d '{
-    "publisher_host": "your-cucm-ip",
+    "publisher_host": "10.10.10.10",
     "port": 22,
     "username": "admin",
-    "password": "your-password",
-    "connect_timeout_sec": 30,
-    "command_timeout_sec": 120
+    "password": "pass",
+    "nodes": ["10.10.10.10"],
+    "profile": "basic_platform"
+  }' | jq -r '.job_id')
+
+# 4. Monitor status
+watch -n 5 "curl -s http://localhost:8000/jobs/$JOB_ID | jq '.status'"
+
+# 5. Get artifacts
+curl http://localhost:8000/jobs/$JOB_ID/artifacts | jq
+```
+
+### Example 2: Custom Time Window
+
+Collect last 4 hours of CallManager logs:
+
+```bash
+curl -X POST http://localhost:8000/jobs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "publisher_host": "10.10.10.10",
+    "port": 22,
+    "username": "admin",
+    "password": "pass",
+    "nodes": ["10.10.10.10", "10.10.10.11"],
+    "profile": "callmanager_full",
+    "options": {
+      "reltime_minutes": 240
+    }
   }'
 ```
 
-#### 2. Test with Python requests
+## Profiles
 
-```python
-import requests
-import json
+Profiles defined in `profiles.yaml`:
 
-response = requests.post(
-    "http://localhost:8000/discover-nodes",
-    json={
-        "publisher_host": "your-cucm-ip",
-        "port": 22,
-        "username": "admin",
-        "password": "your-password",
-        "connect_timeout_sec": 30,
-        "command_timeout_sec": 120
-    }
-)
+| Profile | Description | Use Case |
+|---------|-------------|----------|
+| `basic_platform` | Syslog, install logs | Basic troubleshooting |
+| `callmanager_full` | All CM trace logs | Call processing issues |
+| `callmanager_sdl` | SDL logs only | Signaling issues |
+| `tomcat_logs` | Tomcat logs | Web interface issues |
+| `database_logs` | DB diagnostics | Database problems |
+| `cups_logs` | CUPS/Presence | Presence issues |
+| `emergency_debug` | All logs (30 min) | Emergency troubleshooting |
+| `security_audit` | Audit logs (24h) | Security review |
 
-print(f"Status: {response.status_code}")
-print(json.dumps(response.json(), indent=2))
+### Custom Profiles
+
+Edit `profiles.yaml`:
+
+```yaml
+profiles:
+  - name: my_profile
+    description: "Custom collection"
+    paths:
+      - "cm/trace/ccm"
+      - "platform/log/syslog"
+    reltime_minutes: 120
+    compress: true
+    recurs: true
+    match: null
 ```
 
-#### 3. Test with httpie
+## How It Works
+
+### Log Collection Flow
+
+1. User creates job via `POST /jobs`
+2. Job queued and executed in background
+3. For each node:
+   - SSH connect
+   - Run `file get activelog` for each path
+   - Auto-respond to SFTP prompts
+   - CUCM pushes files to SFTP server
+   - Capture transcript
+4. Discover artifacts in SFTP directory
+5. Update job status
+
+### Interactive Prompt Handling
+
+```
+admin:file get activelog platform/log/syslog reltime 60 compress
+SFTP host: <auto: sftp.example.com>
+SFTP port: <auto: 22>
+User: <auto: cucm-collector>
+Password: <auto: ***>
+Directory: <auto: /cucm-logs/job-id/node>
+Transfer complete.
+admin:
+```
+
+The `PromptResponder` detects and responds to these prompts automatically.
+
+## Storage Structure
+
+```
+storage/
+├── jobs/{job-id}.json          # Job metadata
+├── transcripts/{job-id}/
+│   └── {node}.log              # Session transcript
+└── received/{job-id}/{node}/   # Collected artifacts
+    └── *.tgz
+```
+
+## Testing
 
 ```bash
-http POST http://localhost:8000/discover-nodes \
-  publisher_host="your-cucm-ip" \
-  port:=22 \
-  username="admin" \
-  password="your-password" \
-  connect_timeout_sec:=30 \
-  command_timeout_sec:=120
+# Unit tests
+pytest -v
+
+# With coverage
+pytest --cov=app
+
+# Specific modules
+pytest tests/test_profiles.py -v
+pytest tests/test_prompt_responder.py -v
 ```
-
-### Expected Results
-
-✅ **Successful Discovery:**
-- HTTP 200 response
-- `nodes` array contains all cluster nodes (Publisher + Subscribers)
-- Each node has: ip, fqdn, host, role, product, dbrole
-
-❌ **Common Issues:**
-
-| Issue | Likely Cause | Status Code |
-|-------|-------------|-------------|
-| Authentication failure | Wrong credentials | 401 |
-| Connection timeout | CUCM unreachable, firewall blocking | 504 |
-| Connection refused | SSH not running, wrong port | 502 |
-| Command timeout | CLI hung or very slow response | 504 |
-| No nodes parsed | Unexpected output format | 200 (with raw_output) |
-
-## Debug Mode
-
-If nodes are not being parsed correctly, check the logs:
-
-```bash
-# The service logs command execution
-# Look for lines like:
-# INFO - Discovered X nodes
-# WARNING - No nodes parsed from output. Including raw output in response.
-```
-
-When `nodes` is empty, the response automatically includes `raw_output` (truncated to 40KB) to help diagnose parsing issues.
-
-## Security Notes
-
-⚠️ **Important Security Considerations:**
-
-1. **Credentials**: Never log passwords. The service is designed to NOT log the password parameter.
-2. **Known Hosts**: Currently set to `known_hosts=None` for lab environments. In production, implement proper host key verification.
-3. **HTTPS**: Use HTTPS/TLS when deploying to production.
-4. **Secrets Management**: Use environment variables or secret management systems for credentials.
-
-## What's NOT in MVP v0.1
-
-This MVP focuses on node discovery only. Future versions will include:
-
-- ❌ Log file collection (`file get` commands)
-- ❌ Job scheduling and management
-- ❌ Collection profiles/templates
-- ❌ Persistent storage (database)
-- ❌ Authentication/authorization for API
-- ❌ Multi-cluster management
-
-## CUCM CLI Details
-
-### Interactive Shell Requirement
-
-CUCM OS Admin CLI is **prompt-driven** and may hang with `exec_command()`. This service uses:
-- ✅ Interactive shell sessions (`open_session()`)
-- ✅ PTY (pseudo-terminal) allocation
-- ✅ Explicit prompt detection (`admin:`)
-- ✅ Robust timeout handling
-
-### Command Output Format
-
-The `show network cluster` command returns:
-
-```
-admin:show network cluster
-[IP] [FQDN] [HOST] [ROLE] [PRODUCT] [DBROLE] [additional info...]
-[IP] [FQDN] [HOST] [ROLE] [PRODUCT] [DBROLE] [additional info...]
-...
-
-Server Table (processnode) Entries
-----------------------------------
-[additional sections...]
-```
-
-The parser:
-- Parses lines before "Server Table" section
-- Extracts: IP, FQDN, hostname, role (Publisher/Subscriber), product, DB role
-- Deduplicates by IP address
-- Validates IP format and role values
 
 ## Troubleshooting
 
-### "Connection timeout" errors
+### No Artifacts Collected
 
-- Verify CUCM is reachable: `ping <cucm-ip>`
-- Check SSH port: `telnet <cucm-ip> 22` or `nc -zv <cucm-ip> 22`
-- Increase `connect_timeout_sec` in request
+1. Check SFTP server is running and reachable from CUCM
+2. Verify SFTP credentials in `.env`
+3. Review transcript: `cat storage/transcripts/{job-id}/{node}.log`
+4. Check for SFTP errors in transcript
 
-### "Authentication failed" errors
+### Job Timeout
 
-- Verify OS Admin username/password
-- Try SSH manually: `ssh admin@<cucm-ip>`
-- Check account is not locked
-
-### "Command timeout" errors
-
-- CUCM CLI may be slow on large clusters
-- Increase `command_timeout_sec` in request
+- Increase `JOB_COMMAND_TIMEOUT_SEC` in `.env`
+- Reduce `reltime_minutes` (less data)
 - Check CUCM system load
 
-### No nodes parsed (empty array)
+### Network Errors
 
-- Check `raw_output` in response
-- Verify CUCM version compatibility
-- Check if output format has changed
-- Review parser logic in `app/parsers.py`
+- Verify node reachable: `ping {node}`
+- Check SSH: `ssh admin@{node}`
+- Review firewall rules
 
-## Development
+## Configuration
 
-### Project Structure
+Key environment variables:
 
+```bash
+# SFTP (where CUCM pushes logs)
+SFTP_HOST=sftp.example.com
+SFTP_PORT=22
+SFTP_USERNAME=cucm-collector
+SFTP_PASSWORD=secret
+SFTP_REMOTE_BASE_DIR=/cucm-logs
+
+# Storage
+STORAGE_ROOT=./storage
+
+# Job Settings
+MAX_CONCURRENCY_PER_JOB=2
+JOB_COMMAND_TIMEOUT_SEC=600
 ```
-cisco/
-├── app/
-│   ├── __init__.py
-│   ├── main.py          # FastAPI app & endpoints
-│   ├── models.py        # Pydantic models
-│   ├── parsers.py       # Output parsers
-│   └── ssh_client.py    # AsyncSSH client
-├── tests/
-│   ├── __init__.py
-│   └── test_parser.py   # Parser unit tests
-├── requirements.txt
-└── README.md
-```
 
-### Adding New Features
+See `.env.example` for all options.
 
-1. Create feature branch
-2. Add tests first (TDD)
-3. Implement feature
-4. Update documentation
-5. Submit PR
+## Security
 
-## License
+- ✅ Passwords never logged or persisted
+- ✅ AsyncSSH logging reduced to WARNING
+- ✅ SFTP credentials from environment only
+- ⚠️ Use HTTPS in production
+- ⚠️ Secure SFTP server access
+- ⚠️ Protect `storage/` directory
 
-[Your License Here]
+## What's Next
 
-## Support
-
-For issues and questions:
-- Open an issue on GitHub
-- Check CUCM documentation
-- Review application logs
+- Web UI for job management
+- Scheduled jobs
+- Log parsing and analysis
+- API authentication
+- Multi-cluster support
 
 ---
 
-**Version**: 0.1.0
-**Last Updated**: 2025-12-26
+**Version**: 0.2.0
+**Full Documentation**: See README.md
+**API Docs**: http://localhost:8000/docs

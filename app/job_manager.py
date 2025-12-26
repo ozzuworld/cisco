@@ -1,0 +1,471 @@
+"""Job management and execution for CUCM log collection"""
+
+import asyncio
+import json
+import logging
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+import asyncssh
+
+from app.config import get_settings
+from app.models import (
+    JobStatus,
+    NodeStatus,
+    NodeJobStatus,
+    Artifact,
+    CreateJobRequest,
+    CollectionOptions
+)
+from app.profiles import CollectionProfile, get_profile_catalog
+from app.prompt_responder import PromptResponder, build_file_get_command
+from app.ssh_client import CUCMSSHClient, CUCMSSHClientError
+
+
+logger = logging.getLogger(__name__)
+
+
+class Job:
+    """
+    Represents a log collection job with full state management.
+
+    Handles persistence to disk as JSON and tracks status of all nodes.
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        publisher_host: str,
+        port: int,
+        username: str,
+        password: str,  # Never persisted or logged
+        nodes: List[str],
+        profile: CollectionProfile,
+        options: Optional[CollectionOptions] = None,
+    ):
+        """
+        Initialize a new job.
+
+        Args:
+            job_id: Unique job identifier
+            publisher_host: CUCM publisher host
+            port: SSH port
+            username: OS Admin username
+            password: OS Admin password (not persisted)
+            nodes: List of nodes to collect from
+            profile: Collection profile
+            options: Optional overrides for profile defaults
+        """
+        self.job_id = job_id
+        self.publisher_host = publisher_host
+        self.port = port
+        self.username = username
+        self.password = password  # NEVER persist this
+        self.nodes_list = nodes
+        self.profile = profile
+        self.options = options or CollectionOptions()
+
+        # Job state
+        self.status = JobStatus.QUEUED
+        self.created_at = datetime.utcnow()
+        self.started_at: Optional[datetime] = None
+        self.completed_at: Optional[datetime] = None
+
+        # Node states
+        self.node_statuses: Dict[str, NodeJobStatus] = {}
+        for node in nodes:
+            self.node_statuses[node] = NodeJobStatus(
+                node=node,
+                status=NodeStatus.PENDING
+            )
+
+    def to_dict(self) -> dict:
+        """
+        Convert job to dictionary (for JSON serialization).
+
+        Does NOT include password.
+
+        Returns:
+            Dictionary representation of job
+        """
+        return {
+            "job_id": self.job_id,
+            "publisher_host": self.publisher_host,
+            "port": self.port,
+            "username": self.username,
+            # password is intentionally excluded
+            "nodes": self.nodes_list,
+            "profile": self.profile.name,
+            "status": self.status.value,
+            "created_at": self.created_at.isoformat(),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "node_statuses": {
+                node: status.model_dump()
+                for node, status in self.node_statuses.items()
+            }
+        }
+
+    def save(self):
+        """Persist job state to disk"""
+        settings = get_settings()
+        job_file = settings.jobs_dir / f"{self.job_id}.json"
+
+        try:
+            with open(job_file, 'w') as f:
+                json.dump(self.to_dict(), f, indent=2)
+            logger.debug(f"Saved job {self.job_id} to {job_file}")
+        except Exception as e:
+            logger.error(f"Failed to save job {self.job_id}: {e}")
+
+    def update_status(self, new_status: JobStatus):
+        """Update job status and save"""
+        self.status = new_status
+        if new_status == JobStatus.RUNNING and not self.started_at:
+            self.started_at = datetime.utcnow()
+        elif new_status in [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.PARTIAL]:
+            self.completed_at = datetime.utcnow()
+        self.save()
+
+    def update_node_status(self, node: str, status: NodeStatus, error: Optional[str] = None):
+        """Update status for a specific node"""
+        if node in self.node_statuses:
+            self.node_statuses[node].status = status
+            if error:
+                self.node_statuses[node].error = error
+            if status == NodeStatus.RUNNING:
+                self.node_statuses[node].started_at = datetime.utcnow()
+            elif status in [NodeStatus.SUCCEEDED, NodeStatus.FAILED]:
+                self.node_statuses[node].completed_at = datetime.utcnow()
+            self.save()
+
+
+class JobManager:
+    """
+    Manages job lifecycle: creation, execution, status tracking.
+
+    Singleton pattern - one instance per application.
+    """
+
+    def __init__(self):
+        """Initialize job manager"""
+        self.jobs: Dict[str, Job] = {}
+        self.settings = get_settings()
+        self._load_existing_jobs()
+
+    def _load_existing_jobs(self):
+        """Load existing jobs from disk on startup"""
+        jobs_dir = self.settings.jobs_dir
+        if not jobs_dir.exists():
+            return
+
+        for job_file in jobs_dir.glob("*.json"):
+            try:
+                with open(job_file, 'r') as f:
+                    data = json.load(f)
+
+                # Reconstruct job (without password - can't execute, just status tracking)
+                job_id = data["job_id"]
+                # For now, we just track the data
+                logger.info(f"Loaded existing job {job_id}")
+            except Exception as e:
+                logger.error(f"Error loading job from {job_file}: {e}")
+
+    def create_job(self, request: CreateJobRequest) -> Job:
+        """
+        Create a new log collection job.
+
+        Args:
+            request: Job creation request
+
+        Returns:
+            Created Job instance
+
+        Raises:
+            ValueError: If profile not found
+        """
+        # Get profile
+        catalog = get_profile_catalog()
+        profile = catalog.get_profile(request.profile)
+        if not profile:
+            raise ValueError(f"Profile not found: {request.profile}")
+
+        # Generate job ID
+        job_id = str(uuid.uuid4())
+
+        # Create job
+        job = Job(
+            job_id=job_id,
+            publisher_host=request.publisher_host,
+            port=request.port,
+            username=request.username,
+            password=request.password,
+            nodes=request.nodes,
+            profile=profile,
+            options=request.options
+        )
+
+        # Save to disk
+        job.save()
+
+        # Store in memory
+        self.jobs[job_id] = job
+
+        logger.info(f"Created job {job_id} with profile {profile.name} for {len(request.nodes)} nodes")
+
+        return job
+
+    def get_job(self, job_id: str) -> Optional[Job]:
+        """
+        Get a job by ID.
+
+        Args:
+            job_id: Job identifier
+
+        Returns:
+            Job if found, None otherwise
+        """
+        # Check memory first
+        if job_id in self.jobs:
+            return self.jobs[job_id]
+
+        # Try loading from disk
+        job_file = self.settings.jobs_dir / f"{job_id}.json"
+        if job_file.exists():
+            try:
+                with open(job_file, 'r') as f:
+                    data = json.load(f)
+                # Note: We can't fully reconstruct the job without the password
+                # For now, return None and let the caller handle it
+                logger.warning(f"Job {job_id} exists on disk but not in memory (no password)")
+            except Exception as e:
+                logger.error(f"Error loading job {job_id}: {e}")
+
+        return None
+
+    def list_jobs(self, limit: int = 20) -> List[Job]:
+        """
+        List recent jobs.
+
+        Args:
+            limit: Maximum number of jobs to return
+
+        Returns:
+            List of recent jobs
+        """
+        # For now, just return from memory
+        # In production, you'd want to sort by created_at
+        jobs = list(self.jobs.values())
+        jobs.sort(key=lambda j: j.created_at, reverse=True)
+        return jobs[:limit]
+
+    async def execute_job(self, job_id: str):
+        """
+        Execute a job asynchronously.
+
+        Args:
+            job_id: Job to execute
+        """
+        job = self.get_job(job_id)
+        if not job:
+            logger.error(f"Job not found: {job_id}")
+            return
+
+        logger.info(f"Starting execution of job {job_id}")
+        job.update_status(JobStatus.RUNNING)
+
+        try:
+            # Process nodes with concurrency limit
+            semaphore = asyncio.Semaphore(self.settings.max_concurrency_per_job)
+
+            async def process_with_semaphore(node):
+                async with semaphore:
+                    await self._process_node(job, node)
+
+            # Process all nodes
+            await asyncio.gather(
+                *[process_with_semaphore(node) for node in job.nodes_list],
+                return_exceptions=True
+            )
+
+            # Determine final job status
+            node_statuses = [ns.status for ns in job.node_statuses.values()]
+            if all(s == NodeStatus.SUCCEEDED for s in node_statuses):
+                job.update_status(JobStatus.SUCCEEDED)
+            elif all(s == NodeStatus.FAILED for s in node_statuses):
+                job.update_status(JobStatus.FAILED)
+            else:
+                job.update_status(JobStatus.PARTIAL)
+
+            logger.info(f"Job {job_id} completed with status {job.status}")
+
+        except Exception as e:
+            logger.exception(f"Unexpected error in job {job_id}: {e}")
+            job.update_status(JobStatus.FAILED)
+
+    async def _process_node(self, job: Job, node: str):
+        """
+        Process log collection for a single node.
+
+        Args:
+            job: Parent job
+            node: Node to process
+        """
+        logger.info(f"[Job {job.job_id}] Processing node: {node}")
+        job.update_node_status(node, NodeStatus.RUNNING)
+
+        # Prepare transcript file
+        transcript_path = self.settings.transcripts_dir / job.job_id / f"{node}.log"
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
+
+        transcript_lines = []
+
+        try:
+            # Prepare SFTP directory for this node
+            sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}"
+
+            # Connect to CUCM
+            async with CUCMSSHClient(
+                host=node,
+                port=job.port,
+                username=job.username,
+                password=job.password,
+                connect_timeout=float(self.settings.job_connect_timeout_sec)
+            ) as client:
+
+                transcript_lines.append(f"Connected to {node}\n")
+
+                # Process each path in the profile
+                for path in job.profile.paths:
+                    # Determine options (use overrides if provided)
+                    reltime = job.options.reltime_minutes or job.profile.reltime_minutes
+                    compress = job.options.compress if job.options.compress is not None else job.profile.compress
+                    recurs = job.options.recurs if job.options.recurs is not None else job.profile.recurs
+                    match = job.options.match or job.profile.match
+
+                    # Build command
+                    command = build_file_get_command(
+                        path=path,
+                        reltime_minutes=reltime,
+                        compress=compress,
+                        recurs=recurs,
+                        match=match
+                    )
+
+                    transcript_lines.append(f"\n{'='*60}\n")
+                    transcript_lines.append(f"Collecting: {path}\n")
+                    transcript_lines.append(f"Command: {command}\n")
+                    transcript_lines.append(f"{'='*60}\n\n")
+
+                    logger.info(f"[Job {job.job_id}][{node}] Executing: {command}")
+
+                    # Get stdin/stdout from the session
+                    if not client._session:
+                        raise CUCMSSHClientError("No active session")
+
+                    # Send command
+                    client._session.stdin.write(command + '\n')
+                    await client._session.stdin.drain()
+
+                    # Create prompt responder
+                    responder = PromptResponder(
+                        sftp_host=self.settings.sftp_host,
+                        sftp_port=self.settings.sftp_port,
+                        sftp_username=self.settings.sftp_username,
+                        sftp_password=self.settings.sftp_password,
+                        sftp_directory=sftp_directory
+                    )
+
+                    # Respond to prompts
+                    output = await responder.respond_to_prompts(
+                        stdin=client._session.stdin,
+                        stdout=client._session.stdout,
+                        timeout=float(self.settings.job_command_timeout_sec),
+                        prompt=client.prompt
+                    )
+
+                    transcript_lines.append(output)
+                    transcript_lines.append("\n")
+
+            # Write transcript
+            with open(transcript_path, 'w') as f:
+                f.writelines(transcript_lines)
+
+            # Update node status with transcript path
+            rel_transcript_path = str(transcript_path.relative_to(self.settings.storage_root))
+            job.node_statuses[node].transcript_path = rel_transcript_path
+
+            # Discover artifacts
+            artifacts = self._discover_artifacts(job.job_id, node)
+            job.node_statuses[node].artifacts = artifacts
+
+            # Mark as succeeded
+            job.update_node_status(node, NodeStatus.SUCCEEDED)
+            logger.info(f"[Job {job.job_id}][{node}] Completed successfully - {len(artifacts)} artifacts collected")
+
+        except Exception as e:
+            logger.error(f"[Job {job.job_id}][{node}] Failed: {e}")
+            error_msg = f"{type(e).__name__}: {str(e)}"
+
+            # Write error to transcript
+            transcript_lines.append(f"\n\nERROR: {error_msg}\n")
+            with open(transcript_path, 'w') as f:
+                f.writelines(transcript_lines)
+
+            job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+
+    def _discover_artifacts(self, job_id: str, node: str) -> List[Artifact]:
+        """
+        Discover artifacts that were collected for a node.
+
+        Args:
+            job_id: Job identifier
+            node: Node name
+
+        Returns:
+            List of discovered artifacts
+        """
+        artifacts = []
+        artifact_dir = self.settings.artifacts_dir / job_id / node
+
+        if not artifact_dir.exists():
+            logger.warning(f"Artifact directory not found: {artifact_dir}")
+            return artifacts
+
+        try:
+            for file_path in artifact_dir.rglob("*"):
+                if file_path.is_file():
+                    stat = file_path.stat()
+                    artifact = Artifact(
+                        node=node,
+                        path=str(file_path),
+                        filename=file_path.name,
+                        size_bytes=stat.st_size,
+                        created_at=datetime.fromtimestamp(stat.st_mtime)
+                    )
+                    artifacts.append(artifact)
+
+            logger.info(f"Discovered {len(artifacts)} artifacts for job {job_id}, node {node}")
+
+        except Exception as e:
+            logger.error(f"Error discovering artifacts: {e}")
+
+        return artifacts
+
+
+# Global job manager instance
+_job_manager: Optional[JobManager] = None
+
+
+def get_job_manager() -> JobManager:
+    """
+    Get or create the global job manager instance.
+
+    Returns:
+        JobManager instance
+    """
+    global _job_manager
+    if _job_manager is None:
+        _job_manager = JobManager()
+    return _job_manager
