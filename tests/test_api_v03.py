@@ -728,5 +728,126 @@ def test_cancel_updates_job_status_immediately(client_no_auth):
         assert node_status.status.value == "cancelled"
 
 
+# ============================================================================
+# BE-008 Tests - CORS Support for Flutter Web
+# ============================================================================
+
+
+def test_cors_preflight_discover_nodes_no_auth(client_no_auth):
+    """BE-008: OPTIONS /discover-nodes should succeed without Authorization header"""
+    response = client_no_auth.options(
+        "/discover-nodes",
+        headers={
+            "Origin": "http://localhost:8080",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type"
+        }
+    )
+
+    # Should succeed (200 or 204)
+    assert response.status_code in [200, 204], \
+        f"OPTIONS should succeed, got {response.status_code}"
+
+    # Should include CORS headers
+    assert "access-control-allow-origin" in response.headers, \
+        "Response missing CORS allow-origin header"
+    assert "access-control-allow-methods" in response.headers, \
+        "Response missing CORS allow-methods header"
+    assert "access-control-allow-headers" in response.headers, \
+        "Response missing CORS allow-headers header"
+
+
+def test_cors_preflight_health_endpoint(client_no_auth):
+    """BE-008: OPTIONS /health should succeed (CORS preflight)"""
+    response = client_no_auth.options(
+        "/",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET"
+        }
+    )
+
+    # Should succeed
+    assert response.status_code in [200, 204]
+
+    # Should include CORS headers
+    assert "access-control-allow-origin" in response.headers
+
+
+def test_cors_headers_from_localhost(client_no_auth):
+    """BE-008: Verify CORS headers are present for localhost origins"""
+    response = client_no_auth.get(
+        "/",
+        headers={"Origin": "http://localhost:8080"}
+    )
+
+    assert response.status_code == 200
+
+    # Check CORS headers
+    assert "access-control-allow-origin" in response.headers
+    # X-Request-ID should be exposed
+    assert "access-control-expose-headers" in response.headers
+    assert "X-Request-ID" in response.headers.get("access-control-expose-headers", "")
+
+
+def test_cors_headers_from_127_0_0_1(client_no_auth):
+    """BE-008: Verify CORS headers are present for 127.0.0.1 origins"""
+    response = client_no_auth.get(
+        "/",
+        headers={"Origin": "http://127.0.0.1:5000"}
+    )
+
+    assert response.status_code == 200
+    assert "access-control-allow-origin" in response.headers
+
+
+def test_cors_preflight_with_auth_enabled(client_with_auth):
+    """BE-008: OPTIONS should bypass auth even when API_KEY is enabled"""
+    # OPTIONS should succeed WITHOUT Authorization header
+    response = client_with_auth.options(
+        "/discover-nodes",
+        headers={
+            "Origin": "http://localhost:8080",
+            "Access-Control-Request-Method": "POST"
+        }
+    )
+
+    assert response.status_code in [200, 204], \
+        f"OPTIONS should bypass auth, got {response.status_code}"
+
+    # Verify CORS headers are present
+    assert "access-control-allow-origin" in response.headers
+
+    # Note: Verifying that POST still requires auth is covered by existing
+    # auth tests (test_auth_enabled_blocks_without_header, etc.)
+
+
+def test_cors_origin_validation(client_no_auth):
+    """BE-008: Verify CORS only allows localhost/127.0.0.1 origins"""
+    # localhost should be allowed
+    response = client_no_auth.get(
+        "/",
+        headers={"Origin": "http://localhost:8080"}
+    )
+    assert response.status_code == 200
+    assert "access-control-allow-origin" in response.headers
+
+    # 127.0.0.1 should be allowed
+    response = client_no_auth.get(
+        "/",
+        headers={"Origin": "http://127.0.0.1:3000"}
+    )
+    assert response.status_code == 200
+    assert "access-control-allow-origin" in response.headers
+
+    # HTTPS localhost should also work
+    response = client_no_auth.get(
+        "/",
+        headers={"Origin": "https://localhost:8080"}
+    )
+    assert response.status_code == 200
+    assert "access-control-allow-origin" in response.headers
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

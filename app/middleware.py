@@ -72,6 +72,10 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in ["/", "/health", "/docs", "/redoc", "/openapi.json"]:
             return await call_next(request)
 
+        # Skip auth for OPTIONS (CORS preflight) requests (BE-008)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         if self.auth_enabled:
             # Get request_id from request state (set by RequestIDMiddleware)
             # If missing (race condition), generate one defensively (v0.3.1)

@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import ValidationError
 
@@ -57,7 +58,16 @@ app = FastAPI(
 )
 
 # Wire up middleware (v0.3)
-app.add_middleware(RequestIDMiddleware)  # Must be first - adds request_id
+# CORS middleware must be first (BE-008: Flutter Web support)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",  # Support localhost and 127.0.0.1 with any port
+    allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
+    allow_headers=["*"],  # Allow all headers (including Authorization)
+    expose_headers=["X-Request-ID"],  # Expose request ID to browser
+    allow_credentials=True  # Allow cookies/auth headers
+)
+app.add_middleware(RequestIDMiddleware)  # Adds request_id
 app.add_middleware(APIKeyAuthMiddleware)  # Auth (if API_KEY env set)
 
 
