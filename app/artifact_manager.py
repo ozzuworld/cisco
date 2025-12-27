@@ -2,6 +2,8 @@
 
 import hashlib
 import logging
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional, List
 from datetime import datetime
@@ -155,3 +157,59 @@ def list_artifacts_for_job(job_id: str) -> List[Artifact]:
                 continue
 
     return artifacts
+
+
+def create_zip_archive(artifacts: List[Artifact], zip_name: str) -> Path:
+    """
+    Create a zip archive containing specified artifacts.
+
+    Creates a temporary zip file that should be deleted after serving.
+
+    Args:
+        artifacts: List of artifacts to include in zip
+        zip_name: Base name for the zip file (without extension)
+
+    Returns:
+        Path to temporary zip file
+
+    Raises:
+        FileNotFoundError: If artifact file doesn't exist
+        Exception: If zip creation fails
+    """
+    settings = get_settings()
+
+    # Create temporary zip file
+    # Use delete=False so we can return the path and delete after serving
+    temp_fd, temp_path = tempfile.mkstemp(suffix='.zip', prefix=f'{zip_name}_')
+    temp_zip_path = Path(temp_path)
+
+    try:
+        # Close the file descriptor, we'll use the path with zipfile
+        import os
+        os.close(temp_fd)
+
+        # Create zip file
+        with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for artifact in artifacts:
+                # Get full path to artifact
+                artifact_path = settings.storage_root / artifact.path
+
+                if not artifact_path.exists():
+                    logger.warning(f"Artifact not found, skipping: {artifact_path}")
+                    continue
+
+                # Add to zip with a clean archive name
+                # Format: node/filename (preserves node organization)
+                archive_name = f"{artifact.node}/{artifact.filename}"
+                zipf.write(artifact_path, arcname=archive_name)
+                logger.debug(f"Added to zip: {archive_name}")
+
+        logger.info(f"Created zip archive with {len(artifacts)} artifacts: {temp_zip_path}")
+        return temp_zip_path
+
+    except Exception as e:
+        # Clean up temp file on error
+        if temp_zip_path.exists():
+            temp_zip_path.unlink()
+        logger.error(f"Failed to create zip archive: {e}")
+        raise

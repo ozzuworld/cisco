@@ -38,7 +38,7 @@ from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
 from app.job_manager import get_job_manager
 from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
-from app.artifact_manager import get_artifact_path, get_transcript_path  # v0.3
+from app.artifact_manager import get_artifact_path, get_transcript_path, create_zip_archive  # v0.3, BE-017
 from app.config import get_settings  # BE-012
 
 
@@ -630,6 +630,179 @@ async def download_artifact(artifact_id: str, request: Request):
         filename=file_path.name,
         media_type="application/octet-stream"
     )
+
+
+@app.get(
+    "/jobs/{job_id}/nodes/{node_ip}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Zip file containing all artifacts for this node"},
+        404: {
+            "description": "Job or node not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_node_artifacts(job_id: str, node_ip: str, request: Request):
+    """
+    Download all artifacts for a specific node as a zip file (BE-017).
+
+    Args:
+        job_id: Job identifier
+        node_ip: Node IP or hostname
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with zip file containing all node artifacts
+
+    Raises:
+        HTTPException: If job or node not found, or no artifacts available
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Node artifacts download request: job={job_id}, node={node_ip} (request_id={request_id})")
+
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        logger.warning(f"Job {job_id} not found for node download (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    # Find node status
+    node_status = job.node_statuses.get(node_ip)
+    if not node_status:
+        logger.warning(f"Node {node_ip} not found in job {job_id} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "NODE_NOT_FOUND",
+                "message": f"Node {node_ip} not found in job {job_id}",
+                "request_id": request_id
+            }
+        )
+
+    # Get artifacts for this node
+    artifacts = node_status.artifacts
+    if not artifacts:
+        logger.warning(f"No artifacts found for node {node_ip} in job {job_id} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "NO_ARTIFACTS",
+                "message": f"No artifacts available for node {node_ip}",
+                "request_id": request_id
+            }
+        )
+
+    # Create zip archive
+    try:
+        zip_path = create_zip_archive(artifacts, f"job_{job_id}_node_{node_ip}")
+
+        # Return zip file and clean up after
+        return FileResponse(
+            zip_path,
+            filename=f"job_{job_id}_node_{node_ip}.zip",
+            media_type="application/zip",
+            background=lambda: zip_path.unlink()  # Clean up temp file after serving
+        )
+    except Exception as e:
+        logger.error(f"Failed to create zip for node {node_ip}: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "ZIP_CREATION_FAILED",
+                "message": "Failed to create zip archive",
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/jobs/{job_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Zip file containing all artifacts for all nodes"},
+        404: {
+            "description": "Job not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_job_artifacts(job_id: str, request: Request):
+    """
+    Download all artifacts for all nodes in a job as a zip file (BE-017).
+
+    Args:
+        job_id: Job identifier
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with zip file containing all job artifacts
+
+    Raises:
+        HTTPException: If job not found or no artifacts available
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Job artifacts download request: job={job_id} (request_id={request_id})")
+
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        logger.warning(f"Job {job_id} not found for download (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    # Collect all artifacts from all nodes
+    all_artifacts = []
+    for node_status in job.node_statuses.values():
+        all_artifacts.extend(node_status.artifacts)
+
+    if not all_artifacts:
+        logger.warning(f"No artifacts found for job {job_id} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "NO_ARTIFACTS",
+                "message": f"No artifacts available for job {job_id}",
+                "request_id": request_id
+            }
+        )
+
+    # Create zip archive
+    try:
+        zip_path = create_zip_archive(all_artifacts, f"job_{job_id}")
+
+        # Return zip file and clean up after
+        return FileResponse(
+            zip_path,
+            filename=f"job_{job_id}.zip",
+            media_type="application/zip",
+            background=lambda: zip_path.unlink()  # Clean up temp file after serving
+        )
+    except Exception as e:
+        logger.error(f"Failed to create zip for job {job_id}: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "ZIP_CREATION_FAILED",
+                "message": "Failed to create zip archive",
+                "request_id": request_id
+            }
+        )
 
 
 @app.post(
