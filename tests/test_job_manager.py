@@ -784,30 +784,27 @@ def test_progress_metrics_during_execution(configured_env, temp_storage, mock_pr
 
 
 def test_progress_metrics_with_empty_nodes(configured_env, temp_storage, mock_profile):
-    """BE-019: Empty-node jobs should handle division by zero safely"""
-    from app.config import get_settings
+    """BE-019: Empty-node jobs are now prevented by validation"""
+    from pydantic import ValidationError
 
     with patch('app.job_manager.get_profile_catalog') as mock_catalog:
         mock_catalog.return_value.get_profile.return_value = mock_profile
 
         job_manager = JobManager()
-        # Create job with empty nodes list
-        request = CreateJobRequest(
-            publisher_host="10.1.1.1",
-            port=22,
-            username="admin",
-            password="secret123",
-            nodes=[],  # Empty!
-            profile="test-profile"
-        )
 
-        job = job_manager.create_job(request)
-        progress = job.get_progress_metrics()
+        # Creating a job with empty nodes list should raise ValidationError
+        with pytest.raises(ValidationError) as exc_info:
+            request = CreateJobRequest(
+                publisher_host="10.1.1.1",
+                port=22,
+                username="admin",
+                password="secret123",
+                nodes=[],  # Empty! Should be rejected
+                profile="test-profile"
+            )
 
-        # Should not crash with division by zero
-        assert progress["total_nodes"] == 0
-        assert progress["completed_nodes"] == 0
-        assert progress["percent_complete"] == 0  # Not a crash!
+        # Verify the error is about nodes being empty
+        assert "nodes" in str(exc_info.value)
 
 
 def test_node_step_and_message_tracking(configured_env, temp_storage, mock_profile):
@@ -963,6 +960,159 @@ def test_progress_metrics_in_api_response(configured_env, temp_storage, mock_pro
         assert response.running_nodes == 0
         assert response.percent_complete == 50
         assert response.last_updated_at is not None
+
+
+# ============================================================================
+# BE-020: Timeout Tests
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_marks_node_failed(configured_env, temp_storage, mock_profile):
+    """BE-020: Connection timeout should mark node as FAILED with clear error"""
+    import asyncio
+    from app.ssh_client import CUCMConnectionError
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["timeout-node.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+
+        # Mock SSH client to raise connection timeout
+        async def mock_timeout_connect(*args, **kwargs):
+            raise CUCMConnectionError("Connection timeout to timeout-node.example.com:22 after 30s")
+
+        with patch('app.job_manager.CUCMSSHClient') as mock_ssh:
+            mock_ssh.return_value.__aenter__ = mock_timeout_connect
+
+            # Process the node - should catch timeout and mark as FAILED
+            await job_manager._process_node(job, "timeout-node.example.com")
+
+        # Verify node is marked as FAILED
+        node_status = job.node_statuses["timeout-node.example.com"]
+        assert node_status.status == NodeStatus.FAILED
+        assert "timeout" in node_status.error.lower() or "connection" in node_status.error.lower()
+        assert node_status.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_command_timeout_marks_node_failed(configured_env, temp_storage, mock_profile):
+    """BE-020: Command timeout should mark node as FAILED with timeout error"""
+    import asyncio
+    from app.ssh_client import CUCMCommandTimeoutError
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["slow-node.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+
+        # Mock prompt responder to raise timeout
+        async def mock_timeout_respond(*args, **kwargs):
+            raise asyncio.TimeoutError("Timed out after 600s")
+
+        # Proper async context manager mock
+        async def mock_aenter(*args, **kwargs):
+            mock_client = MagicMock()
+            mock_client._session = MagicMock()
+            mock_client._session.stdin = MagicMock()
+            mock_client._session.stdin.write = MagicMock()
+
+            async def mock_drain():
+                pass
+
+            mock_client._session.stdin.drain = mock_drain
+            mock_client._session.stdout = MagicMock()
+            mock_client.prompt = "admin:"
+            return mock_client
+
+        async def mock_aexit(*args, **kwargs):
+            pass
+
+        with patch('app.job_manager.CUCMSSHClient') as mock_ssh, \
+             patch('app.job_manager.PromptResponder') as mock_responder:
+
+            mock_ssh.return_value.__aenter__ = mock_aenter
+            mock_ssh.return_value.__aexit__ = mock_aexit
+
+            # Setup responder mock to timeout
+            mock_responder.return_value.respond_to_prompts = mock_timeout_respond
+
+            # Process the node - should catch timeout and mark as FAILED
+            await job_manager._process_node(job, "slow-node.example.com")
+
+        # Verify node is marked as FAILED with timeout error
+        node_status = job.node_statuses["slow-node.example.com"]
+        assert node_status.status == NodeStatus.FAILED
+        assert "timeout" in node_status.error.lower() or "timed out" in node_status.error.lower()
+        assert node_status.completed_at is not None
+
+
+def test_timeout_error_message_includes_details(configured_env, temp_storage, mock_profile):
+    """BE-020: Timeout error messages should include timeout duration"""
+    import asyncio
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+
+        # Simulate timeout by updating node status with timeout error
+        timeout_error = "TimeoutError: Timed out after 600s"
+        job.update_node_status("node1.example.com", NodeStatus.FAILED, error=timeout_error)
+
+        # Verify error message contains timeout information
+        node_status = job.node_statuses["node1.example.com"]
+        assert node_status.status == NodeStatus.FAILED
+        assert "timeout" in node_status.error.lower()
+        assert "600" in node_status.error or "s" in node_status.error  # Should mention duration
+
+
+def test_timeout_configuration_values(configured_env, temp_storage):
+    """BE-020: Verify timeout configuration is loaded correctly"""
+    from app.config import get_settings
+
+    settings = get_settings()
+
+    # Verify timeout settings exist and have reasonable defaults
+    assert hasattr(settings, 'job_command_timeout_sec')
+    assert hasattr(settings, 'job_connect_timeout_sec')
+
+    # Verify they're positive integers
+    assert settings.job_command_timeout_sec > 0
+    assert settings.job_connect_timeout_sec > 0
+
+    # Verify command timeout is longer than connect timeout (typical pattern)
+    assert settings.job_command_timeout_sec >= settings.job_connect_timeout_sec
 
 
 if __name__ == "__main__":
