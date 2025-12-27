@@ -518,9 +518,12 @@ class JobManager:
                             await sftp.mkdir(current_path)
                             logger.debug(f"Created directory: {current_path}")
                         except asyncssh.sftp.SFTPFailure as e:
-                            # Directory might already exist - check if it's accessible
+                            # FIX: install-sftp.sh creates base 'incoming' dir - treat failures as "already exists"
+                            # Some SFTP servers return FX_FAILURE (code=4) instead of FX_FILE_ALREADY_EXISTS
                             if e.code == asyncssh.sftp.FX_FILE_ALREADY_EXISTS:
                                 logger.debug(f"Directory already exists: {current_path}")
+                            elif e.code == 4 and i == 0:  # FX_FAILURE on base dir = assume it exists
+                                logger.debug(f"Base directory exists (install-sftp.sh): {current_path}")
                             elif e.code == asyncssh.sftp.FX_PERMISSION_DENIED:
                                 error_msg = f"Permission denied creating {current_path} (SFTP user: {self.settings.sftp_username})"
                                 logger.error(error_msg)
