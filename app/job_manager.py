@@ -21,7 +21,7 @@ from app.models import (
     CollectionOptions
 )
 from app.profiles import CollectionProfile, get_profile_catalog
-from app.prompt_responder import PromptResponder, build_file_get_command
+from app.prompt_responder import PromptResponder, build_file_get_command, compute_reltime_from_range
 from app.ssh_client import CUCMSSHClient, CUCMSSHClientError
 from app.artifact_manager import list_artifacts_for_job
 
@@ -801,16 +801,47 @@ class JobManager:
                         job.update_node_status(node, NodeStatus.CANCELLED)
                         return
 
-                    # Determine options (use overrides if provided)
-                    reltime = job.options.reltime_minutes or job.profile.reltime_minutes
+                    # BE-024: Determine time range and compute reltime
+                    time_mode = job.options.time_mode if job.options.time_mode else "relative"
+
+                    # Variables to store time range metadata for artifacts
+                    collection_start_time = None
+                    collection_end_time = None
+                    reltime_used_str = None
+
+                    if time_mode == "range":
+                        # Absolute time range mode
+                        start_time = job.options.start_time
+                        end_time = job.options.end_time
+
+                        # Compute reltime from range
+                        reltime_unit, reltime_value = compute_reltime_from_range(start_time, end_time)
+
+                        # Store metadata
+                        collection_start_time = start_time
+                        collection_end_time = end_time
+                        reltime_used_str = f"{reltime_unit} {reltime_value}"
+
+                        logger.info(
+                            f"[Job {job.job_id}][{node}] BE-024: Time range mode - "
+                            f"start={start_time}, end={end_time}, computed reltime={reltime_used_str}"
+                        )
+                    else:
+                        # Relative time mode (existing behavior)
+                        reltime_value = job.options.reltime_minutes or job.profile.reltime_minutes
+                        reltime_unit = "minutes"
+                        reltime_used_str = f"{reltime_unit} {reltime_value}"
+
+                    # Determine other options (use overrides if provided)
                     compress = job.options.compress if job.options.compress is not None else job.profile.compress
                     recurs = job.options.recurs if job.options.recurs is not None else job.profile.recurs
                     match = job.options.match or job.profile.match
 
-                    # Build command
+                    # Build command with dynamic time unit
                     command = build_file_get_command(
                         path=path,
-                        reltime_minutes=reltime,
+                        reltime_value=reltime_value,
+                        reltime_unit=reltime_unit,
                         compress=compress,
                         recurs=recurs,
                         match=match
@@ -871,8 +902,14 @@ class JobManager:
                 percent=80
             )
 
-            # Discover artifacts
-            artifacts = self._discover_artifacts(job.job_id, node)
+            # BE-024: Discover artifacts with time range metadata
+            artifacts = self._discover_artifacts(
+                job.job_id,
+                node,
+                collection_start_time=collection_start_time,
+                collection_end_time=collection_end_time,
+                reltime_used=reltime_used_str
+            )
             job.node_statuses[node].artifacts = artifacts
 
             # BE-017: If no artifacts collected, also consider it a failure
@@ -923,24 +960,41 @@ class JobManager:
             if transcript_file and not transcript_file.closed:
                 transcript_file.close()
 
-    def _discover_artifacts(self, job_id: str, node: str) -> List[Artifact]:
+    def _discover_artifacts(
+        self,
+        job_id: str,
+        node: str,
+        collection_start_time: Optional[datetime] = None,
+        collection_end_time: Optional[datetime] = None,
+        reltime_used: Optional[str] = None
+    ) -> List[Artifact]:
         """
         Discover artifacts that were collected for a node.
 
         Uses artifact_manager to generate stable artifact IDs (v0.3).
+        BE-024: Enriches artifacts with time range collection metadata.
 
         Args:
             job_id: Job identifier
             node: Node name
+            collection_start_time: Start time of the collection range (BE-024)
+            collection_end_time: End time of the collection range (BE-024)
+            reltime_used: The reltime value used in CUCM command (BE-024)
 
         Returns:
-            List of discovered artifacts with artifact_id populated
+            List of discovered artifacts with artifact_id and time metadata populated
         """
         # Use artifact_manager which includes stable artifact_id generation
         artifacts = list_artifacts_for_job(job_id)
 
         # Filter to this specific node
         node_artifacts = [a for a in artifacts if a.node == node]
+
+        # BE-024: Enrich artifacts with time range metadata
+        for artifact in node_artifacts:
+            artifact.collection_start_time = collection_start_time
+            artifact.collection_end_time = collection_end_time
+            artifact.reltime_used = reltime_used
 
         logger.info(f"Discovered {len(node_artifacts)} artifacts for job {job_id}, node {node}")
 

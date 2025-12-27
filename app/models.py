@@ -1,9 +1,9 @@
 """Pydantic models for CUCM Log Collector API"""
 
-from typing import List, Optional
-from datetime import datetime
+from typing import List, Optional, Literal
+from datetime import datetime, timezone
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class DiscoverNodesRequest(BaseModel):
@@ -130,12 +130,30 @@ class NodeStatus(str, Enum):
 class CollectionOptions(BaseModel):
     """Options for log collection (can override profile defaults)"""
 
+    # BE-024: Time collection mode
+    time_mode: Optional[Literal["relative", "range"]] = Field(
+        default="relative",
+        description="Time collection mode: 'relative' for reltime_minutes, 'range' for absolute datetime range"
+    )
+
+    # Relative time mode (existing)
     reltime_minutes: Optional[int] = Field(
         default=None,
-        description="Override relative time window in minutes",
+        description="Override relative time window in minutes (used when time_mode='relative')",
         ge=1,
         le=10080
     )
+
+    # BE-024: Absolute time range mode (new)
+    start_time: Optional[datetime] = Field(
+        default=None,
+        description="Start of time range (ISO-8601 datetime, used when time_mode='range')"
+    )
+    end_time: Optional[datetime] = Field(
+        default=None,
+        description="End of time range (ISO-8601 datetime, used when time_mode='range')"
+    )
+
     compress: Optional[bool] = Field(
         default=None,
         description="Override compression setting"
@@ -148,6 +166,31 @@ class CollectionOptions(BaseModel):
         default=None,
         description="Override filename match pattern"
     )
+
+    @model_validator(mode="after")
+    def validate_time_settings(self):
+        """BE-024: Validate time mode consistency"""
+        if self.time_mode == "range":
+            # Range mode requires both start_time and end_time
+            if self.start_time is None or self.end_time is None:
+                raise ValueError("time_mode='range' requires both start_time and end_time")
+
+            # Validate start_time < end_time
+            if self.start_time >= self.end_time:
+                raise ValueError("start_time must be before end_time")
+
+            # Validate end_time is not in the future
+            now = datetime.now(timezone.utc)
+            # Make both timezone-aware for comparison
+            end_time_aware = self.end_time if self.end_time.tzinfo else self.end_time.replace(tzinfo=timezone.utc)
+            if end_time_aware > now:
+                raise ValueError("end_time cannot be in the future")
+
+        elif self.time_mode == "relative":
+            # Relative mode should use reltime_minutes (will fall back to profile default if None)
+            pass
+
+        return self
 
 
 class CreateJobRequest(BaseModel):
@@ -214,6 +257,20 @@ class Artifact(BaseModel):
     artifact_id: Optional[str] = Field(
         default=None,
         description="Stable artifact ID for downloads (v0.3)"
+    )
+
+    # BE-024: Time range collection metadata
+    collection_start_time: Optional[datetime] = Field(
+        default=None,
+        description="Start of the time range for log collection"
+    )
+    collection_end_time: Optional[datetime] = Field(
+        default=None,
+        description="End of the time range for log collection"
+    )
+    reltime_used: Optional[str] = Field(
+        default=None,
+        description="The reltime value used in CUCM command (e.g., 'hours 3', 'minutes 120')"
     )
 
 
