@@ -105,10 +105,56 @@ class Job:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "node_statuses": {
-                node: status.model_dump()
+                node: status.model_dump(mode='json')  # BE-016: mode='json' serializes datetime properly
                 for node, status in self.node_statuses.items()
             }
         }
+
+    @classmethod
+    def from_dict(cls, data: dict, profile_catalog) -> 'Job':
+        """
+        Reconstruct a Job from persisted JSON data.
+
+        Note: Password is not persisted, so reconstructed jobs cannot be re-executed.
+        They are used for status tracking only.
+
+        Args:
+            data: Job data from JSON
+            profile_catalog: ProfileCatalog to resolve profile name
+
+        Returns:
+            Reconstructed Job instance
+        """
+        # Get profile from catalog
+        profile = profile_catalog.get_profile(data["profile"])
+        if not profile:
+            raise ValueError(f"Profile not found: {data['profile']}")
+
+        # Create job with empty password (can't re-execute)
+        job = cls(
+            job_id=data["job_id"],
+            publisher_host=data["publisher_host"],
+            port=data["port"],
+            username=data["username"],
+            password="",  # Password not persisted
+            nodes=data["nodes"],
+            profile=profile,
+            options=None  # Could be persisted if needed
+        )
+
+        # Restore state
+        job.status = JobStatus(data["status"])
+        job.cancelled = data.get("cancelled", False)
+        job.created_at = datetime.fromisoformat(data["created_at"])
+        job.started_at = datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None
+        job.completed_at = datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
+
+        # Restore node statuses
+        job.node_statuses = {}
+        for node, status_data in data["node_statuses"].items():
+            job.node_statuses[node] = NodeJobStatus(**status_data)
+
+        return job
 
     def save(self):
         """Persist job state to disk"""
@@ -160,22 +206,30 @@ class JobManager:
         self._load_existing_jobs()
 
     def _load_existing_jobs(self):
-        """Load existing jobs from disk on startup"""
+        """Load existing jobs from disk on startup (BE-016)"""
         jobs_dir = self.settings.jobs_dir
         if not jobs_dir.exists():
+            logger.info("Jobs directory does not exist yet - no jobs to load")
             return
 
-        for job_file in jobs_dir.glob("*.json"):
+        logger.info(f"Loading existing jobs from {jobs_dir}")
+        profile_catalog = get_profile_catalog()
+        loaded_count = 0
+
+        for job_file in sorted(jobs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
                 with open(job_file, 'r') as f:
                     data = json.load(f)
 
                 # Reconstruct job (without password - can't execute, just status tracking)
-                job_id = data["job_id"]
-                # For now, we just track the data
-                logger.info(f"Loaded existing job {job_id}")
+                job = Job.from_dict(data, profile_catalog)
+                self.jobs[job.job_id] = job
+                loaded_count += 1
+                logger.debug(f"Loaded job {job.job_id} (status: {job.status.value})")
             except Exception as e:
                 logger.error(f"Error loading job from {job_file}: {e}")
+
+        logger.info(f"Loaded {loaded_count} existing jobs from disk")
 
     def create_job(self, request: CreateJobRequest) -> Job:
         """
@@ -225,29 +279,15 @@ class JobManager:
         """
         Get a job by ID.
 
+        Jobs are loaded from disk at startup (BE-016), so all jobs are in memory.
+
         Args:
             job_id: Job identifier
 
         Returns:
             Job if found, None otherwise
         """
-        # Check memory first
-        if job_id in self.jobs:
-            return self.jobs[job_id]
-
-        # Try loading from disk
-        job_file = self.settings.jobs_dir / f"{job_id}.json"
-        if job_file.exists():
-            try:
-                with open(job_file, 'r') as f:
-                    data = json.load(f)
-                # Note: We can't fully reconstruct the job without the password
-                # For now, return None and let the caller handle it
-                logger.warning(f"Job {job_id} exists on disk but not in memory (no password)")
-            except Exception as e:
-                logger.error(f"Error loading job {job_id}: {e}")
-
-        return None
+        return self.jobs.get(job_id)
 
     def list_jobs(self, limit: int = 20) -> List[Job]:
         """
