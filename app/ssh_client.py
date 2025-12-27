@@ -85,19 +85,34 @@ class InteractiveShellSession:
 
                     self._buffer += chunk
 
-                    # Check if we've received the prompt
-                    if self.prompt in self._buffer:
-                        # Split at prompt
-                        before_prompt, _, after_prompt = self._buffer.partition(self.prompt)
+                    # Check if we've received the prompt (BE-010: handle \r variations)
+                    # CUCM may send prompts like "\radmin:" or "admin:\r\n"
+                    # Normalize by checking if prompt appears after stripping \r
+                    normalized_buffer = self._buffer.replace('\r', '')
+                    if self.prompt in normalized_buffer:
+                        # Split at prompt in the normalized buffer
+                        before_prompt, _, after_prompt = normalized_buffer.partition(self.prompt)
                         output.append(before_prompt)
-                        # Keep anything after prompt in buffer
-                        self._buffer = after_prompt
+
+                        # Update actual buffer to remove everything up to and including the prompt
+                        # Find the position of prompt in the normalized buffer
+                        prompt_pos = len(before_prompt)
+                        # Now find corresponding position in original buffer
+                        # This is tricky with \r, so let's just clear the buffer for simplicity
+                        # since we've consumed up to the prompt
+                        self._buffer = ""  # Clear buffer after finding prompt
                         break
                     else:
                         # Keep reading
                         continue
 
         except TimeoutError:
+            # BE-010: Add debug tail logging on timeout
+            buffer_tail = self._buffer[-500:] if len(self._buffer) > 500 else self._buffer
+            logger.error(
+                f"Timeout waiting for prompt '{self.prompt}' after {timeout}s. "
+                f"Buffer tail (last 500 chars): {repr(buffer_tail)}"
+            )
             raise CUCMCommandTimeoutError(
                 f"Timeout waiting for prompt '{self.prompt}' after {timeout}s"
             )
@@ -217,9 +232,14 @@ class CUCMSSHClient:
                 prompt=self.prompt
             )
 
-            # Read initial banner/prompt
+            # BE-010: Send newline after opening PTY to trigger prompt
+            logger.debug("Sending newline to trigger prompt...")
+            stdin.write('\n')
+            await stdin.drain()
+
+            # BE-010: Read initial banner/prompt with increased timeout (60s)
             logger.debug("Reading initial banner...")
-            await self._session.read_until_prompt(timeout=10.0)
+            await self._session.read_until_prompt(timeout=60.0)
             logger.info("Interactive shell session ready")
 
         except asyncio.TimeoutError:
