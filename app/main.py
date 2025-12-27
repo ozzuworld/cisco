@@ -644,6 +644,103 @@ async def download_artifact(artifact_id: str, request: Request):
 
 
 @app.get(
+    "/jobs/{job_id}/artifacts/{artifact_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Download single artifact from a job"},
+        404: {
+            "description": "Job or artifact not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_job_artifact(job_id: str, artifact_id: str, request: Request):
+    """
+    Download a single artifact from a specific job (BE-021.2).
+
+    This is the hierarchical route that follows REST conventions:
+    /jobs/{job_id}/artifacts/{artifact_id}/download
+
+    Args:
+        job_id: Job identifier
+        artifact_id: Artifact identifier
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with artifact file
+
+    Raises:
+        HTTPException: If job or artifact not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Job artifact download: job={job_id}, artifact={artifact_id} (request_id={request_id})")
+
+    # Get job to verify it exists and count artifacts for error messages
+    job_manager = get_job_manager()
+    job = job_manager.get_job(job_id)
+
+    if not job:
+        logger.warning(f"Job {job_id} not found for artifact download (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found",
+                "artifact_id": artifact_id,
+                "request_id": request_id
+            }
+        )
+
+    # Count total artifacts for helpful error message
+    total_artifacts = sum(len(ns.artifacts) for ns in job.node_statuses.values())
+
+    # Look up artifact by ID
+    file_path = get_artifact_path(artifact_id)
+    if not file_path:
+        logger.warning(
+            f"Artifact {artifact_id} not found in job {job_id} "
+            f"({total_artifacts} artifacts exist) (request_id={request_id})"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "ARTIFACT_NOT_FOUND",
+                "message": f"Artifact {artifact_id} not found in job {job_id}",
+                "job_id": job_id,
+                "artifact_id": artifact_id,
+                "total_artifacts_in_job": total_artifacts,
+                "request_id": request_id
+            }
+        )
+
+    # Verify the artifact actually belongs to this job (security check)
+    # The artifact path should contain the job_id
+    artifact_path_str = str(file_path)
+    if job_id not in artifact_path_str:
+        logger.error(
+            f"Security: Artifact {artifact_id} does not belong to job {job_id} "
+            f"(request_id={request_id})"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "ARTIFACT_NOT_FOUND",
+                "message": f"Artifact {artifact_id} not found in job {job_id}",
+                "job_id": job_id,
+                "artifact_id": artifact_id,
+                "request_id": request_id
+            }
+        )
+
+    logger.info(f"Serving artifact: {file_path.name} from job {job_id} (request_id={request_id})")
+    return FileResponse(
+        file_path,
+        filename=file_path.name,
+        media_type="application/octet-stream"
+    )
+
+
+@app.get(
     "/jobs/{job_id}/nodes/{node_ip}/download",
     status_code=status.HTTP_200_OK,
     responses={
