@@ -517,6 +517,152 @@ class JobManager:
         logger.info(f"Job {job_id} cancelled - status: {job.status}")
         return True
 
+    def retry_failed_nodes(self, job_id: str) -> Optional[List[str]]:
+        """
+        BE-030: Retry only the failed nodes in a job.
+
+        Reuses the same job configuration (profile, time window, credentials)
+        but only re-executes nodes that have FAILED status.
+
+        Args:
+            job_id: Job to retry failed nodes for
+
+        Returns:
+            List of node names being retried, or None if job not found
+        """
+        job = self.get_job(job_id)
+        if not job:
+            logger.warning(f"Cannot retry job {job_id}: not found")
+            return None
+
+        # Find all failed nodes
+        failed_nodes = [
+            node for node, status in job.node_statuses.items()
+            if status.status == NodeStatus.FAILED
+        ]
+
+        if not failed_nodes:
+            logger.info(f"Job {job_id} has no failed nodes to retry")
+            return []
+
+        logger.info(f"Job {job_id}: Retrying {len(failed_nodes)} failed nodes: {failed_nodes}")
+
+        # Update retry tracking for each failed node
+        for node in failed_nodes:
+            node_status = job.node_statuses[node]
+            node_status.retry_count += 1
+            node_status.current_attempt += 1
+            # Reset node to PENDING for retry
+            job.update_node_status(
+                node,
+                NodeStatus.PENDING,
+                step="queued",
+                message=f"Queued for retry (attempt {node_status.current_attempt})",
+                percent=0
+            )
+            # Preserve retry tracking
+            job.node_statuses[node].retry_count = node_status.retry_count
+            job.node_statuses[node].current_attempt = node_status.current_attempt
+            logger.info(
+                f"Job {job_id} node {node}: retry_count={node_status.retry_count}, "
+                f"attempt={node_status.current_attempt}"
+            )
+
+        # Update job status to RUNNING (it will be re-determined after retry completes)
+        job.update_status(JobStatus.RUNNING)
+        job.save()
+
+        # Launch async task to retry these nodes
+        # Create a new task for this retry operation
+        task = asyncio.create_task(self._retry_nodes_async(job, failed_nodes))
+        # Don't store in running_tasks since this is a partial retry
+        # Just let it run in the background
+
+        return failed_nodes
+
+    async def _retry_nodes_async(self, job: Job, nodes: List[str]):
+        """
+        BE-030: Asynchronously retry a list of nodes for a job.
+
+        Args:
+            job: Job to retry nodes for
+            nodes: List of node names to retry
+        """
+        job_id = job.job_id
+        logger.info(f"[Job {job_id}] Starting retry for {len(nodes)} nodes")
+
+        try:
+            # Process nodes with concurrency limit (same as execute_job)
+            semaphore = asyncio.Semaphore(self.settings.max_concurrency_per_job)
+
+            async def process_with_semaphore(node):
+                # Check cancellation before processing
+                if job.cancelled:
+                    job.update_node_status(node, NodeStatus.CANCELLED)
+                    return
+                async with semaphore:
+                    await self._process_node(job, node)
+
+            # Track per-node tasks for potential cancellation
+            if job_id not in self.node_tasks:
+                self.node_tasks[job_id] = {}
+
+            tasks = []
+            for node in nodes:
+                task = asyncio.create_task(process_with_semaphore(node))
+                self.node_tasks[job_id][node] = task
+                tasks.append(task)
+
+            try:
+                await asyncio.gather(*tasks)
+            except asyncio.CancelledError:
+                # Cancel all remaining tasks
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                # Wait for all tasks to finish cancelling
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+
+            # Determine final job status after retry
+            node_statuses = [ns.status for ns in job.node_statuses.values()]
+            if job.cancelled:
+                # Check if any nodes succeeded before cancellation
+                if any(s == NodeStatus.SUCCEEDED for s in node_statuses):
+                    job.update_status(JobStatus.PARTIAL)
+                else:
+                    job.update_status(JobStatus.CANCELLED)
+            elif all(s == NodeStatus.SUCCEEDED for s in node_statuses):
+                job.update_status(JobStatus.SUCCEEDED)
+            elif all(s == NodeStatus.FAILED for s in node_statuses):
+                job.update_status(JobStatus.FAILED)
+            else:
+                job.update_status(JobStatus.PARTIAL)
+
+            logger.info(f"Job {job_id} retry completed with status {job.status}")
+
+        except asyncio.CancelledError:
+            logger.info(f"Job {job_id} retry was cancelled")
+            job.cancelled = True
+            # Mark any non-completed nodes as cancelled
+            for node in nodes:
+                ns = job.node_statuses[node]
+                if ns.status in [NodeStatus.PENDING, NodeStatus.RUNNING]:
+                    job.update_node_status(node, NodeStatus.CANCELLED)
+
+            # Determine final status based on what completed
+            node_statuses = [ns.status for ns in job.node_statuses.values()]
+            if any(s == NodeStatus.SUCCEEDED for s in node_statuses):
+                job.update_status(JobStatus.PARTIAL)
+            else:
+                job.update_status(JobStatus.CANCELLED)
+            job.save()
+
+        except Exception as e:
+            logger.error(f"Job {job_id} retry failed with exception: {e}")
+            job.update_status(JobStatus.FAILED)
+            job.save()
+
     async def execute_job(self, job_id: str):
         """
         Execute a job asynchronously.
@@ -784,18 +930,24 @@ class JobManager:
                 percent=10
             )
 
+            # BE-030: Use attempt-specific directory for artifacts
+            # Format: {job_id}/{node}/attempt_{N}
+            node_status = job.node_statuses[node]
+            attempt_num = node_status.current_attempt
+            attempt_dir = f"attempt_{attempt_num}"
+
             # BE-017: Prepare SFTP directory for this node
             # If base_dir is empty, SFTP chroots directly to storage/received
             if self.settings.sftp_remote_base_dir:
-                sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}"
+                sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}/{attempt_dir}"
             else:
-                sftp_directory = f"{job.job_id}/{node}"
+                sftp_directory = f"{job.job_id}/{node}/{attempt_dir}"
 
             # FIX: Pre-create directory for CUCM to upload to
             # CUCM's file get activelog does NOT create directories
             # BE-017: With bind mount, create directories locally - they appear on SFTP automatically
             try:
-                local_dir = self.settings.artifacts_dir / job.job_id / node
+                local_dir = self.settings.artifacts_dir / job.job_id / node / attempt_dir
                 local_dir.mkdir(parents=True, exist_ok=True)
                 # Set permissions so SFTP user can write (via bind mount)
                 local_dir.chmod(0o777)  # World-writable for SFTP user access

@@ -27,6 +27,7 @@ from app.models import (
     JobSummary,
     JobStatus as JobStatusEnum,
     CancelJobResponse,  # v0.3
+    RetryJobResponse,  # BE-030
     EstimateResponse,  # BE-027
     NodeEstimate,  # BE-027
     CommandEstimate  # BE-027
@@ -42,7 +43,13 @@ from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
 from app.job_manager import get_job_manager
 from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
-from app.artifact_manager import get_artifact_path, get_transcript_path, create_zip_archive  # v0.3, BE-017
+from app.artifact_manager import (
+    get_artifact_path,
+    get_transcript_path,
+    create_zip_archive,
+    generate_manifest,  # BE-029
+    generate_zip_filename  # BE-029
+)
 from app.config import get_settings  # BE-012
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
 
@@ -965,14 +972,41 @@ async def download_node_artifacts(job_id: str, node_ip: str, request: Request):
             }
         )
 
-    # Create zip archive
+    # BE-029: Generate manifest and standardized filename
     try:
-        zip_path = create_zip_archive(artifacts, f"job_{job_id}_node_{node_ip}")
+        # Generate manifest
+        manifest = generate_manifest(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            nodes=[node_ip],
+            artifacts=artifacts,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes,
+            computed_reltime_unit=job.computed_reltime_unit,
+            computed_reltime_value=job.computed_reltime_value,
+            computation_timestamp=job.computation_timestamp
+        )
+
+        # Generate standardized filename
+        zip_name = generate_zip_filename(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes,
+            node=node_ip
+        )
+
+        # Create zip archive with manifest
+        zip_path = create_zip_archive(artifacts, zip_name, manifest_data=manifest)
 
         # Return zip file and clean up after
         return FileResponse(
             zip_path,
-            filename=f"job_{job_id}_node_{node_ip}.zip",
+            filename=f"{zip_name}.zip",
             media_type="application/zip",
             background=lambda: zip_path.unlink()  # Clean up temp file after serving
         )
@@ -1046,14 +1080,43 @@ async def download_job_artifacts(job_id: str, request: Request):
             }
         )
 
-    # Create zip archive
+    # BE-029: Generate manifest and standardized filename
     try:
-        zip_path = create_zip_archive(all_artifacts, f"job_{job_id}")
+        # Get list of all nodes
+        all_nodes = list(job.node_statuses.keys())
+
+        # Generate manifest
+        manifest = generate_manifest(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            nodes=all_nodes,
+            artifacts=all_artifacts,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes,
+            computed_reltime_unit=job.computed_reltime_unit,
+            computed_reltime_value=job.computed_reltime_value,
+            computation_timestamp=job.computation_timestamp
+        )
+
+        # Generate standardized filename
+        zip_name = generate_zip_filename(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes
+        )
+
+        # Create zip archive with manifest
+        zip_path = create_zip_archive(all_artifacts, zip_name, manifest_data=manifest)
 
         # Return zip file and clean up after
         return FileResponse(
             zip_path,
-            filename=f"job_{job_id}.zip",
+            filename=f"{zip_name}.zip",
             media_type="application/zip",
             background=lambda: zip_path.unlink()  # Clean up temp file after serving
         )
@@ -1124,6 +1187,85 @@ async def cancel_job(job_id: str, request: Request):
         status=job.status,
         cancelled=job.cancelled,
         message="Job cancellation initiated"
+    )
+
+
+# ============================================================================
+# BE-030: Retry Failed Nodes
+# ============================================================================
+
+
+@app.post(
+    "/jobs/{job_id}/retry-failed",
+    response_model=RetryJobResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Retry of failed nodes initiated",
+            "model": RetryJobResponse
+        },
+        404: {
+            "description": "Job not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def retry_failed_nodes(job_id: str, request: Request):
+    """
+    BE-030: Retry only the failed nodes in a job.
+
+    Reuses the same job configuration (profile, time window, credentials)
+    but only re-executes nodes that have FAILED status.
+
+    This is useful when some nodes fail due to transient issues (network
+    glitches, temporary timeouts, etc.) and you want to retry just those
+    nodes without re-running successful ones.
+
+    Artifacts from retry attempts are stored in attempt-specific directories
+    (e.g., attempt_1, attempt_2) to preserve the full history.
+
+    Args:
+        job_id: Job identifier
+        request: FastAPI request object
+
+    Returns:
+        RetryJobResponse with retry status and list of nodes being retried
+
+    Raises:
+        HTTPException: If job not found or no failed nodes to retry
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Retry failed nodes request: {job_id} (request_id={request_id})")
+
+    job_manager = get_job_manager()
+    retried_nodes = job_manager.retry_failed_nodes(job_id)
+
+    if retried_nodes is None:
+        logger.warning(f"Job {job_id} not found for retry (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    job = job_manager.get_job(job_id)
+
+    if len(retried_nodes) == 0:
+        message = "No failed nodes to retry"
+    else:
+        message = f"Retry initiated for {len(retried_nodes)} failed node(s)"
+
+    logger.info(f"Job {job_id} retry: {len(retried_nodes)} nodes queued (request_id={request_id})")
+
+    return RetryJobResponse(
+        job_id=job.job_id,
+        status=job.status,
+        retried_nodes=retried_nodes,
+        retry_count=len(retried_nodes),
+        message=message
     )
 
 
