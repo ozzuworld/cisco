@@ -602,7 +602,7 @@ class JobManager:
             # CUCM's file get activelog does NOT create directories
             # BE-017: With bind mount, create directories locally - they appear on SFTP automatically
             try:
-                local_dir = self.settings.received_dir / job.job_id / node
+                local_dir = self.settings.artifacts_dir / job.job_id / node
                 local_dir.mkdir(parents=True, exist_ok=True)
                 logger.info(f"Created directory for SFTP uploads: {local_dir}")
                 transcript_file.write(f"SFTP directory ready: {sftp_directory}\n")
