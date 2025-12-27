@@ -33,7 +33,9 @@ if ! getent group "$SFTP_GROUP" >/dev/null; then
 fi
 
 if ! id "$SFTP_USER" >/dev/null 2>&1; then
-  useradd -m -g "$SFTP_GROUP" -s /usr/sbin/nologin "$SFTP_USER"
+  # Use /bin/bash instead of nologin - ForceCommand internal-sftp prevents shell access
+  # Some SSH configs reject nologin even for SFTP-only users
+  useradd -m -g "$SFTP_GROUP" -s /bin/bash "$SFTP_USER"
 fi
 
 echo "[4/7] Setting password for $SFTP_USER..."
