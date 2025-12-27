@@ -445,3 +445,58 @@ class CancelJobResponse(BaseModel):
     status: JobStatus = Field(..., description="Job status after cancellation")
     cancelled: bool = Field(..., description="Whether cancellation was successful")
     message: str = Field(..., description="Cancellation status message")
+
+
+# ============================================================================
+# BE-027 Models - Dry-run / Estimate
+# ============================================================================
+
+
+class CommandEstimate(BaseModel):
+    """Estimate for a single CUCM command that would be executed"""
+
+    path: str = Field(..., description="Log path to collect")
+    command: str = Field(..., description="Full CUCM CLI command that would be executed")
+    reltime_unit: str = Field(..., description="Reltime unit (minutes/hours/days/weeks/months)")
+    reltime_value: int = Field(..., description="Reltime value")
+
+
+class NodeEstimate(BaseModel):
+    """Estimate for log collection on a single node"""
+
+    node: str = Field(..., description="Node IP or hostname")
+    commands: List[CommandEstimate] = Field(
+        default_factory=list,
+        description="List of commands that would be executed"
+    )
+    total_commands: int = Field(..., description="Total number of commands for this node")
+
+
+class EstimateResponse(BaseModel):
+    """Response for job estimation (dry-run)"""
+
+    profile: str = Field(..., description="Profile name")
+    nodes: List[NodeEstimate] = Field(
+        default_factory=list,
+        description="Estimate for each node"
+    )
+    total_nodes: int = Field(..., description="Total number of nodes")
+    total_commands: int = Field(..., description="Total number of commands across all nodes")
+
+    # Time window configuration
+    time_mode: str = Field(..., description="Time mode (relative or range)")
+    requested_start_time: Optional[datetime] = Field(
+        default=None,
+        description="Requested start time (range mode)"
+    )
+    requested_end_time: Optional[datetime] = Field(
+        default=None,
+        description="Requested end time (range mode)"
+    )
+    requested_reltime_minutes: Optional[int] = Field(
+        default=None,
+        description="Requested reltime minutes (relative mode)"
+    )
+    computed_reltime_unit: str = Field(..., description="Computed reltime unit")
+    computed_reltime_value: int = Field(..., description="Computed reltime value")
+    computation_timestamp: datetime = Field(..., description="When reltime was computed")
