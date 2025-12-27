@@ -516,7 +516,9 @@ class JobManager:
 
                         try:
                             await sftp.mkdir(current_path)
-                            logger.debug(f"Created directory: {current_path}")
+                            # BE-017: Set permissions so SFTP user can write
+                            await sftp.chmod(current_path, 0o775)
+                            logger.debug(f"Created directory: {current_path} (mode=775)")
                         except asyncssh.sftp.SFTPFailure as e:
                             # FIX: install-sftp.sh creates base 'incoming' dir - treat failures as "already exists"
                             # Some SFTP servers return FX_FAILURE (code=4) instead of FX_FILE_ALREADY_EXISTS
@@ -588,8 +590,12 @@ class JobManager:
                 job.update_node_status(node, NodeStatus.CANCELLED)
                 return
 
-            # Prepare SFTP directory for this node
-            sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}"
+            # BE-017: Prepare SFTP directory for this node
+            # If base_dir is empty, SFTP chroots directly to storage/received
+            if self.settings.sftp_remote_base_dir:
+                sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}"
+            else:
+                sftp_directory = f"{job.job_id}/{node}"
 
             # FIX: Pre-create directory on SFTP server before CUCM tries to push files
             # CUCM's file get activelog does NOT create directories - it will fail if they don't exist
