@@ -903,5 +903,284 @@ def test_download_endpoint_with_cors(client_no_auth, temp_storage):
         assert "Content-Disposition" in exposed
 
 
+# ============================================================================
+# BE-017 Tests - Artifact Listing + Download API
+# ============================================================================
+
+
+def test_download_node_artifacts_not_found_job(client_no_auth):
+    """BE-017: Downloading node artifacts for non-existent job should return 404"""
+    response = client_no_auth.get("/jobs/nonexistent-job-id/nodes/10.10.10.1/download")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert data["error"] == "JOB_NOT_FOUND"
+    assert "request_id" in data
+
+
+def test_download_node_artifacts_not_found_node(client_no_auth):
+    """BE-017: Downloading artifacts for non-existent node should return 404"""
+    # Create a job
+    job_manager = get_job_manager()
+    from app.models import CreateJobRequest
+
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1"],
+        profile="basic_platform"
+    )
+
+    job = job_manager.create_job(request)
+
+    # Try to download artifacts for a node that doesn't exist in this job
+    response = client_no_auth.get(f"/jobs/{job.job_id}/nodes/10.10.10.99/download")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert data["error"] == "NODE_NOT_FOUND"
+    assert "request_id" in data
+
+
+def test_download_node_artifacts_no_artifacts(client_no_auth):
+    """BE-017: Downloading artifacts when none exist should return 404"""
+    # Create a job
+    job_manager = get_job_manager()
+    from app.models import CreateJobRequest
+
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1"],
+        profile="basic_platform"
+    )
+
+    job = job_manager.create_job(request)
+
+    # Node exists but has no artifacts
+    response = client_no_auth.get(f"/jobs/{job.job_id}/nodes/10.10.10.1/download")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert data["error"] == "NO_ARTIFACTS"
+    assert "request_id" in data
+
+
+def test_download_node_artifacts_success(client_no_auth, temp_storage):
+    """BE-017: Downloading node artifacts should return zip file"""
+    from app.models import CreateJobRequest, Artifact
+    from datetime import datetime
+
+    # Create a job
+    job_manager = get_job_manager()
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1"],
+        profile="basic_platform"
+    )
+
+    job = job_manager.create_job(request)
+
+    # Create fake artifact files
+    artifact_dir = temp_storage / "received" / job.job_id / "10.10.10.1"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    artifact1 = artifact_dir / "test-log1.tar.gz"
+    artifact1.write_text("test log content 1")
+
+    artifact2 = artifact_dir / "test-log2.txt"
+    artifact2.write_text("test log content 2")
+
+    # Add artifacts to job's node status
+    from app.artifact_manager import generate_artifact_id
+    job.node_statuses["10.10.10.1"].artifacts = [
+        Artifact(
+            node="10.10.10.1",
+            path=f"received/{job.job_id}/10.10.10.1/test-log1.tar.gz",
+            filename="test-log1.tar.gz",
+            size_bytes=artifact1.stat().st_size,
+            created_at=datetime.utcnow(),
+            artifact_id=generate_artifact_id(job.job_id, "10.10.10.1", "test-log1.tar.gz")
+        ),
+        Artifact(
+            node="10.10.10.1",
+            path=f"received/{job.job_id}/10.10.10.1/test-log2.txt",
+            filename="test-log2.txt",
+            size_bytes=artifact2.stat().st_size,
+            created_at=datetime.utcnow(),
+            artifact_id=generate_artifact_id(job.job_id, "10.10.10.1", "test-log2.txt")
+        )
+    ]
+    job.save()
+
+    # Download node artifacts
+    response = client_no_auth.get(f"/jobs/{job.job_id}/nodes/10.10.10.1/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert f"job_{job.job_id}_node_10.10.10.1.zip" in response.headers.get("content-disposition", "")
+
+    # Verify it's a valid zip file
+    import zipfile
+    import io
+    zip_data = io.BytesIO(response.content)
+    with zipfile.ZipFile(zip_data, 'r') as zipf:
+        namelist = zipf.namelist()
+        assert "10.10.10.1/test-log1.tar.gz" in namelist
+        assert "10.10.10.1/test-log2.txt" in namelist
+
+
+def test_download_job_artifacts_not_found(client_no_auth):
+    """BE-017: Downloading job artifacts for non-existent job should return 404"""
+    response = client_no_auth.get("/jobs/nonexistent-job-id/download")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert data["error"] == "JOB_NOT_FOUND"
+    assert "request_id" in data
+
+
+def test_download_job_artifacts_no_artifacts(client_no_auth):
+    """BE-017: Downloading job artifacts when none exist should return 404"""
+    # Create a job
+    job_manager = get_job_manager()
+    from app.models import CreateJobRequest
+
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1", "10.10.10.2"],
+        profile="basic_platform"
+    )
+
+    job = job_manager.create_job(request)
+
+    # Job exists but has no artifacts
+    response = client_no_auth.get(f"/jobs/{job.job_id}/download")
+
+    assert response.status_code == 404
+    data = response.json()
+    assert data["error"] == "NO_ARTIFACTS"
+    assert "request_id" in data
+
+
+def test_download_job_artifacts_success(client_no_auth, temp_storage):
+    """BE-017: Downloading job artifacts should return zip with all nodes"""
+    from app.models import CreateJobRequest, Artifact
+    from datetime import datetime
+
+    # Create a job
+    job_manager = get_job_manager()
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1", "10.10.10.2"],
+        profile="basic_platform"
+    )
+
+    job = job_manager.create_job(request)
+
+    # Create fake artifact files for multiple nodes
+    for node in ["10.10.10.1", "10.10.10.2"]:
+        artifact_dir = temp_storage / "received" / job.job_id / node
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        artifact_file = artifact_dir / f"{node}_log.tar.gz"
+        artifact_file.write_text(f"test log content from {node}")
+
+        # Add artifacts to job's node status
+        from app.artifact_manager import generate_artifact_id
+        job.node_statuses[node].artifacts = [
+            Artifact(
+                node=node,
+                path=f"received/{job.job_id}/{node}/{node}_log.tar.gz",
+                filename=f"{node}_log.tar.gz",
+                size_bytes=artifact_file.stat().st_size,
+                created_at=datetime.utcnow(),
+                artifact_id=generate_artifact_id(job.job_id, node, f"{node}_log.tar.gz")
+            )
+        ]
+
+    job.save()
+
+    # Download all job artifacts
+    response = client_no_auth.get(f"/jobs/{job.job_id}/download")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert f"job_{job.job_id}.zip" in response.headers.get("content-disposition", "")
+
+    # Verify it's a valid zip file with artifacts from both nodes
+    import zipfile
+    import io
+    zip_data = io.BytesIO(response.content)
+    with zipfile.ZipFile(zip_data, 'r') as zipf:
+        namelist = zipf.namelist()
+        assert "10.10.10.1/10.10.10.1_log.tar.gz" in namelist
+        assert "10.10.10.2/10.10.10.2_log.tar.gz" in namelist
+
+
+def test_download_job_artifacts_with_cors(client_no_auth, temp_storage):
+    """BE-017: Verify job download endpoint works with CORS"""
+    from app.models import CreateJobRequest, Artifact
+    from datetime import datetime
+
+    # Create a job with artifacts
+    job_manager = get_job_manager()
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1"],
+        profile="basic_platform"
+    )
+
+    job = job_manager.create_job(request)
+
+    # Create fake artifact
+    artifact_dir = temp_storage / "received" / job.job_id / "10.10.10.1"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_file = artifact_dir / "test.tar.gz"
+    artifact_file.write_text("test content")
+
+    from app.artifact_manager import generate_artifact_id
+    job.node_statuses["10.10.10.1"].artifacts = [
+        Artifact(
+            node="10.10.10.1",
+            path=f"received/{job.job_id}/10.10.10.1/test.tar.gz",
+            filename="test.tar.gz",
+            size_bytes=artifact_file.stat().st_size,
+            created_at=datetime.utcnow(),
+            artifact_id=generate_artifact_id(job.job_id, "10.10.10.1", "test.tar.gz")
+        )
+    ]
+    job.save()
+
+    # Request download with CORS origin header
+    response = client_no_auth.get(
+        f"/jobs/{job.job_id}/download",
+        headers={"Origin": "http://localhost:8080"}
+    )
+
+    assert response.status_code == 200
+    # Verify CORS headers are present
+    assert "access-control-allow-origin" in response.headers
+    # Verify Content-Disposition is exposed
+    assert "access-control-expose-headers" in response.headers
+    assert "Content-Disposition" in response.headers["access-control-expose-headers"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
