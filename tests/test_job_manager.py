@@ -690,5 +690,280 @@ def test_atomic_write_with_replace(configured_env, temp_storage, mock_profile):
             assert str(call_args[1]).endswith('.json'), "Should rename to .json file"
 
 
+# ============================================================================
+# BE-019 Tests - True Progress Metrics
+# ============================================================================
+
+
+def test_progress_metrics_on_job_creation(configured_env, temp_storage, mock_profile):
+    """BE-019: Job should have progress metrics on creation"""
+    from app.config import get_settings
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1.example.com", "node2.example.com", "node3.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+        progress = job.get_progress_metrics()
+
+        # Verify initial progress metrics
+        assert progress["total_nodes"] == 3
+        assert progress["completed_nodes"] == 0
+        assert progress["succeeded_nodes"] == 0
+        assert progress["failed_nodes"] == 0
+        assert progress["running_nodes"] == 0
+        assert progress["percent_complete"] == 0
+        assert progress["last_updated_at"] is not None
+
+
+def test_progress_metrics_during_execution(configured_env, temp_storage, mock_profile):
+    """BE-019: Progress metrics should update as nodes complete"""
+    from app.config import get_settings
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1", "node2", "node3", "node4"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+
+        # Start execution
+        job.update_status(JobStatus.RUNNING)
+
+        # Mark node1 as running
+        job.update_node_status("node1", NodeStatus.RUNNING)
+        progress = job.get_progress_metrics()
+        assert progress["running_nodes"] == 1
+        assert progress["completed_nodes"] == 0
+        assert progress["percent_complete"] == 0
+
+        # Mark node1 as succeeded
+        job.update_node_status("node1", NodeStatus.SUCCEEDED)
+        progress = job.get_progress_metrics()
+        assert progress["running_nodes"] == 0
+        assert progress["succeeded_nodes"] == 1
+        assert progress["completed_nodes"] == 1
+        assert progress["percent_complete"] == 25  # 1/4 = 25%
+
+        # Mark node2 as running, node3 as failed
+        job.update_node_status("node2", NodeStatus.RUNNING)
+        job.update_node_status("node3", NodeStatus.FAILED, error="Connection failed")
+        progress = job.get_progress_metrics()
+        assert progress["running_nodes"] == 1
+        assert progress["succeeded_nodes"] == 1
+        assert progress["failed_nodes"] == 1
+        assert progress["completed_nodes"] == 2
+        assert progress["percent_complete"] == 50  # 2/4 = 50%
+
+        # Complete all nodes
+        job.update_node_status("node2", NodeStatus.SUCCEEDED)
+        job.update_node_status("node4", NodeStatus.SUCCEEDED)
+        progress = job.get_progress_metrics()
+        assert progress["running_nodes"] == 0
+        assert progress["succeeded_nodes"] == 3
+        assert progress["failed_nodes"] == 1
+        assert progress["completed_nodes"] == 4
+        assert progress["percent_complete"] == 100
+
+
+def test_progress_metrics_with_empty_nodes(configured_env, temp_storage, mock_profile):
+    """BE-019: Empty-node jobs should handle division by zero safely"""
+    from app.config import get_settings
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        # Create job with empty nodes list
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=[],  # Empty!
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+        progress = job.get_progress_metrics()
+
+        # Should not crash with division by zero
+        assert progress["total_nodes"] == 0
+        assert progress["completed_nodes"] == 0
+        assert progress["percent_complete"] == 0  # Not a crash!
+
+
+def test_node_step_and_message_tracking(configured_env, temp_storage, mock_profile):
+    """BE-019: Nodes should track step, message, and percent"""
+    from app.config import get_settings
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+
+        # Initial state
+        node_status = job.node_statuses["node1.example.com"]
+        assert node_status.step is None
+        assert node_status.message is None
+        assert node_status.percent is None
+        assert node_status.last_updated_at is not None
+
+        # Update with step tracking
+        job.update_node_status(
+            "node1.example.com",
+            NodeStatus.RUNNING,
+            step="connecting",
+            message="Connecting to node",
+            percent=10
+        )
+
+        node_status = job.node_statuses["node1.example.com"]
+        assert node_status.step == "connecting"
+        assert node_status.message == "Connecting to node"
+        assert node_status.percent == 10
+        assert node_status.last_updated_at is not None
+
+        # Update progress
+        job.update_node_status(
+            "node1.example.com",
+            NodeStatus.RUNNING,
+            step="collecting",
+            message="Collecting logs",
+            percent=50
+        )
+
+        node_status = job.node_statuses["node1.example.com"]
+        assert node_status.step == "collecting"
+        assert node_status.message == "Collecting logs"
+        assert node_status.percent == 50
+
+        # Mark completed - should auto-set to 100%
+        job.update_node_status(
+            "node1.example.com",
+            NodeStatus.SUCCEEDED,
+            step="completed",
+            message="Done"
+        )
+
+        node_status = job.node_statuses["node1.example.com"]
+        assert node_status.status == NodeStatus.SUCCEEDED
+        assert node_status.percent == 100  # Auto-set to 100%
+
+
+def test_last_updated_at_tracking(configured_env, temp_storage, mock_profile):
+    """BE-019: last_updated_at should track job and node updates"""
+    import time
+    from app.config import get_settings
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+        initial_updated = job.last_updated_at
+
+        # Wait a bit to ensure different timestamp
+        time.sleep(0.01)
+
+        # Update job status
+        job.update_status(JobStatus.RUNNING)
+        assert job.last_updated_at > initial_updated
+
+        # Update node status
+        previous_updated = job.last_updated_at
+        time.sleep(0.01)
+        job.update_node_status("node1.example.com", NodeStatus.RUNNING)
+
+        # Both job and node should have updated timestamp
+        assert job.last_updated_at > previous_updated
+        assert job.node_statuses["node1.example.com"].last_updated_at > previous_updated
+
+
+def test_progress_metrics_in_api_response(configured_env, temp_storage, mock_profile):
+    """BE-019: JobStatusResponse should include progress metrics"""
+    from app.models import JobStatusResponse
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1", "node2"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+        job.update_node_status("node1", NodeStatus.SUCCEEDED)
+
+        # Build response like the API does
+        progress = job.get_progress_metrics()
+        response = JobStatusResponse(
+            job_id=job.job_id,
+            status=job.status,
+            created_at=job.created_at,
+            started_at=job.started_at,
+            completed_at=job.completed_at,
+            profile=job.profile.name,
+            nodes=list(job.node_statuses.values()),
+            total_nodes=progress["total_nodes"],
+            completed_nodes=progress["completed_nodes"],
+            succeeded_nodes=progress["succeeded_nodes"],
+            failed_nodes=progress["failed_nodes"],
+            running_nodes=progress["running_nodes"],
+            percent_complete=progress["percent_complete"],
+            last_updated_at=progress["last_updated_at"]
+        )
+
+        # Verify all progress fields are present
+        assert response.total_nodes == 2
+        assert response.completed_nodes == 1
+        assert response.succeeded_nodes == 1
+        assert response.failed_nodes == 0
+        assert response.running_nodes == 0
+        assert response.percent_complete == 50
+        assert response.last_updated_at is not None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

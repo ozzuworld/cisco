@@ -242,6 +242,25 @@ class NodeJobStatus(BaseModel):
         default=None,
         description="When processing completed for this node"
     )
+    # BE-019: Progress tracking fields
+    step: Optional[str] = Field(
+        default=None,
+        description="Current processing step (e.g., 'connecting', 'collecting', 'discovering')"
+    )
+    message: Optional[str] = Field(
+        default=None,
+        description="Progress message for current step"
+    )
+    last_updated_at: Optional[datetime] = Field(
+        default=None,
+        description="Last time this node status was updated"
+    )
+    percent: Optional[int] = Field(
+        default=None,
+        description="Progress percentage (0-100) for this node",
+        ge=0,
+        le=100
+    )
 
 
 class JobStatusResponse(BaseModel):
@@ -262,6 +281,22 @@ class JobStatusResponse(BaseModel):
     nodes: List[NodeJobStatus] = Field(
         default_factory=list,
         description="Status for each node"
+    )
+    # BE-019: Progress metrics
+    total_nodes: int = Field(..., description="Total number of nodes in this job")
+    completed_nodes: int = Field(..., description="Number of completed nodes (succeeded + failed)")
+    succeeded_nodes: int = Field(..., description="Number of succeeded nodes")
+    failed_nodes: int = Field(..., description="Number of failed nodes")
+    running_nodes: int = Field(..., description="Number of currently running nodes")
+    percent_complete: int = Field(
+        ...,
+        description="Overall job completion percentage (0-100)",
+        ge=0,
+        le=100
+    )
+    last_updated_at: Optional[datetime] = Field(
+        default=None,
+        description="Last time any node status was updated"
     )
 
 
