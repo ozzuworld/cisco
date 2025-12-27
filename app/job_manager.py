@@ -487,7 +487,7 @@ class JobManager:
         Raises:
             Exception: If directory creation fails
         """
-        logger.info(f"Pre-creating SFTP directory: {directory_path}")
+        logger.info(f"Pre-creating SFTP directory: {directory_path} on {self.settings.sftp_host}:{self.settings.sftp_port}")
 
         try:
             async with asyncssh.connect(
@@ -497,6 +497,8 @@ class JobManager:
                 password=self.settings.sftp_password,
                 known_hosts=None  # Accept any host key (same as CUCM behavior)
             ) as conn:
+                logger.debug(f"Connected to SFTP server {self.settings.sftp_host}")
+
                 # Use SFTP subsystem to create directory
                 async with conn.start_sftp_client() as sftp:
                     # Create directory with parents (like mkdir -p)
@@ -513,15 +515,28 @@ class JobManager:
                             # Directory might already exist - check if it's accessible
                             if e.code == asyncssh.sftp.FX_FILE_ALREADY_EXISTS:
                                 logger.debug(f"Directory already exists: {current_path}")
+                            elif e.code == asyncssh.sftp.FX_PERMISSION_DENIED:
+                                error_msg = f"Permission denied creating {current_path} (SFTP user: {self.settings.sftp_username})"
+                                logger.error(error_msg)
+                                raise Exception(error_msg) from e
                             else:
-                                # Some other error - re-raise
-                                raise
+                                error_msg = f"SFTP error creating {current_path}: code={e.code}, reason={e.reason}"
+                                logger.error(error_msg)
+                                raise Exception(error_msg) from e
 
                 logger.info(f"SFTP directory ready: {directory_path}")
 
+        except asyncssh.Error as e:
+            error_msg = f"SSH/SFTP connection failed to {self.settings.sftp_host}:{self.settings.sftp_port}: {type(e).__name__}: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg) from e
         except Exception as e:
-            logger.error(f"Failed to create SFTP directory {directory_path}: {e}")
-            raise
+            if "Permission denied" in str(e) or "SFTP error" in str(e):
+                # Already formatted error message - re-raise as is
+                raise
+            error_msg = f"Failed to create SFTP directory {directory_path}: {type(e).__name__}: {str(e)}"
+            logger.error(error_msg)
+            raise Exception(error_msg) from e
 
     async def _process_node(self, job: Job, node: str):
         """
