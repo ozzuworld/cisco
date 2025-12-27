@@ -58,28 +58,29 @@ class PromptResponder:
 
         # Define prompt patterns (case-insensitive)
         # BE-017: Added proceed and host key prompts for activelog operations
+        # FIX: Updated patterns to match actual CUCM CLI prompts
         self.patterns = [
             # Proceed prompts (appear before and after file sizing)
             PromptPattern(
-                pattern=r"(?i)would\s+you\s+like\s+to\s+proceed\s*\[\s*y\s*/\s*n\s*\]\s*\??\s*$",
+                pattern=r"(?i)(would\s+you\s+like\s+to\s+proceed|please\s+answer\s+['\"]?y['\"]?\s+for)",
                 response_generator=lambda: "y",
                 description="Proceed confirmation"
             ),
-            # SFTP prompts
+            # SFTP prompts - match actual CUCM format
             PromptPattern(
-                pattern=r"(?i)sftp\s+host[:\s]*$",
+                pattern=r"(?i)sftp\s+server\s+ip[:\s]*$",
                 response_generator=lambda: self.sftp_host,
-                description="SFTP Host"
+                description="SFTP Server IP"
             ),
             PromptPattern(
-                pattern=r"(?i)sftp\s+port[:\s]*$",
+                pattern=r"(?i)sftp\s+server\s+port[:\s\[]*.*\]?[:\s]*$",
                 response_generator=lambda: str(self.sftp_port),
-                description="SFTP Port"
+                description="SFTP Server Port"
             ),
             PromptPattern(
-                pattern=r"(?i)user[:\s]*$",
+                pattern=r"(?i)user\s+id[:\s]*$",
                 response_generator=lambda: self.sftp_username,
-                description="Username"
+                description="User ID"
             ),
             PromptPattern(
                 pattern=r"(?i)password[:\s]*$",
@@ -87,13 +88,13 @@ class PromptResponder:
                 description="Password"
             ),
             PromptPattern(
-                pattern=r"(?i)directory[:\s]*$",
+                pattern=r"(?i)download\s+directory[:\s]*$",
                 response_generator=lambda: self.sftp_directory,
-                description="Directory"
+                description="Download Directory"
             ),
             # SSH host key confirmation
             PromptPattern(
-                pattern=r"(?i)are\s+you\s+sure\s+you\s+want\s+to\s+continue\s+connecting\s*\(\s*yes\s*/\s*no\s*\)\s*\??\s*$",
+                pattern=r"(?i)are\s+you\s+sure\s+you\s+want\s+to\s+continue\s+connecting",
                 response_generator=lambda: "yes",
                 description="SSH host key confirmation"
             ),
@@ -127,49 +128,104 @@ class PromptResponder:
         stdin,
         stdout,
         timeout: float = 300.0,
-        prompt: str = "admin:"
+        prompt: str = "admin:",
+        transcript_file = None
     ) -> str:
         """
         Read output and respond to prompts until command completes.
+
+        FIX: Don't complete on early admin: prompt. Wait for transfer completion
+        indicators or stable idle period after prompt.
 
         Args:
             stdin: SSH stdin writer
             stdout: SSH stdout reader
             timeout: Maximum time to wait for command completion
             prompt: Shell prompt that indicates command completion
+            transcript_file: Optional file handle to write transcript incrementally
 
         Returns:
             Complete transcript of the interaction
 
         Raises:
-            asyncio.TimeoutError: If timeout is exceeded
+            asyncio.TimeoutError: If timeout is exceeded or no output for 120s
         """
         transcript = []
         buffer = ""
+        last_output_time = asyncio.get_event_loop().time()
+        no_output_timeout = 120.0  # Fail if no output for 120s
+        saw_prompt = False
+        idle_start_time = None
+        stable_idle_seconds = 3.0  # Wait 3s after prompt with no new prompts
 
         logger.debug("Starting prompt responder")
 
         try:
             async with asyncio.timeout(timeout):
                 while True:
-                    # Read a chunk
-                    chunk = await stdout.read(1024)
+                    # Check for no-output timeout
+                    current_time = asyncio.get_event_loop().time()
+                    time_since_output = current_time - last_output_time
+
+                    if time_since_output > no_output_timeout:
+                        error_msg = f"Timed out waiting for output (no data for {no_output_timeout}s)"
+                        logger.error(error_msg)
+                        if transcript_file:
+                            transcript_file.write(f"\n\n[ERROR: {error_msg}]\n")
+                            transcript_file.write(f"[Last 500 chars: {buffer[-500:]}]\n")
+                            transcript_file.flush()
+                        raise asyncio.TimeoutError(error_msg)
+
+                    # Read a chunk with short timeout to check for idle period
+                    try:
+                        chunk = await asyncio.wait_for(stdout.read(1024), timeout=0.5)
+                    except asyncio.TimeoutError:
+                        # No data available - check if we're in stable idle after prompt
+                        if saw_prompt and idle_start_time:
+                            idle_duration = current_time - idle_start_time
+                            if idle_duration >= stable_idle_seconds:
+                                logger.info(f"Command completed: stable idle ({idle_duration:.1f}s) after shell prompt")
+                                break
+                        continue
+
                     if not chunk:
                         # EOF
                         logger.debug("EOF reached")
                         break
 
+                    # We got output - reset idle tracking and update last output time
+                    last_output_time = current_time
+                    idle_start_time = None
+
                     buffer += chunk
                     transcript.append(chunk)
 
-                    # Check if we've returned to the shell prompt (command completed)
-                    if prompt in buffer:
-                        logger.info("Shell prompt detected - command completed")
-                        break
+                    # Write to transcript file immediately
+                    if transcript_file:
+                        transcript_file.write(chunk)
+                        transcript_file.flush()
+
+                    # Check for transfer completion indicators
+                    if "Transfer completed" in buffer or "done." in buffer.lower():
+                        logger.info("Transfer completion detected")
+                        # Continue reading to consume the shell prompt
+                        if prompt in buffer:
+                            logger.info("Shell prompt detected after transfer completion")
+                            break
+
+                    # Check if we've seen the shell prompt
+                    if prompt in buffer and not saw_prompt:
+                        saw_prompt = True
+                        idle_start_time = current_time
+                        logger.debug(f"Shell prompt detected - waiting {stable_idle_seconds}s for stable idle")
 
                     # Check for prompts that need responses
                     matched = self.match_prompt(buffer)
                     if matched:
+                        # We got a prompt - reset idle tracking
+                        idle_start_time = None
+                        saw_prompt = False
+
                         response = matched.response_generator()
 
                         # Log the prompt (but not the response if it's a password)
@@ -178,6 +234,14 @@ class PromptResponder:
                         else:
                             logger.info(f"Responding to prompt: {matched.description} = {response}")
 
+                        # Write prompt response to transcript file
+                        if transcript_file:
+                            if "password" in matched.description.lower():
+                                transcript_file.write(f"\n[AUTO-RESPONSE: {matched.description} = (hidden)]\n")
+                            else:
+                                transcript_file.write(f"\n[AUTO-RESPONSE: {matched.description} = {response}]\n")
+                            transcript_file.flush()
+
                         # Send response
                         stdin.write(response + '\n')
                         await stdin.drain()
@@ -185,8 +249,12 @@ class PromptResponder:
                         # Clear buffer to wait for next prompt
                         buffer = ""
 
-        except asyncio.TimeoutError:
-            logger.error(f"Prompt responder timed out after {timeout}s")
+        except asyncio.TimeoutError as e:
+            error_msg = str(e) if str(e) else f"Timed out after {timeout}s"
+            logger.error(f"Prompt responder timed out: {error_msg}")
+            if transcript_file:
+                transcript_file.write(f"\n\n[TIMEOUT: {error_msg}]\n")
+                transcript_file.flush()
             raise
 
         full_transcript = ''.join(transcript)

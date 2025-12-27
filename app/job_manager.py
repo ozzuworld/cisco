@@ -492,16 +492,26 @@ class JobManager:
         logger.info(f"[Job {job.job_id}] Processing node: {node}")
         job.update_node_status(node, NodeStatus.RUNNING)
 
-        # Prepare transcript file
+        # FIX: Prepare transcript file and set path immediately
         transcript_path = self.settings.transcripts_dir / job.job_id / f"{node}.log"
         transcript_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Set transcript path immediately so we can see progress even if job hangs
+        rel_transcript_path = str(transcript_path.relative_to(self.settings.storage_root))
+        job.node_statuses[node].transcript_path = rel_transcript_path
+        job.save()
 
         transcript_lines = []
 
         try:
+            # FIX: Open transcript file for incremental writing
+            transcript_file = open(transcript_path, 'w')
+
             # v0.3.2: Check cancellation before connecting
             if job.cancelled:
                 logger.info(f"[Job {job.job_id}][{node}] Cancelled before connect")
+                transcript_file.write("\n[CANCELLED]\n")
+                transcript_file.close()
                 job.update_node_status(node, NodeStatus.CANCELLED)
                 return
 
@@ -517,11 +527,15 @@ class JobManager:
                 connect_timeout=float(self.settings.job_connect_timeout_sec)
             ) as client:
 
+                transcript_file.write(f"Connected to {node}\n")
+                transcript_file.flush()
                 transcript_lines.append(f"Connected to {node}\n")
 
                 # v0.3.2: Check cancellation after connect
                 if job.cancelled:
                     logger.info(f"[Job {job.job_id}][{node}] Cancelled after connect")
+                    transcript_file.write("\n[CANCELLED]\n")
+                    transcript_file.flush()
                     transcript_lines.append("\n[CANCELLED]\n")
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
@@ -531,7 +545,10 @@ class JobManager:
                     # v0.3.2: Check cancellation before each path
                     if job.cancelled:
                         logger.info(f"[Job {job.job_id}][{node}] Cancelled during path processing")
-                        transcript_lines.append(f"\n[CANCELLED before processing {path}]\n")
+                        msg = f"\n[CANCELLED before processing {path}]\n"
+                        transcript_file.write(msg)
+                        transcript_file.flush()
+                        transcript_lines.append(msg)
                         job.update_node_status(node, NodeStatus.CANCELLED)
                         return
 
@@ -550,10 +567,11 @@ class JobManager:
                         match=match
                     )
 
-                    transcript_lines.append(f"\n{'='*60}\n")
-                    transcript_lines.append(f"Collecting: {path}\n")
-                    transcript_lines.append(f"Command: {command}\n")
-                    transcript_lines.append(f"{'='*60}\n\n")
+                    # Write command info to transcript
+                    header = f"\n{'='*60}\nCollecting: {path}\nCommand: {command}\n{'='*60}\n\n"
+                    transcript_file.write(header)
+                    transcript_file.flush()
+                    transcript_lines.append(header)
 
                     logger.info(f"[Job {job.job_id}][{node}] Executing: {command}")
 
@@ -574,24 +592,18 @@ class JobManager:
                         sftp_directory=sftp_directory
                     )
 
-                    # Respond to prompts
+                    # FIX: Respond to prompts with incremental transcript writing
                     output = await responder.respond_to_prompts(
                         stdin=client._session.stdin,
                         stdout=client._session.stdout,
                         timeout=float(self.settings.job_command_timeout_sec),
-                        prompt=client.prompt
+                        prompt=client.prompt,
+                        transcript_file=transcript_file
                     )
 
                     transcript_lines.append(output)
-                    transcript_lines.append("\n")
-
-            # Write transcript
-            with open(transcript_path, 'w') as f:
-                f.writelines(transcript_lines)
-
-            # Update node status with transcript path
-            rel_transcript_path = str(transcript_path.relative_to(self.settings.storage_root))
-            job.node_statuses[node].transcript_path = rel_transcript_path
+                    transcript_file.write("\n")
+                    transcript_file.flush()
 
             # BE-017: Check if CUCM reported "No files matched filter criteria"
             full_transcript = ''.join(transcript_lines)
@@ -619,11 +631,11 @@ class JobManager:
         except asyncio.CancelledError:
             # v0.3.2: Handle task cancellation gracefully
             logger.info(f"[Job {job.job_id}][{node}] Task cancelled")
-            transcript_lines.append("\n[TASK CANCELLED]\n")
-
-            # Write transcript
-            with open(transcript_path, 'w') as f:
-                f.writelines(transcript_lines)
+            msg = "\n[TASK CANCELLED]\n"
+            transcript_lines.append(msg)
+            if transcript_file and not transcript_file.closed:
+                transcript_file.write(msg)
+                transcript_file.flush()
 
             # Mark node as cancelled with completed timestamp
             job.update_node_status(node, NodeStatus.CANCELLED)
@@ -635,11 +647,18 @@ class JobManager:
             error_msg = f"{type(e).__name__}: {str(e)}"
 
             # Write error to transcript
-            transcript_lines.append(f"\n\nERROR: {error_msg}\n")
-            with open(transcript_path, 'w') as f:
-                f.writelines(transcript_lines)
+            msg = f"\n\nERROR: {error_msg}\n"
+            transcript_lines.append(msg)
+            if transcript_file and not transcript_file.closed:
+                transcript_file.write(msg)
+                transcript_file.flush()
 
             job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+
+        finally:
+            # FIX: Ensure transcript file is always closed
+            if transcript_file and not transcript_file.closed:
+                transcript_file.close()
 
     def _discover_artifacts(self, job_id: str, node: str) -> List[Artifact]:
         """

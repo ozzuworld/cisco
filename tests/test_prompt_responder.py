@@ -95,7 +95,7 @@ def test_prompt_responder_creation():
 
 
 def test_prompt_responder_match_sftp_host():
-    """Test matching SFTP host prompt"""
+    """Test matching SFTP server IP prompt (actual CUCM format)"""
     responder = PromptResponder(
         sftp_host="test.com",
         sftp_port=22,
@@ -104,20 +104,20 @@ def test_prompt_responder_match_sftp_host():
         sftp_directory="/logs"
     )
 
-    # Test various formats
-    matched = responder.match_prompt("SFTP host:")
+    # FIX: Test actual CUCM prompt format
+    matched = responder.match_prompt("SFTP server IP:")
     assert matched is not None
     assert matched.response_generator() == "test.com"
 
-    matched = responder.match_prompt("sftp host:")
+    matched = responder.match_prompt("sftp server ip:")
     assert matched is not None
 
-    matched = responder.match_prompt("SFTP Host:")
+    matched = responder.match_prompt("SFTP Server IP:")
     assert matched is not None
 
 
 def test_prompt_responder_match_port():
-    """Test matching SFTP port prompt"""
+    """Test matching SFTP port prompt (actual CUCM format with default)"""
     responder = PromptResponder(
         sftp_host="test.com",
         sftp_port=2222,
@@ -126,13 +126,19 @@ def test_prompt_responder_match_port():
         sftp_directory="/logs"
     )
 
-    matched = responder.match_prompt("SFTP port:")
+    # FIX: Test actual CUCM format with default value shown
+    matched = responder.match_prompt("SFTP server port [22]:")
+    assert matched is not None
+    assert matched.response_generator() == "2222"
+
+    # Also test without default
+    matched = responder.match_prompt("SFTP server port:")
     assert matched is not None
     assert matched.response_generator() == "2222"
 
 
 def test_prompt_responder_match_user():
-    """Test matching username prompt"""
+    """Test matching username prompt (actual CUCM format)"""
     responder = PromptResponder(
         sftp_host="test.com",
         sftp_port=22,
@@ -141,9 +147,13 @@ def test_prompt_responder_match_user():
         sftp_directory="/logs"
     )
 
-    matched = responder.match_prompt("User:")
+    # FIX: Test actual CUCM format "User ID:"
+    matched = responder.match_prompt("User ID:")
     assert matched is not None
     assert matched.response_generator() == "testuser"
+
+    matched = responder.match_prompt("user id:")
+    assert matched is not None
 
 
 def test_prompt_responder_match_password():
@@ -162,7 +172,7 @@ def test_prompt_responder_match_password():
 
 
 def test_prompt_responder_match_directory():
-    """Test matching directory prompt"""
+    """Test matching directory prompt (actual CUCM format)"""
     responder = PromptResponder(
         sftp_host="test.com",
         sftp_port=22,
@@ -171,9 +181,13 @@ def test_prompt_responder_match_directory():
         sftp_directory="/custom/path"
     )
 
-    matched = responder.match_prompt("Directory:")
+    # FIX: Test actual CUCM format "Download directory:"
+    matched = responder.match_prompt("Download directory:")
     assert matched is not None
     assert matched.response_generator() == "/custom/path"
+
+    matched = responder.match_prompt("download directory:")
+    assert matched is not None
 
 
 def test_prompt_responder_no_match():
@@ -204,12 +218,12 @@ def test_prompt_responder_case_insensitive():
         sftp_directory="/logs"
     )
 
-    # All variations should match
+    # FIX: Test actual CUCM format with case variations
     variations = [
-        "SFTP HOST:",
-        "sftp host:",
-        "Sftp Host:",
-        "SFTP host:",
+        "SFTP SERVER IP:",
+        "sftp server ip:",
+        "Sftp Server Ip:",
+        "SFTP server IP:",
     ]
 
     for variant in variations:
@@ -227,13 +241,13 @@ def test_prompt_responder_multiline_text():
         sftp_directory="/logs"
     )
 
-    # Prompt on last line should match
-    text = "Some output\nMore output\nSFTP host:"
+    # FIX: Prompt on last line should match (using actual CUCM format)
+    text = "Some output\nMore output\nSFTP server IP:"
     matched = responder.match_prompt(text)
     assert matched is not None
 
     # Prompt not on last line should not match (we only check last line)
-    text = "SFTP host:\nMore output\nadmin:"
+    text = "SFTP server IP:\nMore output\nadmin:"
     matched = responder.match_prompt(text)
     # Should match admin: since it's the last line
     assert matched is None  # admin: is not in our patterns
@@ -298,6 +312,31 @@ def test_be017_prompt_responder_proceed_confirmation():
         assert matched.response_generator() == "y"
 
 
+def test_be017_prompt_responder_retry_confirmation():
+    """FIX: Test matching 'Please answer y for <yes> or n for <no>:' retry prompt"""
+    responder = PromptResponder(
+        sftp_host="test.com",
+        sftp_port=22,
+        sftp_username="user",
+        sftp_password="pass",
+        sftp_directory="/logs"
+    )
+
+    # Test various formats of retry prompt (appears when invalid input given)
+    variations = [
+        "Please answer 'y' for <yes> or 'n' for <no>:",
+        "please answer 'y' for <yes> or 'n' for <no>:",
+        'Please answer "y" for <yes> or "n" for <no>:',
+        "PLEASE ANSWER 'Y' FOR <YES> OR 'N' FOR <NO>:",
+        "Please answer y for <yes> or n for <no>:",  # Without quotes
+    ]
+
+    for variant in variations:
+        matched = responder.match_prompt(variant)
+        assert matched is not None, f"Failed to match: {variant}"
+        assert matched.response_generator() == "y"
+
+
 def test_be017_prompt_responder_host_key_confirmation():
     """BE-017: Test matching SSH host key confirmation prompt"""
     responder = PromptResponder(
@@ -353,6 +392,36 @@ def test_be017_all_prompts_in_order():
 
     # Verify host key prompt is last (also general)
     assert "host key" in responder.patterns[6].description.lower()
+
+
+def test_fix_full_sftp_wizard_sequence():
+    """FIX: Test full SFTP wizard prompt sequence as seen in real CUCM CLI"""
+    responder = PromptResponder(
+        sftp_host="192.168.1.200",
+        sftp_port=22,
+        sftp_username="sftpuser",
+        sftp_password="sftppass",
+        sftp_directory="/cucm-logs"
+    )
+
+    # Simulate the full SFTP wizard sequence from actual CUCM
+    prompts_and_expected_responses = [
+        ("Would you like to proceed [y/n]?", "y"),
+        ("SFTP server IP:", "192.168.1.200"),
+        ("SFTP server port [22]:", "22"),
+        ("User ID:", "sftpuser"),
+        ("Password:", "sftppass"),
+        ("Download directory:", "/cucm-logs"),
+        ("Are you sure you want to continue connecting (yes/no)?", "yes"),
+        ("Please answer 'y' for <yes> or 'n' for <no>:", "y"),  # Retry loop
+    ]
+
+    for prompt_text, expected_response in prompts_and_expected_responses:
+        matched = responder.match_prompt(prompt_text)
+        assert matched is not None, f"Failed to match prompt: {prompt_text}"
+        actual_response = matched.response_generator()
+        assert actual_response == expected_response, \
+            f"Wrong response for '{prompt_text}': expected '{expected_response}', got '{actual_response}'"
 
 
 if __name__ == "__main__":
