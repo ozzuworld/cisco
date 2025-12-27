@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -157,16 +158,36 @@ class Job:
         return job
 
     def save(self):
-        """Persist job state to disk"""
+        """
+        Persist job state to disk atomically.
+
+        Uses atomic write (temp file + rename) to prevent corruption if process
+        crashes during write (BE-016).
+        """
         settings = get_settings()
         job_file = settings.jobs_dir / f"{self.job_id}.json"
+        temp_file = settings.jobs_dir / f"{self.job_id}.json.tmp"
 
         try:
-            with open(job_file, 'w') as f:
+            # Ensure jobs directory exists
+            settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+
+            # Write to temp file first
+            with open(temp_file, 'w') as f:
                 json.dump(self.to_dict(), f, indent=2)
+
+            # Atomic rename (overwrites existing file atomically)
+            os.replace(temp_file, job_file)
+
             logger.debug(f"Saved job {self.job_id} to {job_file}")
         except Exception as e:
             logger.error(f"Failed to save job {self.job_id}: {e}")
+            # Clean up temp file if it exists
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
 
     def update_status(self, new_status: JobStatus):
         """Update job status and save"""

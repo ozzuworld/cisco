@@ -302,6 +302,56 @@ def test_list_jobs_after_restart(configured_env, temp_storage, mock_profile):
         assert len(limited_jobs) == 3
 
 
+def test_job_json_is_valid(configured_env, temp_storage, mock_profile):
+    """BE-016: Verify saved job JSON is valid and parseable"""
+    from app.config import get_settings
+
+    with patch('app.job_manager.get_profile_catalog') as mock_catalog:
+        mock_catalog.return_value.get_profile.return_value = mock_profile
+
+        job_manager = JobManager()
+
+        request = CreateJobRequest(
+            publisher_host="10.1.1.1",
+            port=22,
+            username="admin",
+            password="secret123",
+            nodes=["node1.example.com", "node2.example.com"],
+            profile="test-profile"
+        )
+
+        job = job_manager.create_job(request)
+
+        # Update some statuses to ensure datetime serialization works
+        job.update_status(JobStatus.RUNNING)
+        job.update_node_status("node1.example.com", NodeStatus.RUNNING)
+        job.update_node_status("node2.example.com", NodeStatus.SUCCEEDED)
+
+        settings = get_settings()
+        job_file = settings.jobs_dir / f"{job.job_id}.json"
+
+        # Verify JSON file is valid and parseable
+        assert job_file.exists()
+
+        with open(job_file, 'r') as f:
+            data = json.load(f)  # Will raise if invalid JSON
+
+        # Verify all required fields are present
+        assert "job_id" in data
+        assert "status" in data
+        assert "created_at" in data
+        assert "node_statuses" in data
+
+        # Verify datetime fields are serialized as ISO strings
+        assert isinstance(data["created_at"], str)
+        assert isinstance(data["started_at"], str)
+
+        # Verify enum is serialized as string value
+        assert data["status"] == "running"
+        assert data["node_statuses"]["node1.example.com"]["status"] == "running"
+        assert data["node_statuses"]["node2.example.com"]["status"] == "succeeded"
+
+
 def test_job_from_dict_reconstruction(configured_env, temp_storage, mock_profile):
     """BE-016: Verify Job.from_dict() correctly reconstructs jobs"""
     with patch('app.job_manager.get_profile_catalog') as mock_catalog:
