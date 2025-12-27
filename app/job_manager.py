@@ -155,6 +155,7 @@ class JobManager:
         """Initialize job manager"""
         self.jobs: Dict[str, Job] = {}
         self.running_tasks: Dict[str, asyncio.Task] = {}  # v0.3: track tasks for cancellation
+        self.node_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # v0.3.3: track per-node tasks
         self.settings = get_settings()
         self._load_existing_jobs()
 
@@ -268,6 +269,8 @@ class JobManager:
         """
         Cancel a running job (best-effort).
 
+        v0.3.3: Immediately finalizes node and job status for fast visibility.
+
         Args:
             job_id: Job to cancel
 
@@ -282,30 +285,36 @@ class JobManager:
         # Mark job as cancelled
         job.cancelled = True
 
-        # If job is queued or not started yet, mark as cancelled immediately
-        if job.status == JobStatus.QUEUED:
-            job.update_status(JobStatus.CANCELLED)
-            logger.info(f"Job {job_id} cancelled (was queued)")
-            return True
-
-        # If job is running, try to cancel the task
+        # v0.3.3: Cancel job-level task (if running)
         if job_id in self.running_tasks:
             task = self.running_tasks[job_id]
             if not task.done():
                 task.cancel()
-                logger.info(f"Job {job_id} cancellation requested (task cancelled)")
-            else:
-                logger.info(f"Job {job_id} already completed")
-        else:
-            logger.warning(f"Job {job_id} has no running task to cancel")
+                logger.info(f"Job {job_id} main task cancelled")
 
-        # Mark pending nodes as cancelled
+        # v0.3.3: Cancel all per-node tasks immediately (if running)
+        if job_id in self.node_tasks:
+            for node, task in self.node_tasks[job_id].items():
+                if not task.done():
+                    task.cancel()
+                    logger.info(f"Job {job_id} node {node} task cancelled")
+
+        # v0.3.3: Immediately mark PENDING and RUNNING nodes as CANCELLED
+        # This ensures UI sees cancellation immediately
         for node, node_status in job.node_statuses.items():
-            if node_status.status == NodeStatus.PENDING:
+            if node_status.status in [NodeStatus.PENDING, NodeStatus.RUNNING]:
                 job.update_node_status(node, NodeStatus.CANCELLED)
+                logger.info(f"Job {job_id} node {node} marked CANCELLED")
+
+        # v0.3.3: Determine final job status immediately
+        node_statuses = [ns.status for ns in job.node_statuses.values()]
+        if any(s == NodeStatus.SUCCEEDED for s in node_statuses):
+            job.update_status(JobStatus.PARTIAL)
+        else:
+            job.update_status(JobStatus.CANCELLED)
 
         job.save()
-        logger.info(f"Job {job_id} marked for cancellation")
+        logger.info(f"Job {job_id} cancelled - status: {job.status}")
         return True
 
     async def execute_job(self, job_id: str):
@@ -341,9 +350,14 @@ class JobManager:
                 async with semaphore:
                     await self._process_node(job, node)
 
-            # v0.3.2: Process all nodes (removed return_exceptions to allow cancellation)
-            # Each node handles its own errors, so we want CancelledError to propagate
-            tasks = [asyncio.create_task(process_with_semaphore(node)) for node in job.nodes_list]
+            # v0.3.3: Track per-node tasks for immediate cancellation
+            self.node_tasks[job_id] = {}
+            tasks = []
+            for node in job.nodes_list:
+                task = asyncio.create_task(process_with_semaphore(node))
+                self.node_tasks[job_id][node] = task
+                tasks.append(task)
+
             try:
                 await asyncio.gather(*tasks)
             except asyncio.CancelledError:
@@ -393,9 +407,11 @@ class JobManager:
             job.update_status(JobStatus.FAILED)
 
         finally:
-            # Remove from running tasks
+            # v0.3.3: Clean up task tracking
             if job_id in self.running_tasks:
                 del self.running_tasks[job_id]
+            if job_id in self.node_tasks:
+                del self.node_tasks[job_id]
 
     async def _process_node(self, job: Job, node: str):
         """
@@ -405,6 +421,13 @@ class JobManager:
             job: Parent job
             node: Node to process
         """
+        # v0.3.3: Check cancellation BEFORE setting node to RUNNING
+        # This prevents race where cancel() is called but node still becomes RUNNING
+        if job.cancelled:
+            logger.info(f"[Job {job.job_id}][{node}] Cancelled before start")
+            job.update_node_status(node, NodeStatus.CANCELLED)
+            return
+
         logger.info(f"[Job {job.job_id}] Processing node: {node}")
         job.update_node_status(node, NodeStatus.RUNNING)
 

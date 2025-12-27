@@ -371,12 +371,12 @@ def test_cancel_job_persists_cancelled_state(client_no_auth):
 # ============================================================================
 
 
-def test_api_version_is_v032(client_no_auth):
-    """API should report version 0.3.2"""
+def test_api_version_is_v033(client_no_auth):
+    """API should report version 0.3.3"""
     response = client_no_auth.get("/")
     assert response.status_code == 200
     data = response.json()
-    assert data["version"] == "0.3.2"
+    assert data["version"] == "0.3.3"
 
 
 # ============================================================================
@@ -598,6 +598,134 @@ def test_cancel_sets_completed_at_for_nodes(client_no_auth):
         if node["status"] == "cancelled":
             assert node["completed_at"] is not None, \
                 f"Node {node['node']} is cancelled but missing completed_at"
+
+
+# ============================================================================
+# v0.3.3 Tests - Cancellation Race Condition Fix
+# ============================================================================
+
+
+def test_immediate_cancel_shows_cancelled_immediately(client_no_auth):
+    """v0.3.3: Immediately after cancel, job and nodes should show cancelled"""
+    # Create a job
+    job_manager = get_job_manager()
+    from app.models import CreateJobRequest
+
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1", "10.10.10.2"],
+        profile="basic_platform",
+        sftp_host="sftp.example.com",
+        sftp_port=22,
+        sftp_username="sftp_user",
+        sftp_password="sftp_pass"
+    )
+
+    job = job_manager.create_job(request)
+    job_id = job.job_id
+
+    # Cancel immediately (before execution starts or during early execution)
+    cancel_response = client_no_auth.post(f"/jobs/{job_id}/cancel")
+    assert cancel_response.status_code == 200
+
+    # IMMEDIATELY check status (no sleep needed in v0.3.3)
+    response = client_no_auth.get(f"/jobs/{job_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    # v0.3.3 fix: Status should be finalized (not "running")
+    assert data["status"] in ["cancelled", "partial"], \
+        f"Job status should be cancelled or partial, got: {data['status']}"
+
+    # All nodes should be cancelled (they were PENDING at cancel time)
+    node_statuses = [node["status"] for node in data["nodes"]]
+    assert all(status == "cancelled" for status in node_statuses), \
+        f"All nodes should be cancelled, got: {node_statuses}"
+
+    # completed_at should be set
+    assert data["completed_at"] is not None
+
+
+def test_cancel_during_running_prevents_new_running_nodes(client_no_auth):
+    """v0.3.3: Cancel should prevent PENDING nodes from becoming RUNNING"""
+    # Create a job with multiple nodes
+    job_manager = get_job_manager()
+    from app.models import CreateJobRequest
+
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1", "10.10.10.2", "10.10.10.3"],
+        profile="basic_platform",
+        sftp_host="sftp.example.com",
+        sftp_port=22,
+        sftp_username="sftp_user",
+        sftp_password="sftp_pass"
+    )
+
+    job = job_manager.create_job(request)
+    job_id = job.job_id
+
+    # Cancel immediately
+    response = client_no_auth.post(f"/jobs/{job_id}/cancel")
+    assert response.status_code == 200
+
+    # Check status
+    response = client_no_auth.get(f"/jobs/{job_id}")
+    assert response.status_code == 200
+    data = response.json()
+
+    # v0.3.3 fix: No nodes should be "running" after cancel
+    node_statuses = [node["status"] for node in data["nodes"]]
+    assert "running" not in node_statuses, \
+        f"No nodes should be running after cancel, got: {node_statuses}"
+
+    # All nodes should be cancelled
+    assert all(status == "cancelled" for status in node_statuses)
+
+
+def test_cancel_updates_job_status_immediately(client_no_auth):
+    """v0.3.3: cancel_job() should update job status immediately"""
+    # Create a job
+    job_manager = get_job_manager()
+    from app.models import CreateJobRequest
+
+    request = CreateJobRequest(
+        publisher_host="cucm-pub.example.com",
+        port=22,
+        username="admin",
+        password="secret123",
+        nodes=["10.10.10.1"],
+        profile="basic_platform",
+        sftp_host="sftp.example.com",
+        sftp_port=22,
+        sftp_username="sftp_user",
+        sftp_password="sftp_pass"
+    )
+
+    job = job_manager.create_job(request)
+    job_id = job.job_id
+
+    # Initial status
+    assert job.status.value in ["queued", "pending"]
+
+    # Cancel
+    success = job_manager.cancel_job(job_id)
+    assert success is True
+
+    # v0.3.3: Job status should be immediately updated (not still "queued")
+    job = job_manager.get_job(job_id)
+    assert job.status.value == "cancelled", \
+        f"Job status should be cancelled, got: {job.status.value}"
+
+    # All nodes should be cancelled
+    for node_status in job.node_statuses.values():
+        assert node_status.status.value == "cancelled"
 
 
 if __name__ == "__main__":
