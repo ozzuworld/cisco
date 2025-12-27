@@ -600,21 +600,15 @@ class JobManager:
 
             # FIX: Pre-create directory for CUCM to upload to
             # CUCM's file get activelog does NOT create directories
+            # BE-017: With bind mount, create directories locally - they appear on SFTP automatically
             try:
-                # If SFTP is localhost/same server: create directories locally via bind mount
-                if self.settings.sftp_host in ('localhost', '127.0.0.1', '::1'):
-                    # Local directory that bind mount maps to SFTP
-                    local_dir = self.settings.received_dir / job.job_id / node
-                    local_dir.mkdir(parents=True, exist_ok=True)
-                    logger.info(f"Created local directory (bind mount): {local_dir}")
-                    transcript_file.write(f"SFTP directory created locally: {sftp_directory}\n")
-                else:
-                    # Remote SFTP server: connect and create via SFTP
-                    await self._ensure_sftp_directory(sftp_directory)
-                    transcript_file.write(f"SFTP directory created remotely: {sftp_directory}\n")
+                local_dir = self.settings.received_dir / job.job_id / node
+                local_dir.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Created directory for SFTP uploads: {local_dir}")
+                transcript_file.write(f"SFTP directory ready: {sftp_directory}\n")
                 transcript_file.flush()
             except Exception as e:
-                error_msg = f"Failed to create SFTP directory {sftp_directory}: {e}"
+                error_msg = f"Failed to create directory {local_dir}: {e}"
                 logger.error(f"[Job {job.job_id}][{node}] {error_msg}")
                 transcript_file.write(f"\nERROR: {error_msg}\n")
                 transcript_file.flush()
