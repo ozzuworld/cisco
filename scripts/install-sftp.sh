@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# === SFTP for CUCM Log Collector - BE-017 ===
-# Chroots SFTP user directly to backend's storage/received directory
-# Files land at: storage/received/{job-id}/{node}/
-# Backend finds artifacts immediately without additional transfer
+# === SFTP for CUCM Log Collector - Option B (Bind Mount) ===
+# Chroots to /sftp/cucm-collector (safe, no user home ownership issues)
+# Use bind mount to map to backend's storage/received
 
 SFTP_USER="${SFTP_USER:-cucm-collector}"
 SFTP_GROUP="${SFTP_GROUP:-$SFTP_USER}"
-
-# BE-017: Default to backend's storage/received directory
-# This should be the ABSOLUTE path to your backend's storage/received directory
-BACKEND_STORAGE="${BACKEND_STORAGE:-/home/hadmin/cisco/storage/received}"
+SFTP_CHROOT_BASE="${SFTP_CHROOT_BASE:-/sftp}"
+SFTP_SUBDIR="${SFTP_SUBDIR:-received}"
 
 SSH_PORT="${SSH_PORT:-22}"
 CONF_FILE="/etc/ssh/sshd_config.d/99-sftp-${SFTP_USER}.conf"
@@ -53,32 +50,31 @@ fi
 echo "${SFTP_USER}:${PASS1}" | chpasswd
 unset PASS1 PASS2
 
-echo "[5/7] Configuring chroot to backend storage..."
-# BE-017: Chroot directly to backend's storage/received directory
-CHROOT_DIR="$BACKEND_STORAGE"
+echo "[5/7] Creating chroot structure..."
+CHROOT_DIR="${SFTP_CHROOT_BASE}/${SFTP_USER}"
+UPLOAD_DIR="${CHROOT_DIR}/${SFTP_SUBDIR}"
 
-# Create the chroot directory
 mkdir -p "$CHROOT_DIR"
+mkdir -p "$UPLOAD_DIR"
 
-# Chroot must be owned by root for security
+# Chroot must be owned by root and not writable by the user
 chown root:root "$CHROOT_DIR"
 chmod 755 "$CHROOT_DIR"
 
-# SFTP user must be able to write inside the chroot
-# We'll set proper permissions on job subdirectories as they're created
-echo "SFTP chroot will be: $CHROOT_DIR"
-echo "Backend will create job subdirectories with proper permissions"
+# Upload dir owned by SFTP user
+chown "${SFTP_USER}:${SFTP_GROUP}" "$UPLOAD_DIR"
+chmod 775 "$UPLOAD_DIR"
 
 echo "[6/7] Writing SSHD drop-in config: $CONF_FILE"
 mkdir -p /etc/ssh/sshd_config.d
 
 cat > "$CONF_FILE" <<EOF
-# Auto-generated SFTP config for ${SFTP_USER} - BE-017
+# Auto-generated SFTP config for ${SFTP_USER} - Option B (bind mount)
 # Enables legacy ssh-rsa hostkey algorithm for older clients (e.g., CUCM)
 HostKeyAlgorithms +ssh-rsa
 PubkeyAcceptedAlgorithms +ssh-rsa
 
-# Force chrooted SFTP for this user - chroot to backend storage
+# Force chrooted SFTP for this user
 Match User ${SFTP_USER}
   ChrootDirectory ${CHROOT_DIR}
   ForceCommand internal-sftp
@@ -96,16 +92,31 @@ systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 systemctl --no-pager --full status ssh 2>/dev/null || systemctl --no-pager --full status sshd 2>/dev/null || true
 
 echo
-echo "DONE - BE-017 SFTP Setup"
+echo "======================================================================"
+echo "DONE - SFTP Setup (Option B: Bind Mount)"
+echo "======================================================================"
 echo "SFTP user:        ${SFTP_USER}"
 echo "Chroot directory: ${CHROOT_DIR}"
+echo "Upload directory: ${UPLOAD_DIR}"
 echo
-echo "IMPORTANT for backend configuration:"
-echo " - SFTP_REMOTE_BASE_DIR should be empty or just '{job-id}/{node}'"
-echo " - Backend creates: {job-id}/{node}/ with proper permissions"
-echo " - CUCM uploads to: {job-id}/{node}/"
-echo " - Files land at:   ${CHROOT_DIR}/{job-id}/{node}/"
-echo " - Backend finds them at: storage/received/{job-id}/{node}/"
+echo "NEXT STEPS - Set up bind mount to backend storage:"
 echo
-echo "NOTE: Backend must run as root or same user that owns ${CHROOT_DIR}"
-echo "      to create job subdirectories with proper permissions"
+echo "1. Create bind mount (run on THIS server):"
+echo "   sudo mount --bind /path/to/backend/storage/received ${UPLOAD_DIR}"
+echo
+echo "   Example:"
+echo "   sudo mount --bind /home/hadmin/cisco/storage/received ${UPLOAD_DIR}"
+echo
+echo "2. Make mount permanent (add to /etc/fstab):"
+echo "   echo '/home/hadmin/cisco/storage/received ${UPLOAD_DIR} none bind 0 0' | sudo tee -a /etc/fstab"
+echo
+echo "3. Update backend config (.env):"
+echo "   SFTP_REMOTE_BASE_DIR=${SFTP_SUBDIR}"
+echo
+echo "4. Restart backend"
+echo
+echo "Files will then land at:"
+echo "  - CUCM uploads to:  ${SFTP_SUBDIR}/{job-id}/{node}/"
+echo "  - Files appear at:  ${UPLOAD_DIR}/{job-id}/{node}/"
+echo "  - Backend finds at: storage/received/{job-id}/{node}/ (via bind mount)"
+echo "======================================================================"
