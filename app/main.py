@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
@@ -60,12 +61,17 @@ app = FastAPI(
 
 # Wire up middleware (v0.3)
 # CORS middleware must be first (BE-008: Flutter Web support)
+# BE-015: Use environment variable directly to avoid loading full settings at import time
+cors_allowed_origins = os.getenv(
+    "CORS_ALLOWED_ORIGINS",
+    r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"  # Default: localhost/127.0.0.1
+)
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",  # Support localhost and 127.0.0.1 with any port
+    allow_origin_regex=cors_allowed_origins,  # BE-015: Configurable CORS origins
     allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
-    allow_headers=["*"],  # Allow all headers (including Authorization)
-    expose_headers=["X-Request-ID"],  # Expose request ID to browser
+    allow_headers=["*"],  # Allow all headers (including Authorization, Content-Type)
+    expose_headers=["X-Request-ID", "Content-Disposition"],  # BE-015: Expose headers for downloads
     allow_credentials=True  # Allow cookies/auth headers
 )
 app.add_middleware(RequestIDMiddleware)  # Adds request_id

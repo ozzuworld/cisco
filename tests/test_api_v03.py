@@ -849,5 +849,59 @@ def test_cors_origin_validation(client_no_auth):
     assert "access-control-allow-origin" in response.headers
 
 
+# ============================================================================
+# BE-015 Tests - Configurable CORS + Download-friendly behavior
+# ============================================================================
+
+
+def test_cors_exposes_content_disposition_header(client_no_auth):
+    """BE-015: Verify Content-Disposition header is exposed for downloads"""
+    response = client_no_auth.get(
+        "/",
+        headers={"Origin": "http://localhost:8080"}
+    )
+
+    assert response.status_code == 200
+    assert "access-control-expose-headers" in response.headers
+
+    exposed_headers = response.headers.get("access-control-expose-headers", "")
+    # Should expose both X-Request-ID and Content-Disposition
+    assert "X-Request-ID" in exposed_headers
+    assert "Content-Disposition" in exposed_headers
+
+
+def test_download_endpoint_with_cors(client_no_auth, temp_storage):
+    """BE-015: Verify download endpoint works with CORS and exposes Content-Disposition"""
+    # Create a fake artifact file
+    artifacts_dir = temp_storage / "received"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    test_file = artifacts_dir / "test-artifact.tar.gz"
+    test_file.write_text("test artifact content")
+
+    # Mock artifact lookup to return our test file
+    with patch("app.main.get_artifact_path") as mock_get_artifact:
+        mock_get_artifact.return_value = test_file
+
+        # Request download with CORS origin header
+        response = client_no_auth.get(
+            "/artifacts/test-artifact-id/download",
+            headers={"Origin": "http://localhost:8080"}
+        )
+
+        assert response.status_code == 200
+
+        # Verify CORS headers are present
+        assert "access-control-allow-origin" in response.headers
+
+        # Verify Content-Disposition header is set (FileResponse does this automatically)
+        assert "content-disposition" in response.headers
+        assert "test-artifact.tar.gz" in response.headers["content-disposition"]
+
+        # Verify exposed headers include Content-Disposition
+        assert "access-control-expose-headers" in response.headers
+        exposed = response.headers["access-control-expose-headers"]
+        assert "Content-Disposition" in exposed
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

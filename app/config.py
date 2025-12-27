@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     # Debug Settings (BE-012)
     debug_http: bool = False  # Enable detailed HTTP request logging
 
+    # CORS Settings (BE-015)
+    cors_allowed_origins: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"  # Regex pattern for allowed origins (dev: localhost, prod: set to specific domains)
+
     # Authentication (v0.3)
     api_key: Optional[str] = None  # If set, enables API key auth
 
