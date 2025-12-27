@@ -604,6 +604,8 @@ class JobManager:
             try:
                 local_dir = self.settings.artifacts_dir / job.job_id / node
                 local_dir.mkdir(parents=True, exist_ok=True)
+                # Set permissions so SFTP user can write (via bind mount)
+                local_dir.chmod(0o777)  # World-writable for SFTP user access
                 logger.info(f"Created directory for SFTP uploads: {local_dir}")
                 transcript_file.write(f"SFTP directory ready: {sftp_directory}\n")
                 transcript_file.flush()
