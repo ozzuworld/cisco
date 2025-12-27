@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +27,26 @@ from app.artifact_manager import list_artifacts_for_job
 
 
 logger = logging.getLogger(__name__)
+
+# BE-018: Per-job write locks to prevent concurrent modifications
+_job_write_locks: Dict[str, threading.Lock] = {}
+_job_write_locks_lock = threading.Lock()  # Lock for the locks dict itself
+
+
+def _get_job_write_lock(job_id: str) -> threading.Lock:
+    """
+    Get or create a write lock for a specific job (BE-018).
+
+    Args:
+        job_id: Job identifier
+
+    Returns:
+        Threading lock for this job
+    """
+    with _job_write_locks_lock:
+        if job_id not in _job_write_locks:
+            _job_write_locks[job_id] = threading.Lock()
+        return _job_write_locks[job_id]
 
 
 class Job:
@@ -161,33 +182,41 @@ class Job:
         """
         Persist job state to disk atomically.
 
-        Uses atomic write (temp file + rename) to prevent corruption if process
-        crashes during write (BE-016).
+        Uses atomic write (temp file + fsync + rename) to prevent corruption if process
+        crashes during write (BE-018).
+
+        Thread-safe: Uses per-job write lock to prevent concurrent modifications.
         """
-        settings = get_settings()
-        job_file = settings.jobs_dir / f"{self.job_id}.json"
-        temp_file = settings.jobs_dir / f"{self.job_id}.json.tmp"
+        # BE-018: Acquire per-job write lock
+        lock = _get_job_write_lock(self.job_id)
+        with lock:
+            settings = get_settings()
+            job_file = settings.jobs_dir / f"{self.job_id}.json"
+            temp_file = settings.jobs_dir / f"{self.job_id}.json.tmp"
 
-        try:
-            # Ensure jobs directory exists
-            settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                # Ensure jobs directory exists
+                settings.jobs_dir.mkdir(parents=True, exist_ok=True)
 
-            # Write to temp file first
-            with open(temp_file, 'w') as f:
-                json.dump(self.to_dict(), f, indent=2)
+                # Write to temp file first
+                with open(temp_file, 'w') as f:
+                    json.dump(self.to_dict(), f, indent=2)
+                    # BE-018: Flush and fsync to ensure data is written to disk
+                    f.flush()
+                    os.fsync(f.fileno())
 
-            # Atomic rename (overwrites existing file atomically)
-            os.replace(temp_file, job_file)
+                # Atomic rename (overwrites existing file atomically)
+                os.replace(temp_file, job_file)
 
-            logger.debug(f"Saved job {self.job_id} to {job_file}")
-        except Exception as e:
-            logger.error(f"Failed to save job {self.job_id}: {e}")
-            # Clean up temp file if it exists
-            if temp_file.exists():
-                try:
-                    temp_file.unlink()
-                except Exception:
-                    pass
+                logger.debug(f"Saved job {self.job_id} to {job_file}")
+            except Exception as e:
+                logger.error(f"Failed to save job {self.job_id}: {e}")
+                # Clean up temp file if it exists
+                if temp_file.exists():
+                    try:
+                        temp_file.unlink()
+                    except Exception:
+                        pass
 
     def update_status(self, new_status: JobStatus):
         """Update job status and save"""
@@ -227,7 +256,11 @@ class JobManager:
         self._load_existing_jobs()
 
     def _load_existing_jobs(self):
-        """Load existing jobs from disk on startup (BE-016)"""
+        """
+        Load existing jobs from disk on startup (BE-016, BE-018).
+
+        BE-018: Corrupted job files are moved to _corrupt/ directory for safe recovery.
+        """
         jobs_dir = self.settings.jobs_dir
         if not jobs_dir.exists():
             logger.info("Jobs directory does not exist yet - no jobs to load")
@@ -236,6 +269,11 @@ class JobManager:
         logger.info(f"Loading existing jobs from {jobs_dir}")
         profile_catalog = get_profile_catalog()
         loaded_count = 0
+        corrupted_count = 0
+
+        # BE-018: Ensure _corrupt directory exists for quarantining bad files
+        corrupt_dir = jobs_dir / "_corrupt"
+        corrupt_dir.mkdir(parents=True, exist_ok=True)
 
         for job_file in sorted(jobs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
             try:
@@ -248,9 +286,26 @@ class JobManager:
                 loaded_count += 1
                 logger.debug(f"Loaded job {job.job_id} (status: {job.status.value})")
             except Exception as e:
-                logger.error(f"Error loading job from {job_file}: {e}")
+                # BE-018: Move corrupted file to _corrupt/ directory
+                corrupted_count += 1
+                corrupt_file = corrupt_dir / job_file.name
+                try:
+                    # If file with same name exists in _corrupt, append timestamp
+                    if corrupt_file.exists():
+                        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                        corrupt_file = corrupt_dir / f"{job_file.stem}_{timestamp}.json"
 
-        logger.info(f"Loaded {loaded_count} existing jobs from disk")
+                    job_file.rename(corrupt_file)
+                    logger.warning(
+                        f"Corrupted job file moved to {corrupt_file.relative_to(self.settings.storage_root)}: {e}"
+                    )
+                except Exception as move_error:
+                    logger.error(f"Failed to move corrupted file {job_file}: {move_error}")
+
+        logger.info(
+            f"Loaded {loaded_count} jobs from disk "
+            f"({corrupted_count} corrupted files quarantined)"
+        )
 
     def create_job(self, request: CreateJobRequest) -> Job:
         """
