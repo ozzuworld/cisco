@@ -608,7 +608,7 @@ class JobManager:
                 transcript_file.write(f"SFTP directory ready: {sftp_directory}\n")
                 transcript_file.flush()
             except Exception as e:
-                error_msg = f"Failed to create directory {local_dir}: {e}"
+                error_msg = f"Failed to create directory for job {job.job_id} node {node}: {e}"
                 logger.error(f"[Job {job.job_id}][{node}] {error_msg}")
                 transcript_file.write(f"\nERROR: {error_msg}\n")
                 transcript_file.flush()
