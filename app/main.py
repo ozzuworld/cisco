@@ -42,7 +42,13 @@ from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
 from app.job_manager import get_job_manager
 from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
-from app.artifact_manager import get_artifact_path, get_transcript_path, create_zip_archive  # v0.3, BE-017
+from app.artifact_manager import (
+    get_artifact_path,
+    get_transcript_path,
+    create_zip_archive,
+    generate_manifest,  # BE-029
+    generate_zip_filename  # BE-029
+)
 from app.config import get_settings  # BE-012
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
 
@@ -965,14 +971,41 @@ async def download_node_artifacts(job_id: str, node_ip: str, request: Request):
             }
         )
 
-    # Create zip archive
+    # BE-029: Generate manifest and standardized filename
     try:
-        zip_path = create_zip_archive(artifacts, f"job_{job_id}_node_{node_ip}")
+        # Generate manifest
+        manifest = generate_manifest(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            nodes=[node_ip],
+            artifacts=artifacts,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes,
+            computed_reltime_unit=job.computed_reltime_unit,
+            computed_reltime_value=job.computed_reltime_value,
+            computation_timestamp=job.computation_timestamp
+        )
+
+        # Generate standardized filename
+        zip_name = generate_zip_filename(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes,
+            node=node_ip
+        )
+
+        # Create zip archive with manifest
+        zip_path = create_zip_archive(artifacts, zip_name, manifest_data=manifest)
 
         # Return zip file and clean up after
         return FileResponse(
             zip_path,
-            filename=f"job_{job_id}_node_{node_ip}.zip",
+            filename=f"{zip_name}.zip",
             media_type="application/zip",
             background=lambda: zip_path.unlink()  # Clean up temp file after serving
         )
@@ -1046,14 +1079,43 @@ async def download_job_artifacts(job_id: str, request: Request):
             }
         )
 
-    # Create zip archive
+    # BE-029: Generate manifest and standardized filename
     try:
-        zip_path = create_zip_archive(all_artifacts, f"job_{job_id}")
+        # Get list of all nodes
+        all_nodes = list(job.node_statuses.keys())
+
+        # Generate manifest
+        manifest = generate_manifest(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            nodes=all_nodes,
+            artifacts=all_artifacts,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes,
+            computed_reltime_unit=job.computed_reltime_unit,
+            computed_reltime_value=job.computed_reltime_value,
+            computation_timestamp=job.computation_timestamp
+        )
+
+        # Generate standardized filename
+        zip_name = generate_zip_filename(
+            job_id=job.job_id,
+            profile=job.profile.name,
+            time_mode="range" if job.requested_start_time else "relative",
+            requested_start_time=job.requested_start_time,
+            requested_end_time=job.requested_end_time,
+            requested_reltime_minutes=job.requested_reltime_minutes
+        )
+
+        # Create zip archive with manifest
+        zip_path = create_zip_archive(all_artifacts, zip_name, manifest_data=manifest)
 
         # Return zip file and clean up after
         return FileResponse(
             zip_path,
-            filename=f"job_{job_id}.zip",
+            filename=f"{zip_name}.zip",
             media_type="application/zip",
             background=lambda: zip_path.unlink()  # Clean up temp file after serving
         )
