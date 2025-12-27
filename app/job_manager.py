@@ -495,7 +495,8 @@ class JobManager:
                 port=self.settings.sftp_port,
                 username=self.settings.sftp_username,
                 password=self.settings.sftp_password,
-                known_hosts=None  # Accept any host key (same as CUCM behavior)
+                known_hosts=None,  # Don't use known_hosts file
+                server_host_key_algs=None  # Accept any host key algorithm (CUCM compatibility)
             ) as conn:
                 logger.debug(f"Connected to SFTP server {self.settings.sftp_host}")
 
