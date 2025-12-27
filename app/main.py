@@ -38,6 +38,7 @@ from app.profiles import get_profile_catalog
 from app.job_manager import get_job_manager
 from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
 from app.artifact_manager import get_artifact_path, get_transcript_path  # v0.3
+from app.config import get_settings  # BE-012
 
 
 # Configure logging
@@ -228,6 +229,21 @@ async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
         f"as user {req_body.username} (request_id={request_id})"
     )
     # NEVER log the password
+
+    # BE-012: Safe debug logging (only when DEBUG_HTTP=true)
+    settings = get_settings()
+    if settings.debug_http:
+        password_len = len(req_body.password) if req_body.password else 0
+        logger.debug(
+            f"[DEBUG_HTTP] discover-nodes request details: "
+            f"request_id={request_id}, "
+            f"publisher_host={req_body.publisher_host}, "
+            f"username={req_body.username}, "
+            f"password_len={password_len}, "
+            f"port={req_body.port}, "
+            f"connect_timeout={req_body.connect_timeout_sec}s, "
+            f"command_timeout={req_body.command_timeout_sec}s"
+        )
 
     raw_output: Optional[str] = None
     nodes: list[ClusterNode] = []

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
+    # Debug Settings (BE-012)
+    debug_http: bool = False  # Enable detailed HTTP request logging
+
     # Authentication (v0.3)
     api_key: Optional[str] = None  # If set, enables API key auth
 
