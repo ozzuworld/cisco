@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
@@ -25,7 +26,10 @@ from app.models import (
     JobsListResponse,
     JobSummary,
     JobStatus as JobStatusEnum,
-    CancelJobResponse  # v0.3
+    CancelJobResponse,  # v0.3
+    EstimateResponse,  # BE-027
+    NodeEstimate,  # BE-027
+    CommandEstimate  # BE-027
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -40,6 +44,7 @@ from app.job_manager import get_job_manager
 from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
 from app.artifact_manager import get_artifact_path, get_transcript_path, create_zip_archive  # v0.3, BE-017
 from app.config import get_settings  # BE-012
+from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
 
 
 # Configure logging
@@ -391,6 +396,150 @@ async def list_profiles():
     ]
 
     return ProfilesResponse(profiles=profile_responses)
+
+
+@app.post(
+    "/jobs/estimate",
+    response_model=EstimateResponse,
+    status_code=status.HTTP_200_OK
+)
+async def estimate_job(req_body: CreateJobRequest, request: Request):
+    """
+    BE-027: Estimate what a log collection job would do (dry-run).
+
+    Returns a preview of commands, paths, and computed reltime without
+    creating or executing a job. Helps users avoid wasted runs.
+
+    Args:
+        req_body: Job creation request (same as POST /jobs)
+        request: FastAPI request object
+
+    Returns:
+        EstimateResponse with command preview and reltime computation
+
+    Raises:
+        HTTPException: If profile not found or validation error
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Estimating job for profile '{req_body.profile}' with {len(req_body.nodes)} nodes (request_id={request_id})")
+
+    try:
+        # Get profile
+        catalog = get_profile_catalog()
+        profile = catalog.get_profile(req_body.profile)
+        if not profile:
+            raise ValueError(f"Profile not found: {req_body.profile}")
+
+        # Compute reltime (same logic as job execution)
+        time_mode = req_body.options.time_mode if req_body.options and req_body.options.time_mode else "relative"
+        computation_now = datetime.now(timezone.utc)
+
+        if time_mode == "range" and req_body.options:
+            # Absolute time range mode
+            start_time = req_body.options.start_time
+            end_time = req_body.options.end_time
+
+            # Compute reltime from range
+            reltime_unit, reltime_value = compute_reltime_from_range(start_time, end_time)
+
+            requested_start_time = start_time
+            requested_end_time = end_time
+            requested_reltime_minutes = None
+        else:
+            # Relative time mode
+            requested_reltime_minutes = (
+                req_body.options.reltime_minutes if req_body.options and req_body.options.reltime_minutes
+                else profile.reltime_minutes
+            )
+            reltime_unit = "minutes"
+            reltime_value = requested_reltime_minutes
+            requested_start_time = None
+            requested_end_time = None
+
+        # Determine other options
+        compress = (
+            req_body.options.compress if req_body.options and req_body.options.compress is not None
+            else profile.compress
+        )
+        recurs = (
+            req_body.options.recurs if req_body.options and req_body.options.recurs is not None
+            else profile.recurs
+        )
+        match = req_body.options.match if req_body.options else profile.match
+
+        # Build estimates for each node
+        node_estimates = []
+        total_commands = 0
+
+        for node in req_body.nodes:
+            commands = []
+
+            # Build command estimate for each path
+            for path in profile.paths:
+                command = build_file_get_command(
+                    path=path,
+                    reltime_value=reltime_value,
+                    reltime_unit=reltime_unit,
+                    compress=compress,
+                    recurs=recurs,
+                    match=match
+                )
+
+                commands.append(CommandEstimate(
+                    path=path,
+                    command=command,
+                    reltime_unit=reltime_unit,
+                    reltime_value=reltime_value
+                ))
+
+            total_commands += len(commands)
+
+            node_estimates.append(NodeEstimate(
+                node=node,
+                commands=commands,
+                total_commands=len(commands)
+            ))
+
+        logger.info(
+            f"Estimated {total_commands} commands across {len(req_body.nodes)} nodes "
+            f"(reltime={reltime_unit} {reltime_value}, request_id={request_id})"
+        )
+
+        return EstimateResponse(
+            profile=req_body.profile,
+            nodes=node_estimates,
+            total_nodes=len(req_body.nodes),
+            total_commands=total_commands,
+            time_mode=time_mode,
+            requested_start_time=requested_start_time,
+            requested_end_time=requested_end_time,
+            requested_reltime_minutes=requested_reltime_minutes,
+            computed_reltime_unit=reltime_unit,
+            computed_reltime_value=reltime_value,
+            computation_timestamp=computation_now
+        )
+
+    except ValueError as e:
+        # Profile not found or validation error
+        logger.error(f"Validation error estimating job: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "INVALID_REQUEST",
+                "message": str(e),
+                "request_id": request_id
+            }
+        )
+    except Exception as e:
+        logger.exception(f"Error estimating job: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "Failed to estimate job",
+                "request_id": request_id
+            }
+        )
 
 
 @app.post(
