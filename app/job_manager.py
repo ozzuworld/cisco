@@ -474,6 +474,55 @@ class JobManager:
             if job_id in self.node_tasks:
                 del self.node_tasks[job_id]
 
+    async def _ensure_sftp_directory(self, directory_path: str) -> None:
+        """
+        Pre-create directory on SFTP server before CUCM tries to push files.
+
+        CUCM's file get activelog command does NOT create nested directories.
+        If the directory doesn't exist, CUCM fails with "Invalid download directory specified."
+
+        Args:
+            directory_path: Full path to create on SFTP server (e.g., "/incoming/job-id/node")
+
+        Raises:
+            Exception: If directory creation fails
+        """
+        logger.info(f"Pre-creating SFTP directory: {directory_path}")
+
+        try:
+            async with asyncssh.connect(
+                host=self.settings.sftp_host,
+                port=self.settings.sftp_port,
+                username=self.settings.sftp_username,
+                password=self.settings.sftp_password,
+                known_hosts=None  # Accept any host key (same as CUCM behavior)
+            ) as conn:
+                # Use SFTP subsystem to create directory
+                async with conn.start_sftp_client() as sftp:
+                    # Create directory with parents (like mkdir -p)
+                    # Split path and create each level
+                    parts = [p for p in directory_path.split('/') if p]
+                    current_path = ''
+
+                    for part in parts:
+                        current_path += '/' + part
+                        try:
+                            await sftp.mkdir(current_path)
+                            logger.debug(f"Created directory: {current_path}")
+                        except asyncssh.sftp.SFTPFailure as e:
+                            # Directory might already exist - check if it's accessible
+                            if e.code == asyncssh.sftp.FX_FILE_ALREADY_EXISTS:
+                                logger.debug(f"Directory already exists: {current_path}")
+                            else:
+                                # Some other error - re-raise
+                                raise
+
+                logger.info(f"SFTP directory ready: {directory_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to create SFTP directory {directory_path}: {e}")
+            raise
+
     async def _process_node(self, job: Job, node: str):
         """
         Process log collection for a single node.
@@ -517,6 +566,20 @@ class JobManager:
 
             # Prepare SFTP directory for this node
             sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}"
+
+            # FIX: Pre-create directory on SFTP server before CUCM tries to push files
+            # CUCM's file get activelog does NOT create directories - it will fail if they don't exist
+            try:
+                await self._ensure_sftp_directory(sftp_directory)
+                transcript_file.write(f"SFTP directory created: {sftp_directory}\n")
+                transcript_file.flush()
+            except Exception as e:
+                error_msg = f"Failed to create SFTP directory {sftp_directory}: {e}"
+                logger.error(f"[Job {job.job_id}][{node}] {error_msg}")
+                transcript_file.write(f"\nERROR: {error_msg}\n")
+                transcript_file.flush()
+                job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+                return
 
             # Connect to CUCM
             async with CUCMSSHClient(
