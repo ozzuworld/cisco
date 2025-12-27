@@ -598,11 +598,20 @@ class JobManager:
             else:
                 sftp_directory = f"{job.job_id}/{node}"
 
-            # FIX: Pre-create directory on SFTP server before CUCM tries to push files
-            # CUCM's file get activelog does NOT create directories - it will fail if they don't exist
+            # FIX: Pre-create directory for CUCM to upload to
+            # CUCM's file get activelog does NOT create directories
             try:
-                await self._ensure_sftp_directory(sftp_directory)
-                transcript_file.write(f"SFTP directory created: {sftp_directory}\n")
+                # If SFTP is localhost/same server: create directories locally via bind mount
+                if self.settings.sftp_host in ('localhost', '127.0.0.1', '::1'):
+                    # Local directory that bind mount maps to SFTP
+                    local_dir = self.settings.received_dir / job.job_id / node
+                    local_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Created local directory (bind mount): {local_dir}")
+                    transcript_file.write(f"SFTP directory created locally: {sftp_directory}\n")
+                else:
+                    # Remote SFTP server: connect and create via SFTP
+                    await self._ensure_sftp_directory(sftp_directory)
+                    transcript_file.write(f"SFTP directory created remotely: {sftp_directory}\n")
                 transcript_file.flush()
             except Exception as e:
                 error_msg = f"Failed to create SFTP directory {sftp_directory}: {e}"
