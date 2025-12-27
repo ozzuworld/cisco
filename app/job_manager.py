@@ -95,13 +95,15 @@ class Job:
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
         self.cancelled = False  # v0.3: cancellation flag
+        self.last_updated_at = datetime.utcnow()  # BE-019: track last update
 
         # Node states
         self.node_statuses: Dict[str, NodeJobStatus] = {}
         for node in nodes:
             self.node_statuses[node] = NodeJobStatus(
                 node=node,
-                status=NodeStatus.PENDING
+                status=NodeStatus.PENDING,
+                last_updated_at=datetime.utcnow()  # BE-019
             )
 
     def to_dict(self) -> dict:
@@ -126,6 +128,7 @@ class Job:
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "last_updated_at": self.last_updated_at.isoformat() if self.last_updated_at else None,  # BE-019
             "node_statuses": {
                 node: status.model_dump(mode='json')  # BE-016: mode='json' serializes datetime properly
                 for node, status in self.node_statuses.items()
@@ -170,6 +173,7 @@ class Job:
         job.created_at = datetime.fromisoformat(data["created_at"])
         job.started_at = datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None
         job.completed_at = datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
+        job.last_updated_at = datetime.fromisoformat(data["last_updated_at"]) if data.get("last_updated_at") else job.created_at  # BE-019
 
         # Restore node statuses
         job.node_statuses = {}
@@ -221,23 +225,80 @@ class Job:
     def update_status(self, new_status: JobStatus):
         """Update job status and save"""
         self.status = new_status
+        self.last_updated_at = datetime.utcnow()  # BE-019
         if new_status == JobStatus.RUNNING and not self.started_at:
             self.started_at = datetime.utcnow()
         elif new_status in [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.PARTIAL, JobStatus.CANCELLED]:
             self.completed_at = datetime.utcnow()
         self.save()
 
-    def update_node_status(self, node: str, status: NodeStatus, error: Optional[str] = None):
+    def update_node_status(
+        self,
+        node: str,
+        status: NodeStatus,
+        error: Optional[str] = None,
+        step: Optional[str] = None,  # BE-019
+        message: Optional[str] = None,  # BE-019
+        percent: Optional[int] = None  # BE-019
+    ):
         """Update status for a specific node"""
         if node in self.node_statuses:
+            now = datetime.utcnow()
             self.node_statuses[node].status = status
+            self.node_statuses[node].last_updated_at = now  # BE-019
+            self.last_updated_at = now  # BE-019: update job last_updated too
+
             if error:
                 self.node_statuses[node].error = error
+            if step:  # BE-019
+                self.node_statuses[node].step = step
+            if message:  # BE-019
+                self.node_statuses[node].message = message
+            if percent is not None:  # BE-019
+                self.node_statuses[node].percent = percent
+
             if status == NodeStatus.RUNNING:
-                self.node_statuses[node].started_at = datetime.utcnow()
+                self.node_statuses[node].started_at = now
             elif status in [NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED]:
-                self.node_statuses[node].completed_at = datetime.utcnow()
+                self.node_statuses[node].completed_at = now
+                self.node_statuses[node].percent = 100  # BE-019: mark complete
             self.save()
+
+    def get_progress_metrics(self) -> dict:
+        """
+        Calculate real-time progress metrics (BE-019).
+
+        Returns:
+            Dictionary with progress metrics
+        """
+        total = len(self.nodes_list)
+        succeeded = sum(1 for ns in self.node_statuses.values() if ns.status == NodeStatus.SUCCEEDED)
+        failed = sum(1 for ns in self.node_statuses.values() if ns.status == NodeStatus.FAILED)
+        running = sum(1 for ns in self.node_statuses.values() if ns.status == NodeStatus.RUNNING)
+        completed = succeeded + failed + sum(1 for ns in self.node_statuses.values() if ns.status == NodeStatus.CANCELLED)
+
+        # Calculate percent_complete (avoid division by zero)
+        percent_complete = int((completed / total) * 100) if total > 0 else 0
+
+        # Find last updated timestamp from all nodes
+        node_updates = [ns.last_updated_at for ns in self.node_statuses.values() if ns.last_updated_at]
+        last_node_update = max(node_updates) if node_updates else None
+
+        # Use the most recent of job last_updated or last node update
+        last_updated = max(
+            filter(None, [self.last_updated_at, last_node_update]),
+            default=self.created_at
+        )
+
+        return {
+            "total_nodes": total,
+            "completed_nodes": completed,
+            "succeeded_nodes": succeeded,
+            "failed_nodes": failed,
+            "running_nodes": running,
+            "percent_complete": percent_complete,
+            "last_updated_at": last_updated
+        }
 
 
 class JobManager:
@@ -621,7 +682,14 @@ class JobManager:
             return
 
         logger.info(f"[Job {job.job_id}] Processing node: {node}")
-        job.update_node_status(node, NodeStatus.RUNNING)
+        # BE-019: Set initial step and progress
+        job.update_node_status(
+            node,
+            NodeStatus.RUNNING,
+            step="initializing",
+            message="Preparing to collect logs",
+            percent=0
+        )
 
         # FIX: Prepare transcript file and set path immediately
         transcript_path = self.settings.transcripts_dir / job.job_id / f"{node}.log"
@@ -645,6 +713,15 @@ class JobManager:
                 transcript_file.close()
                 job.update_node_status(node, NodeStatus.CANCELLED)
                 return
+
+            # BE-019: Update progress
+            job.update_node_status(
+                node,
+                NodeStatus.RUNNING,
+                step="preparing",
+                message="Creating directories for artifacts",
+                percent=10
+            )
 
             # BE-017: Prepare SFTP directory for this node
             # If base_dir is empty, SFTP chroots directly to storage/received
@@ -672,6 +749,15 @@ class JobManager:
                 job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
                 return
 
+            # BE-019: Update progress - connecting
+            job.update_node_status(
+                node,
+                NodeStatus.RUNNING,
+                step="connecting",
+                message=f"Connecting to {node}",
+                percent=20
+            )
+
             # Connect to CUCM
             async with CUCMSSHClient(
                 host=node,
@@ -693,6 +779,15 @@ class JobManager:
                     transcript_lines.append("\n[CANCELLED]\n")
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
+
+                # BE-019: Update progress - collecting
+                job.update_node_status(
+                    node,
+                    NodeStatus.RUNNING,
+                    step="collecting",
+                    message="Collecting log files",
+                    percent=40
+                )
 
                 # Process each path in the profile
                 for path in job.profile.paths:
@@ -767,6 +862,15 @@ class JobManager:
                 job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
                 return
 
+            # BE-019: Update progress - discovering artifacts
+            job.update_node_status(
+                node,
+                NodeStatus.RUNNING,
+                step="discovering",
+                message="Discovering collected artifacts",
+                percent=80
+            )
+
             # Discover artifacts
             artifacts = self._discover_artifacts(job.job_id, node)
             job.node_statuses[node].artifacts = artifacts
@@ -778,8 +882,13 @@ class JobManager:
                 job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
                 return
 
-            # Mark as succeeded
-            job.update_node_status(node, NodeStatus.SUCCEEDED)
+            # Mark as succeeded (percent will be set to 100 automatically)
+            job.update_node_status(
+                node,
+                NodeStatus.SUCCEEDED,
+                step="completed",
+                message=f"Collected {len(artifacts)} artifacts"
+            )
             logger.info(f"[Job {job.job_id}][{node}] Completed successfully - {len(artifacts)} artifacts collected")
 
         except asyncio.CancelledError:

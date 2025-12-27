@@ -492,6 +492,9 @@ async def get_job_status(job_id: str, request: Request):
             }
         )
 
+    # BE-019: Get progress metrics
+    progress = job.get_progress_metrics()
+
     return JobStatusResponse(
         job_id=job.job_id,
         status=job.status,
@@ -499,7 +502,15 @@ async def get_job_status(job_id: str, request: Request):
         started_at=job.started_at,
         completed_at=job.completed_at,
         profile=job.profile.name,
-        nodes=list(job.node_statuses.values())
+        nodes=list(job.node_statuses.values()),
+        # BE-019: Include progress metrics
+        total_nodes=progress["total_nodes"],
+        completed_nodes=progress["completed_nodes"],
+        succeeded_nodes=progress["succeeded_nodes"],
+        failed_nodes=progress["failed_nodes"],
+        running_nodes=progress["running_nodes"],
+        percent_complete=progress["percent_complete"],
+        last_updated_at=progress["last_updated_at"]
     )
 
 
