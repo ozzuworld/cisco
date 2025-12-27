@@ -501,13 +501,19 @@ class JobManager:
 
                 # Use SFTP subsystem to create directory
                 async with conn.start_sftp_client() as sftp:
+                    # FIX: Handle relative paths correctly (don't add leading /)
                     # Create directory with parents (like mkdir -p)
-                    # Split path and create each level
+                    is_absolute = directory_path.startswith('/')
                     parts = [p for p in directory_path.split('/') if p]
-                    current_path = ''
 
-                    for part in parts:
-                        current_path += '/' + part
+                    for i, part in enumerate(parts):
+                        if i == 0:
+                            # First part: use as-is for relative, with / for absolute
+                            current_path = ('/' + part) if is_absolute else part
+                        else:
+                            # Subsequent parts: always append with /
+                            current_path += '/' + part
+
                         try:
                             await sftp.mkdir(current_path)
                             logger.debug(f"Created directory: {current_path}")
