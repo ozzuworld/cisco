@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     sftp_port: int = 22
     sftp_username: str
     sftp_password: str  # Never logged
-    sftp_remote_base_dir: str = "/cucm-logs"
+    # FIX: Use relative path (no leading slash) for chrooted SFTP (see .env.example)
+    sftp_remote_base_dir: str = "incoming"
 
     # Storage Settings
     storage_root: Path = Path("./storage")
