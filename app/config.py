@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     job_command_timeout_sec: int = 600  # 10 minutes per file get command
     job_connect_timeout_sec: int = 30
 
+    # Security Settings (BE-021)
+    max_ssh_retries: int = 3  # Maximum SSH connection retry attempts per host
+    max_sftp_retries: int = 3  # Maximum SFTP connection retry attempts
+
     # Profiles
     profiles_path: Path = Path("./profiles.yaml")
 
