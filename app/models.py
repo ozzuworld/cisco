@@ -356,6 +356,32 @@ class JobStatusResponse(BaseModel):
         description="Last time any node status was updated"
     )
 
+    # BE-026: Time window configuration (for auditability and reproducibility)
+    requested_start_time: Optional[datetime] = Field(
+        default=None,
+        description="Requested start time for log collection (range mode)"
+    )
+    requested_end_time: Optional[datetime] = Field(
+        default=None,
+        description="Requested end time for log collection (range mode)"
+    )
+    requested_reltime_minutes: Optional[int] = Field(
+        default=None,
+        description="Requested relative time window in minutes (relative mode)"
+    )
+    computed_reltime_unit: Optional[str] = Field(
+        default=None,
+        description="Computed reltime unit used (minutes/hours/days/weeks/months)"
+    )
+    computed_reltime_value: Optional[int] = Field(
+        default=None,
+        description="Computed reltime value used"
+    )
+    computation_timestamp: Optional[datetime] = Field(
+        default=None,
+        description="Server 'now' timestamp used for reltime computation"
+    )
+
 
 class ArtifactsResponse(BaseModel):
     """Response for artifacts listing"""

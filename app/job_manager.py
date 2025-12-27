@@ -97,6 +97,14 @@ class Job:
         self.cancelled = False  # v0.3: cancellation flag
         self.last_updated_at = datetime.utcnow()  # BE-019: track last update
 
+        # BE-026: Time window configuration (set during execution)
+        self.requested_start_time: Optional[datetime] = None
+        self.requested_end_time: Optional[datetime] = None
+        self.requested_reltime_minutes: Optional[int] = None
+        self.computed_reltime_unit: Optional[str] = None
+        self.computed_reltime_value: Optional[int] = None
+        self.computation_timestamp: Optional[datetime] = None  # Server "now" used for calculation
+
         # Node states
         self.node_statuses: Dict[str, NodeJobStatus] = {}
         for node in nodes:
@@ -129,6 +137,13 @@ class Job:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "last_updated_at": self.last_updated_at.isoformat() if self.last_updated_at else None,  # BE-019
+            # BE-026: Time window configuration
+            "requested_start_time": self.requested_start_time.isoformat() if self.requested_start_time else None,
+            "requested_end_time": self.requested_end_time.isoformat() if self.requested_end_time else None,
+            "requested_reltime_minutes": self.requested_reltime_minutes,
+            "computed_reltime_unit": self.computed_reltime_unit,
+            "computed_reltime_value": self.computed_reltime_value,
+            "computation_timestamp": self.computation_timestamp.isoformat() if self.computation_timestamp else None,
             "node_statuses": {
                 node: status.model_dump(mode='json')  # BE-016: mode='json' serializes datetime properly
                 for node, status in self.node_statuses.items()
@@ -174,6 +189,14 @@ class Job:
         job.started_at = datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None
         job.completed_at = datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
         job.last_updated_at = datetime.fromisoformat(data["last_updated_at"]) if data.get("last_updated_at") else job.created_at  # BE-019
+
+        # BE-026: Restore time window configuration
+        job.requested_start_time = datetime.fromisoformat(data["requested_start_time"]) if data.get("requested_start_time") else None
+        job.requested_end_time = datetime.fromisoformat(data["requested_end_time"]) if data.get("requested_end_time") else None
+        job.requested_reltime_minutes = data.get("requested_reltime_minutes")
+        job.computed_reltime_unit = data.get("computed_reltime_unit")
+        job.computed_reltime_value = data.get("computed_reltime_value")
+        job.computation_timestamp = datetime.fromisoformat(data["computation_timestamp"]) if data.get("computation_timestamp") else None
 
         # Restore node statuses
         job.node_statuses = {}
@@ -515,6 +538,44 @@ class JobManager:
         logger.info(f"Starting execution of job {job_id}")
         job.update_status(JobStatus.RUNNING)
 
+        # BE-026: Populate time window configuration for auditability
+        time_mode = job.options.time_mode if job.options.time_mode else "relative"
+        computation_now = datetime.utcnow()
+
+        if time_mode == "range":
+            # Absolute time range mode
+            job.requested_start_time = job.options.start_time
+            job.requested_end_time = job.options.end_time
+            job.computation_timestamp = computation_now
+
+            # Compute reltime from range
+            reltime_unit, reltime_value = compute_reltime_from_range(
+                job.options.start_time,
+                job.options.end_time
+            )
+            job.computed_reltime_unit = reltime_unit
+            job.computed_reltime_value = reltime_value
+
+            logger.info(
+                f"[Job {job_id}] BE-026: Time range mode - "
+                f"start={job.requested_start_time}, end={job.requested_end_time}, "
+                f"computed={reltime_unit} {reltime_value} at {computation_now}"
+            )
+        else:
+            # Relative time mode (existing behavior)
+            job.requested_reltime_minutes = job.options.reltime_minutes or job.profile.reltime_minutes
+            job.computed_reltime_unit = "minutes"
+            job.computed_reltime_value = job.requested_reltime_minutes
+            job.computation_timestamp = computation_now
+
+            logger.info(
+                f"[Job {job_id}] BE-026: Relative time mode - "
+                f"{job.requested_reltime_minutes} minutes at {computation_now}"
+            )
+
+        # Save job with time window configuration
+        job.save()
+
         try:
             # Process nodes with concurrency limit
             semaphore = asyncio.Semaphore(self.settings.max_concurrency_per_job)
@@ -801,36 +862,19 @@ class JobManager:
                         job.update_node_status(node, NodeStatus.CANCELLED)
                         return
 
-                    # BE-024: Determine time range and compute reltime
-                    time_mode = job.options.time_mode if job.options.time_mode else "relative"
+                    # BE-024/BE-026: Use pre-computed time window from job
+                    # (computed once per job in execute_job for consistency)
+                    reltime_unit = job.computed_reltime_unit
+                    reltime_value = job.computed_reltime_value
 
                     # Variables to store time range metadata for artifacts
-                    collection_start_time = None
-                    collection_end_time = None
-                    reltime_used_str = None
+                    collection_start_time = job.requested_start_time
+                    collection_end_time = job.requested_end_time
+                    reltime_used_str = f"{reltime_unit} {reltime_value}"
 
-                    if time_mode == "range":
-                        # Absolute time range mode
-                        start_time = job.options.start_time
-                        end_time = job.options.end_time
-
-                        # Compute reltime from range
-                        reltime_unit, reltime_value = compute_reltime_from_range(start_time, end_time)
-
-                        # Store metadata
-                        collection_start_time = start_time
-                        collection_end_time = end_time
-                        reltime_used_str = f"{reltime_unit} {reltime_value}"
-
-                        logger.info(
-                            f"[Job {job.job_id}][{node}] BE-024: Time range mode - "
-                            f"start={start_time}, end={end_time}, computed reltime={reltime_used_str}"
-                        )
-                    else:
-                        # Relative time mode (existing behavior)
-                        reltime_value = job.options.reltime_minutes or job.profile.reltime_minutes
-                        reltime_unit = "minutes"
-                        reltime_used_str = f"{reltime_unit} {reltime_value}"
+                    logger.info(
+                        f"[Job {job.job_id}][{node}] Using computed reltime: {reltime_used_str}"
+                    )
 
                     # Determine other options (use overrides if provided)
                     compress = job.options.compress if job.options.compress is not None else job.profile.compress
