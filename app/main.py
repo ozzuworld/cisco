@@ -510,7 +510,14 @@ async def get_job_status(job_id: str, request: Request):
         failed_nodes=progress["failed_nodes"],
         running_nodes=progress["running_nodes"],
         percent_complete=progress["percent_complete"],
-        last_updated_at=progress["last_updated_at"]
+        last_updated_at=progress["last_updated_at"],
+        # BE-026: Include time window configuration
+        requested_start_time=job.requested_start_time,
+        requested_end_time=job.requested_end_time,
+        requested_reltime_minutes=job.requested_reltime_minutes,
+        computed_reltime_unit=job.computed_reltime_unit,
+        computed_reltime_value=job.computed_reltime_value,
+        computation_timestamp=job.computation_timestamp
     )
 
 
