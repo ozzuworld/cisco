@@ -3,8 +3,9 @@
 import asyncio
 import logging
 import re
-from typing import Dict, Optional, Callable
+from typing import Dict, Optional, Callable, Tuple
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 
 logger = logging.getLogger(__name__)
@@ -263,9 +264,77 @@ class PromptResponder:
         return full_transcript
 
 
+def compute_reltime_from_range(start_time: datetime, end_time: datetime) -> Tuple[str, int]:
+    """
+    BE-024: Convert absolute time range to CUCM reltime format.
+
+    Computes the relative time from now back to start_time and selects
+    the most appropriate CUCM time unit (minutes/hours/days/weeks/months).
+
+    Args:
+        start_time: Start of the desired time range
+        end_time: End of the desired time range (used for validation only)
+
+    Returns:
+        Tuple of (unit, value) where:
+        - unit: One of "minutes", "hours", "days", "weeks", "months"
+        - value: Integer value for that unit
+
+    Example:
+        >>> start = datetime.now(timezone.utc) - timedelta(hours=3)
+        >>> end = datetime.now(timezone.utc)
+        >>> compute_reltime_from_range(start, end)
+        ('hours', 3)
+
+    Note:
+        CUCM collects logs from (now - reltime) to now, so we compute
+        reltime as the difference between now and start_time.
+    """
+    # Get current time
+    now = datetime.now(timezone.utc)
+
+    # Make start_time timezone-aware if needed
+    start_aware = start_time if start_time.tzinfo else start_time.replace(tzinfo=timezone.utc)
+
+    # Compute difference between now and start_time
+    delta = now - start_aware
+    total_seconds = delta.total_seconds()
+
+    # Select best unit based on the time difference
+    # Priority: Use the largest unit that gives a whole number >= 1
+
+    # Months (approximate: 30 days)
+    months = total_seconds / (30 * 24 * 3600)
+    if months >= 1 and months == int(months):
+        return ("months", int(months))
+
+    # Weeks (7 days)
+    weeks = total_seconds / (7 * 24 * 3600)
+    if weeks >= 1 and weeks == int(weeks):
+        return ("weeks", int(weeks))
+
+    # Days
+    days = total_seconds / (24 * 3600)
+    if days >= 1 and days == int(days):
+        return ("days", int(days))
+
+    # Hours
+    hours = total_seconds / 3600
+    if hours >= 1 and hours == int(hours):
+        return ("hours", int(hours))
+
+    # Minutes (default fallback)
+    minutes = int(total_seconds / 60)
+    if minutes < 1:
+        minutes = 1  # Minimum 1 minute
+
+    return ("minutes", minutes)
+
+
 def build_file_get_command(
     path: str,
-    reltime_minutes: int,
+    reltime_value: int,
+    reltime_unit: str = "minutes",
     compress: bool = True,
     recurs: bool = False,
     match: Optional[str] = None
@@ -275,7 +344,8 @@ def build_file_get_command(
 
     Args:
         path: Log path to collect (e.g., "syslog/messages*")
-        reltime_minutes: Relative time window in minutes
+        reltime_value: Relative time window value
+        reltime_unit: Relative time unit (minutes/hours/days/weeks/months) - BE-024
         compress: Whether to compress the files
         recurs: Whether to collect recursively
         match: Optional regex pattern to match filenames
@@ -283,12 +353,14 @@ def build_file_get_command(
     Returns:
         Complete command string
 
-    Example:
-        >>> build_file_get_command("syslog/messages*", 60, compress=True)
+    Examples:
+        >>> build_file_get_command("syslog/messages*", 60, "minutes", compress=True)
         'file get activelog syslog/messages* reltime minutes 60 compress'
+        >>> build_file_get_command("cm/trace/sdl*", 3, "hours", compress=True)
+        'file get activelog cm/trace/sdl* reltime hours 3 compress'
     """
-    # Start with base command - BE-017: Always include 'minutes' unit
-    cmd = f"file get activelog {path} reltime minutes {reltime_minutes}"
+    # Start with base command - BE-024: Support dynamic time units
+    cmd = f"file get activelog {path} reltime {reltime_unit} {reltime_value}"
 
     # Add optional flags
     if match:
