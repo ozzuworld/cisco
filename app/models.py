@@ -319,6 +319,16 @@ class NodeJobStatus(BaseModel):
         le=100
     )
 
+    # BE-030: Retry tracking
+    retry_count: int = Field(
+        default=0,
+        description="Number of retry attempts (0 for initial attempt)"
+    )
+    current_attempt: int = Field(
+        default=1,
+        description="Current attempt number (1 for initial, 2+ for retries)"
+    )
+
 
 class JobStatusResponse(BaseModel):
     """Response for job status query"""
@@ -445,6 +455,24 @@ class CancelJobResponse(BaseModel):
     status: JobStatus = Field(..., description="Job status after cancellation")
     cancelled: bool = Field(..., description="Whether cancellation was successful")
     message: str = Field(..., description="Cancellation status message")
+
+
+# ============================================================================
+# BE-030 Models - Retry Failed Nodes
+# ============================================================================
+
+
+class RetryJobResponse(BaseModel):
+    """Response for retry failed nodes request"""
+
+    job_id: str = Field(..., description="Job identifier")
+    status: JobStatus = Field(..., description="Job status after retry initiated")
+    retried_nodes: List[str] = Field(
+        default_factory=list,
+        description="List of nodes that were retried"
+    )
+    retry_count: int = Field(..., description="Total number of nodes being retried")
+    message: str = Field(..., description="Retry status message")
 
 
 # ============================================================================

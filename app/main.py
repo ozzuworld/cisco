@@ -27,6 +27,7 @@ from app.models import (
     JobSummary,
     JobStatus as JobStatusEnum,
     CancelJobResponse,  # v0.3
+    RetryJobResponse,  # BE-030
     EstimateResponse,  # BE-027
     NodeEstimate,  # BE-027
     CommandEstimate  # BE-027
@@ -1186,6 +1187,85 @@ async def cancel_job(job_id: str, request: Request):
         status=job.status,
         cancelled=job.cancelled,
         message="Job cancellation initiated"
+    )
+
+
+# ============================================================================
+# BE-030: Retry Failed Nodes
+# ============================================================================
+
+
+@app.post(
+    "/jobs/{job_id}/retry-failed",
+    response_model=RetryJobResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Retry of failed nodes initiated",
+            "model": RetryJobResponse
+        },
+        404: {
+            "description": "Job not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def retry_failed_nodes(job_id: str, request: Request):
+    """
+    BE-030: Retry only the failed nodes in a job.
+
+    Reuses the same job configuration (profile, time window, credentials)
+    but only re-executes nodes that have FAILED status.
+
+    This is useful when some nodes fail due to transient issues (network
+    glitches, temporary timeouts, etc.) and you want to retry just those
+    nodes without re-running successful ones.
+
+    Artifacts from retry attempts are stored in attempt-specific directories
+    (e.g., attempt_1, attempt_2) to preserve the full history.
+
+    Args:
+        job_id: Job identifier
+        request: FastAPI request object
+
+    Returns:
+        RetryJobResponse with retry status and list of nodes being retried
+
+    Raises:
+        HTTPException: If job not found or no failed nodes to retry
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Retry failed nodes request: {job_id} (request_id={request_id})")
+
+    job_manager = get_job_manager()
+    retried_nodes = job_manager.retry_failed_nodes(job_id)
+
+    if retried_nodes is None:
+        logger.warning(f"Job {job_id} not found for retry (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "JOB_NOT_FOUND",
+                "message": f"Job {job_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    job = job_manager.get_job(job_id)
+
+    if len(retried_nodes) == 0:
+        message = "No failed nodes to retry"
+    else:
+        message = f"Retry initiated for {len(retried_nodes)} failed node(s)"
+
+    logger.info(f"Job {job_id} retry: {len(retried_nodes)} nodes queued (request_id={request_id})")
+
+    return RetryJobResponse(
+        job_id=job.job_id,
+        status=job.status,
+        retried_nodes=retried_nodes,
+        retry_count=len(retried_nodes),
+        message=message
     )
 
 
