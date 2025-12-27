@@ -7,11 +7,13 @@ from app.prompt_responder import PromptResponder, build_file_get_command
 def test_build_file_get_command_basic():
     """Test building basic file get command"""
     cmd = build_file_get_command(
-        path="platform/log/syslog",
+        path="syslog/messages*",
         reltime_minutes=60
     )
 
-    assert cmd == "file get activelog platform/log/syslog reltime 60 compress"
+    # BE-017: reltime should include 'minutes' unit
+    assert cmd == "file get activelog syslog/messages* reltime minutes 60 compress"
+    assert "reltime minutes 60" in cmd
     assert "compress" in cmd  # Default
     assert "recurs" not in cmd  # Default is False
 
@@ -27,7 +29,8 @@ def test_build_file_get_command_all_options():
     )
 
     assert "file get activelog cm/trace/sdl" in cmd
-    assert "reltime 120" in cmd
+    # BE-017: reltime should include 'minutes' unit
+    assert "reltime minutes 120" in cmd
     assert "compress" in cmd
     assert "recurs" in cmd
     assert 'match ".*\\.txt$"' in cmd
@@ -87,7 +90,8 @@ def test_prompt_responder_creation():
     assert responder.sftp_username == "user"
     assert responder.sftp_password == "pass"
     assert responder.sftp_directory == "/logs"
-    assert len(responder.patterns) == 5  # 5 prompt patterns
+    # BE-017: 7 patterns (proceed, SFTP host, port, user, password, directory, host key)
+    assert len(responder.patterns) == 7
 
 
 def test_prompt_responder_match_sftp_host():
@@ -245,14 +249,110 @@ def test_command_builder_order():
         match="pattern"
     )
 
-    # Check order: base command, reltime, match, recurs, compress
+    # BE-017: Check order includes 'minutes' unit
     parts = cmd.split()
     assert parts[0] == "file"
     assert parts[1] == "get"
     assert parts[2] == "activelog"
     assert parts[3] == "test/path"
     assert parts[4] == "reltime"
-    assert parts[5] == "60"
+    assert parts[5] == "minutes"
+    assert parts[6] == "60"
+
+
+# ============================================================================
+# BE-017 Tests - New prompt patterns and activelog support
+# ============================================================================
+
+
+def test_be017_reltime_always_includes_minutes():
+    """BE-017: Verify reltime always includes 'minutes' unit"""
+    cmd = build_file_get_command("syslog/messages*", reltime_minutes=30)
+    assert "reltime minutes 30" in cmd
+
+    cmd = build_file_get_command("syslog/secure*", reltime_minutes=120)
+    assert "reltime minutes 120" in cmd
+
+
+def test_be017_prompt_responder_proceed_confirmation():
+    """BE-017: Test matching 'Would you like to proceed [y/n]?' prompt"""
+    responder = PromptResponder(
+        sftp_host="test.com",
+        sftp_port=22,
+        sftp_username="user",
+        sftp_password="pass",
+        sftp_directory="/logs"
+    )
+
+    # Test various formats of proceed prompt
+    variations = [
+        "Would you like to proceed [y/n]?",
+        "Would you like to proceed [ y / n ]?",
+        "would you like to proceed [y/n]?",
+        "WOULD YOU LIKE TO PROCEED [Y/N]?",
+    ]
+
+    for variant in variations:
+        matched = responder.match_prompt(variant)
+        assert matched is not None, f"Failed to match: {variant}"
+        assert matched.response_generator() == "y"
+
+
+def test_be017_prompt_responder_host_key_confirmation():
+    """BE-017: Test matching SSH host key confirmation prompt"""
+    responder = PromptResponder(
+        sftp_host="test.com",
+        sftp_port=22,
+        sftp_username="user",
+        sftp_password="pass",
+        sftp_directory="/logs"
+    )
+
+    # Test various formats of host key prompt
+    variations = [
+        "Are you sure you want to continue connecting (yes/no)?",
+        "are you sure you want to continue connecting (yes/no)?",
+        "ARE YOU SURE YOU WANT TO CONTINUE CONNECTING (YES/NO)?",
+        "Are you sure you want to continue connecting ( yes / no )?",
+    ]
+
+    for variant in variations:
+        matched = responder.match_prompt(variant)
+        assert matched is not None, f"Failed to match: {variant}"
+        assert matched.response_generator() == "yes"
+
+
+def test_be017_activelog_paths():
+    """BE-017: Test that activelog paths work correctly"""
+    # Test syslog paths
+    cmd = build_file_get_command("syslog/messages*", 60)
+    assert "syslog/messages*" in cmd
+
+    cmd = build_file_get_command("syslog/secure*", 120)
+    assert "syslog/secure*" in cmd
+
+    cmd = build_file_get_command("syslog/maillog*", 30)
+    assert "syslog/maillog*" in cmd
+
+
+def test_be017_all_prompts_in_order():
+    """BE-017: Verify all prompt patterns are registered in correct order"""
+    responder = PromptResponder(
+        sftp_host="test.com",
+        sftp_port=22,
+        sftp_username="user",
+        sftp_password="pass",
+        sftp_directory="/logs"
+    )
+
+    # Should have 7 patterns total
+    assert len(responder.patterns) == 7
+
+    # Verify proceed prompt is first (most general)
+    assert "proceed" in responder.patterns[0].description.lower()
+
+    # Verify host key prompt is last (also general)
+    assert "host key" in responder.patterns[6].description.lower()
 
 
 if __name__ == "__main__":

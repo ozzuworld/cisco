@@ -57,7 +57,15 @@ class PromptResponder:
         self.sftp_directory = sftp_directory
 
         # Define prompt patterns (case-insensitive)
+        # BE-017: Added proceed and host key prompts for activelog operations
         self.patterns = [
+            # Proceed prompts (appear before and after file sizing)
+            PromptPattern(
+                pattern=r"(?i)would\s+you\s+like\s+to\s+proceed\s*\[\s*y\s*/\s*n\s*\]\s*\??\s*$",
+                response_generator=lambda: "y",
+                description="Proceed confirmation"
+            ),
+            # SFTP prompts
             PromptPattern(
                 pattern=r"(?i)sftp\s+host[:\s]*$",
                 response_generator=lambda: self.sftp_host,
@@ -82,6 +90,12 @@ class PromptResponder:
                 pattern=r"(?i)directory[:\s]*$",
                 response_generator=lambda: self.sftp_directory,
                 description="Directory"
+            ),
+            # SSH host key confirmation
+            PromptPattern(
+                pattern=r"(?i)are\s+you\s+sure\s+you\s+want\s+to\s+continue\s+connecting\s*\(\s*yes\s*/\s*no\s*\)\s*\??\s*$",
+                response_generator=lambda: "yes",
+                description="SSH host key confirmation"
             ),
         ]
 
@@ -192,7 +206,7 @@ def build_file_get_command(
     Build a `file get activelog` command with appropriate options.
 
     Args:
-        path: Log path to collect (e.g., "platform/log/syslog")
+        path: Log path to collect (e.g., "syslog/messages*")
         reltime_minutes: Relative time window in minutes
         compress: Whether to compress the files
         recurs: Whether to collect recursively
@@ -202,11 +216,11 @@ def build_file_get_command(
         Complete command string
 
     Example:
-        >>> build_file_get_command("cm/trace/sdl", 60, compress=True, recurs=True)
-        'file get activelog cm/trace/sdl reltime 60 compress recurs'
+        >>> build_file_get_command("syslog/messages*", 60, compress=True)
+        'file get activelog syslog/messages* reltime minutes 60 compress'
     """
-    # Start with base command
-    cmd = f"file get activelog {path} reltime {reltime_minutes}"
+    # Start with base command - BE-017: Always include 'minutes' unit
+    cmd = f"file get activelog {path} reltime minutes {reltime_minutes}"
 
     # Add optional flags
     if match:

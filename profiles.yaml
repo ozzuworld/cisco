@@ -3,11 +3,11 @@
 
 profiles:
   - name: basic_platform
-    description: "Basic platform logs (syslog, core dumps, install logs)"
+    description: "Basic platform logs (syslog messages, secure, maillog)"
     paths:
-      - "platform/log/syslog"
-      - "platform/log/messages"
-      - "install"
+      - "syslog/messages*"
+      - "syslog/secure*"
+      - "syslog/maillog*"
     reltime_minutes: 120
     compress: true
     recurs: false

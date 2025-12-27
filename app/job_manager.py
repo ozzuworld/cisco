@@ -593,9 +593,24 @@ class JobManager:
             rel_transcript_path = str(transcript_path.relative_to(self.settings.storage_root))
             job.node_statuses[node].transcript_path = rel_transcript_path
 
+            # BE-017: Check if CUCM reported "No files matched filter criteria"
+            full_transcript = ''.join(transcript_lines)
+            if "No files matched filter criteria" in full_transcript:
+                error_msg = "No files matched filter criteria (check path/pattern/reltime)"
+                logger.warning(f"[Job {job.job_id}][{node}] {error_msg}")
+                job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+                return
+
             # Discover artifacts
             artifacts = self._discover_artifacts(job.job_id, node)
             job.node_statuses[node].artifacts = artifacts
+
+            # BE-017: If no artifacts collected, also consider it a failure
+            if len(artifacts) == 0:
+                error_msg = "No artifacts collected (0 files transferred)"
+                logger.warning(f"[Job {job.job_id}][{node}] {error_msg}")
+                job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+                return
 
             # Mark as succeeded
             job.update_node_status(node, NodeStatus.SUCCEEDED)
