@@ -499,10 +499,10 @@ class JobManager:
                     task.cancel()
                     logger.info(f"Job {job_id} node {node} task cancelled")
 
-        # v0.3.3: Immediately mark PENDING and RUNNING nodes as CANCELLED
+        # v0.3.3: Immediately mark PENDING, QUEUED, and RUNNING nodes as CANCELLED
         # This ensures UI sees cancellation immediately
         for node, node_status in job.node_statuses.items():
-            if node_status.status in [NodeStatus.PENDING, NodeStatus.RUNNING]:
+            if node_status.status in [NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING]:
                 job.update_node_status(node, NodeStatus.CANCELLED)
                 logger.info(f"Job {job_id} node {node} marked CANCELLED")
 
@@ -600,7 +600,21 @@ class JobManager:
                 if job.cancelled:
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
+
+                # BE-031: Set node to QUEUED before waiting for semaphore
+                job.update_node_status(
+                    node,
+                    NodeStatus.QUEUED,
+                    step="queued",
+                    message="Waiting for execution slot",
+                    percent=0
+                )
+
                 async with semaphore:
+                    # Check cancellation after acquiring semaphore
+                    if job.cancelled:
+                        job.update_node_status(node, NodeStatus.CANCELLED)
+                        return
                     await self._process_node(job, node)
 
             # Track per-node tasks for potential cancellation
@@ -647,7 +661,7 @@ class JobManager:
             # Mark any non-completed nodes as cancelled
             for node in nodes:
                 ns = job.node_statuses[node]
-                if ns.status in [NodeStatus.PENDING, NodeStatus.RUNNING]:
+                if ns.status in [NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING]:
                     job.update_node_status(node, NodeStatus.CANCELLED)
 
             # Determine final status based on what completed
@@ -731,7 +745,21 @@ class JobManager:
                 if job.cancelled:
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
+
+                # BE-031: Set node to QUEUED before waiting for semaphore
+                job.update_node_status(
+                    node,
+                    NodeStatus.QUEUED,
+                    step="queued",
+                    message="Waiting for execution slot",
+                    percent=0
+                )
+
                 async with semaphore:
+                    # Check cancellation after acquiring semaphore
+                    if job.cancelled:
+                        job.update_node_status(node, NodeStatus.CANCELLED)
+                        return
                     await self._process_node(job, node)
 
             # v0.3.3: Track per-node tasks for immediate cancellation
@@ -773,9 +801,9 @@ class JobManager:
         except asyncio.CancelledError:
             logger.info(f"Job {job_id} was cancelled")
             job.cancelled = True
-            # v0.3.2: Mark any non-completed nodes as cancelled
+            # v0.3.2: Mark any non-completed nodes as cancelled (including QUEUED - BE-031)
             for node, ns in job.node_statuses.items():
-                if ns.status in [NodeStatus.PENDING, NodeStatus.RUNNING]:
+                if ns.status in [NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING]:
                     job.update_node_status(node, NodeStatus.CANCELLED)
 
             # Determine final status based on what completed

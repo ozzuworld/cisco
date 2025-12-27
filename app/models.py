@@ -121,6 +121,7 @@ class JobStatus(str, Enum):
 class NodeStatus(str, Enum):
     """Individual node processing status"""
     PENDING = "pending"
+    QUEUED = "queued"  # BE-031: Waiting for concurrency slot
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
