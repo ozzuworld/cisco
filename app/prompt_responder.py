@@ -7,6 +7,9 @@ from typing import Dict, Optional, Callable, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+# BE-032: Import SFTP timeout exception
+from app.ssh_client import CUCMSFTPTimeoutError
+
 
 logger = logging.getLogger(__name__)
 
@@ -169,13 +172,13 @@ class PromptResponder:
                     time_since_output = current_time - last_output_time
 
                     if time_since_output > no_output_timeout:
-                        error_msg = f"Timed out waiting for output (no data for {no_output_timeout}s)"
+                        error_msg = f"SFTP upload timed out: No data received for {no_output_timeout}s"
                         logger.error(error_msg)
                         if transcript_file:
                             transcript_file.write(f"\n\n[ERROR: {error_msg}]\n")
                             transcript_file.write(f"[Last 500 chars: {buffer[-500:]}]\n")
                             transcript_file.flush()
-                        raise asyncio.TimeoutError(error_msg)
+                        raise CUCMSFTPTimeoutError(error_msg)
 
                     # Read a chunk with short timeout to check for idle period
                     try:
@@ -251,12 +254,13 @@ class PromptResponder:
                         buffer = ""
 
         except asyncio.TimeoutError as e:
-            error_msg = str(e) if str(e) else f"Timed out after {timeout}s"
+            # BE-032: Convert generic timeout to SFTP timeout
+            error_msg = str(e) if str(e) else f"SFTP upload timed out after {timeout}s"
             logger.error(f"Prompt responder timed out: {error_msg}")
             if transcript_file:
                 transcript_file.write(f"\n\n[TIMEOUT: {error_msg}]\n")
                 transcript_file.flush()
-            raise
+            raise CUCMSFTPTimeoutError(error_msg) from e
 
         full_transcript = ''.join(transcript)
         logger.debug(f"Prompt responder completed. Transcript length: {len(full_transcript)} bytes")

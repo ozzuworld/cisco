@@ -128,6 +128,15 @@ class NodeStatus(str, Enum):
     CANCELLED = "cancelled"  # Node processing was cancelled (v0.3)
 
 
+class FailureClassification(str, Enum):
+    """BE-032: Classification of node failures for actionable error reporting"""
+    AUTH_FAILED = "auth_failed"  # SSH authentication failed
+    SSH_TIMEOUT = "ssh_timeout"  # SSH connection timeout
+    SFTP_TIMEOUT = "sftp_timeout"  # SFTP upload timeout
+    CUCM_COMMAND_ERROR = "cucm_command_error"  # CUCM command error (no files, etc.)
+    UNKNOWN = "unknown"  # Other/unclassified errors
+
+
 class CollectionOptions(BaseModel):
     """Options for log collection (can override profile defaults)"""
 
@@ -283,6 +292,10 @@ class NodeJobStatus(BaseModel):
     error: Optional[str] = Field(
         default=None,
         description="Error message if failed"
+    )
+    failure_classification: Optional[FailureClassification] = Field(
+        default=None,
+        description="BE-032: Classification of failure type for actionable error reporting"
     )
     transcript_path: Optional[str] = Field(
         default=None,
