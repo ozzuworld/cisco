@@ -32,6 +32,11 @@ class CUCMCommandTimeoutError(CUCMSSHClientError):
     pass
 
 
+class CUCMSFTPTimeoutError(CUCMSSHClientError):
+    """BE-032: SFTP upload operation timed out"""
+    pass
+
+
 class InteractiveShellSession:
     """
     Manages an interactive SSH shell session with CUCM CLI.

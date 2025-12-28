@@ -18,11 +18,12 @@ from app.models import (
     NodeJobStatus,
     Artifact,
     CreateJobRequest,
-    CollectionOptions
+    CollectionOptions,
+    FailureClassification
 )
 from app.profiles import CollectionProfile, get_profile_catalog
 from app.prompt_responder import PromptResponder, build_file_get_command, compute_reltime_from_range
-from app.ssh_client import CUCMSSHClient, CUCMSSHClientError
+from app.ssh_client import CUCMSSHClient, CUCMSSHClientError, CUCMAuthError, CUCMConnectionError, CUCMCommandTimeoutError, CUCMSFTPTimeoutError
 from app.artifact_manager import list_artifacts_for_job
 
 
@@ -47,6 +48,66 @@ def _get_job_write_lock(job_id: str) -> threading.Lock:
         if job_id not in _job_write_locks:
             _job_write_locks[job_id] = threading.Lock()
         return _job_write_locks[job_id]
+
+
+def _classify_failure(exception: Exception, error_context: str = "") -> tuple[FailureClassification, str]:
+    """
+    BE-032: Classify failure type and generate actionable error message.
+
+    Args:
+        exception: The exception that occurred
+        error_context: Additional context (e.g., from transcript)
+
+    Returns:
+        Tuple of (classification, error_message)
+    """
+    # Check for authentication failures
+    if isinstance(exception, CUCMAuthError):
+        return (
+            FailureClassification.AUTH_FAILED,
+            f"Authentication failed: {str(exception)}. Verify username and password are correct."
+        )
+
+    # Check for SSH connection timeout
+    if isinstance(exception, CUCMConnectionError):
+        if "timeout" in str(exception).lower():
+            return (
+                FailureClassification.SSH_TIMEOUT,
+                f"SSH connection timeout: {str(exception)}. Check network connectivity and firewall rules."
+            )
+        else:
+            return (
+                FailureClassification.SSH_TIMEOUT,
+                f"SSH connection failed: {str(exception)}. Check network connectivity and node availability."
+            )
+
+    # Check for SFTP timeout (BE-032: specific SFTP timeout exception)
+    if isinstance(exception, CUCMSFTPTimeoutError):
+        return (
+            FailureClassification.SFTP_TIMEOUT,
+            f"{str(exception)}. Check SFTP server availability and network bandwidth."
+        )
+
+    # Check for command timeout
+    if isinstance(exception, (CUCMCommandTimeoutError, asyncio.TimeoutError)):
+        return (
+            FailureClassification.SFTP_TIMEOUT,
+            f"Command execution timeout: {str(exception)}. The operation took too long to complete."
+        )
+
+    # Check for CUCM command errors (no files matched, etc.)
+    if "No files matched filter criteria" in error_context or "No artifacts collected" in error_context:
+        return (
+            FailureClassification.CUCM_COMMAND_ERROR,
+            "No files matched filter criteria. Check path pattern, reltime window, and verify logs exist for the time range."
+        )
+
+    # Default: UNKNOWN
+    error_type = type(exception).__name__
+    return (
+        FailureClassification.UNKNOWN,
+        f"{error_type}: {str(exception)}"
+    )
 
 
 class Job:
@@ -260,6 +321,7 @@ class Job:
         node: str,
         status: NodeStatus,
         error: Optional[str] = None,
+        failure_classification: Optional[FailureClassification] = None,  # BE-032
         step: Optional[str] = None,  # BE-019
         message: Optional[str] = None,  # BE-019
         percent: Optional[int] = None  # BE-019
@@ -273,6 +335,8 @@ class Job:
 
             if error:
                 self.node_statuses[node].error = error
+            if failure_classification:  # BE-032
+                self.node_statuses[node].failure_classification = failure_classification
             if step:  # BE-019
                 self.node_statuses[node].step = step
             if message:  # BE-019
@@ -1109,12 +1173,17 @@ class JobManager:
                     transcript_file.write("\n")
                     transcript_file.flush()
 
-            # BE-017: Check if CUCM reported "No files matched filter criteria"
+            # BE-017/BE-032: Check if CUCM reported "No files matched filter criteria"
             full_transcript = ''.join(transcript_lines)
             if "No files matched filter criteria" in full_transcript:
-                error_msg = "No files matched filter criteria (check path/pattern/reltime)"
+                error_msg = "No files matched filter criteria. Check path pattern, reltime window, and verify logs exist for the time range."
                 logger.warning(f"[Job {job.job_id}][{node}] {error_msg}")
-                job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+                job.update_node_status(
+                    node,
+                    NodeStatus.FAILED,
+                    error=error_msg,
+                    failure_classification=FailureClassification.CUCM_COMMAND_ERROR
+                )
                 return
 
             # BE-019: Update progress - discovering artifacts
@@ -1136,11 +1205,16 @@ class JobManager:
             )
             job.node_statuses[node].artifacts = artifacts
 
-            # BE-017: If no artifacts collected, also consider it a failure
+            # BE-017/BE-032: If no artifacts collected, also consider it a failure
             if len(artifacts) == 0:
-                error_msg = "No artifacts collected (0 files transferred)"
+                error_msg = "No artifacts collected (0 files transferred). Check SFTP server connectivity and permissions."
                 logger.warning(f"[Job {job.job_id}][{node}] {error_msg}")
-                job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+                job.update_node_status(
+                    node,
+                    NodeStatus.FAILED,
+                    error=error_msg,
+                    failure_classification=FailureClassification.SFTP_TIMEOUT
+                )
                 return
 
             # Mark as succeeded (percent will be set to 100 automatically)
@@ -1168,7 +1242,10 @@ class JobManager:
 
         except Exception as e:
             logger.error(f"[Job {job.job_id}][{node}] Failed: {e}")
-            error_msg = f"{type(e).__name__}: {str(e)}"
+
+            # BE-032: Classify the failure and generate actionable error message
+            full_transcript = ''.join(transcript_lines)
+            classification, error_msg = _classify_failure(e, error_context=full_transcript)
 
             # Write error to transcript
             msg = f"\n\nERROR: {error_msg}\n"
@@ -1177,7 +1254,12 @@ class JobManager:
                 transcript_file.write(msg)
                 transcript_file.flush()
 
-            job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
+            job.update_node_status(
+                node,
+                NodeStatus.FAILED,
+                error=error_msg,
+                failure_classification=classification
+            )
 
         finally:
             # FIX: Ensure transcript file is always closed
