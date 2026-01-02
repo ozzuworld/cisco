@@ -171,6 +171,18 @@ class InteractiveShellSession:
                             return output_text
 
         except TimeoutError:
+            # One final prompt check before raising timeout error
+            # The prompt might be there, but read() was blocking waiting for more data
+            match = prompt_pattern.search(self._buffer)
+            if match:
+                logger.debug(
+                    f"Found prompt after timeout - data was already buffered. "
+                    f"bytes_read={bytes_read}"
+                )
+                output_text = self._buffer[:match.start()]
+                self._buffer = self._buffer[match.end():]
+                return output_text
+
             # Debug logging on timeout
             buffer_tail = self._buffer[-500:] if len(self._buffer) > 500 else self._buffer
             logger.error(
