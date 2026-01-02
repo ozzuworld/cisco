@@ -1491,7 +1491,11 @@ async def start_capture(
         return StartCaptureResponse(
             capture_id=capture.capture_id,
             status=capture.status,
-            message="Capture started"
+            host=req_body.host,
+            filename=capture.filename,
+            duration_sec=req_body.duration_sec,
+            message="Capture started",
+            created_at=capture.created_at
         )
 
     except Exception as e:
