@@ -447,13 +447,19 @@ class CaptureManager:
                 capture.file_size_bytes = int(size_match.group(1))
                 logger.debug(f"Capture file size: {capture.file_size_bytes} bytes")
 
-            # Create directory for this capture
-            capture_dir = self.storage_root / capture.capture_id
-            capture_dir.mkdir(parents=True, exist_ok=True)
-
-            # Build SFTP directory path
+            # Build SFTP directory path (what CUCM sees)
             sftp_base = settings.sftp_remote_base_dir or ""
             sftp_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
+
+            # Create directory at SFTP received location for CUCM to upload to
+            # The SFTP server chroots to storage/received, so files land in artifacts_dir
+            sftp_upload_dir = settings.artifacts_dir / capture.capture_id
+            try:
+                sftp_upload_dir.mkdir(parents=True, exist_ok=True)
+                sftp_upload_dir.chmod(0o777)  # World-writable for SFTP user access
+                logger.info(f"Created SFTP upload directory: {sftp_upload_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to create SFTP upload directory: {e}")
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
@@ -485,10 +491,8 @@ class CaptureManager:
             # Wait for SFTP transfer to complete
             await asyncio.sleep(2.0)
 
-            # Check if file was transferred to SFTP received directory
-            # SFTP server chroots to storage/received, so files end up there
-            sftp_received_dir = settings.artifacts_dir / capture.capture_id
-            sftp_received_file = sftp_received_dir / capture_file
+            # Check if file was transferred to SFTP upload directory
+            sftp_received_file = sftp_upload_dir / capture_file
 
             if sftp_received_file.exists():
                 capture.local_file_path = sftp_received_file
@@ -496,19 +500,9 @@ class CaptureManager:
                 capture.message = f"Capture file retrieved: {capture_file}"
                 logger.info(f"Retrieved capture file: {sftp_received_file}")
             else:
-                # Check the capture storage directory as fallback
-                local_file = capture_dir / capture_file
-                if local_file.exists():
-                    capture.local_file_path = local_file
-                    capture.file_size_bytes = local_file.stat().st_size
-                    capture.message = f"Capture file retrieved: {capture_file}"
-                    logger.info(f"Retrieved capture file: {local_file}")
-                else:
-                    # File not found in either location
-                    logger.warning(
-                        f"Capture file not found at {sftp_received_file} or {local_file}"
-                    )
-                    capture.message = f"Capture complete, file retrieval pending"
+                # File not found
+                logger.warning(f"Capture file not found at {sftp_received_file}")
+                capture.message = f"Capture complete, file retrieval pending"
 
         except (asyncio.TimeoutError, CUCMCommandTimeoutError) as e:
             logger.warning(f"Timeout retrieving capture file for {capture.capture_id}: {e}")
