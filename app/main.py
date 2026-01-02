@@ -1705,29 +1705,37 @@ async def download_capture(capture_id: str, request: Request):
     # Check if local_file_path is set and exists
     file_path = capture.local_file_path
     if not file_path or not file_path.exists():
-        # Fallback: check SFTP received directories
-        # Handle both bind mount configurations
+        # Fallback: search for file recursively in SFTP received directories
+        # CUCM preserves directory structure: <capture_id>/<host>/<timestamp>/platform/cli/<file>.cap
         settings = get_settings()
         capture_file = f"{capture.filename}.cap"
+        found_file = None
 
-        # Check primary location: artifacts_dir/<capture_id>/
-        sftp_received_file = settings.artifacts_dir / capture_id / capture_file
+        # Search in primary location: artifacts_dir/<capture_id>/
+        primary_dir = settings.artifacts_dir / capture_id
+        if primary_dir.exists():
+            for cap_file in primary_dir.rglob(capture_file):
+                found_file = cap_file
+                break
 
-        # Check nested location: artifacts_dir/<sftp_base>/<capture_id>/
-        sftp_base = settings.sftp_remote_base_dir or ""
-        sftp_received_file_nested = None
-        if sftp_base:
-            sftp_received_file_nested = settings.artifacts_dir / sftp_base / capture_id / capture_file
+        # If not found, try nested location: artifacts_dir/<sftp_base>/<capture_id>/
+        if not found_file:
+            sftp_base = settings.sftp_remote_base_dir or ""
+            if sftp_base:
+                nested_dir = settings.artifacts_dir / sftp_base / capture_id
+                if nested_dir.exists():
+                    for cap_file in nested_dir.rglob(capture_file):
+                        found_file = cap_file
+                        break
 
-        if sftp_received_file.exists():
-            file_path = sftp_received_file
-        elif sftp_received_file_nested and sftp_received_file_nested.exists():
-            file_path = sftp_received_file_nested
+        if found_file:
+            file_path = found_file
+            # Update capture for future requests
+            capture.local_file_path = file_path
+            capture.file_size_bytes = file_path.stat().st_size
+            logger.info(f"Found capture file: {file_path}")
         else:
-            locations = [str(sftp_received_file)]
-            if sftp_received_file_nested:
-                locations.append(str(sftp_received_file_nested))
-            logger.warning(f"Capture file not found for {capture_id}. Checked: {locations} (request_id={request_id})")
+            logger.warning(f"Capture file {capture_file} not found for {capture_id} (request_id={request_id})")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
@@ -1736,11 +1744,6 @@ async def download_capture(capture_id: str, request: Request):
                     "request_id": request_id
                 }
             )
-
-        # Update capture for future requests
-        capture.local_file_path = file_path
-        capture.file_size_bytes = file_path.stat().st_size
-        logger.info(f"Found capture file: {file_path}")
 
     return FileResponse(
         file_path,

@@ -501,27 +501,31 @@ class CaptureManager:
             # Wait for SFTP transfer to complete
             await asyncio.sleep(2.0)
 
-            # Check if file was transferred - check both possible locations
-            sftp_received_file = sftp_upload_dir / capture_file
-            sftp_received_file_nested = sftp_upload_dir_nested / capture_file if sftp_upload_dir_nested else None
-
+            # Search for the capture file recursively
+            # CUCM preserves directory structure: <capture_id>/<host>/<timestamp>/platform/cli/<file>.cap
             found_file = None
-            if sftp_received_file.exists():
-                found_file = sftp_received_file
-            elif sftp_received_file_nested and sftp_received_file_nested.exists():
-                found_file = sftp_received_file_nested
+
+            # Search in primary upload directory
+            for cap_file in sftp_upload_dir.rglob(capture_file):
+                found_file = cap_file
+                logger.info(f"Found capture file at: {found_file}")
+                break
+
+            # If not found, try nested directory
+            if not found_file and sftp_upload_dir_nested:
+                for cap_file in sftp_upload_dir_nested.rglob(capture_file):
+                    found_file = cap_file
+                    logger.info(f"Found capture file at nested path: {found_file}")
+                    break
 
             if found_file:
                 capture.local_file_path = found_file
                 capture.file_size_bytes = found_file.stat().st_size
                 capture.message = f"Capture file retrieved: {capture_file}"
-                logger.info(f"Retrieved capture file: {found_file}")
+                logger.info(f"Retrieved capture file: {found_file} ({capture.file_size_bytes} bytes)")
             else:
-                # File not found in either location
-                locations = [str(sftp_received_file)]
-                if sftp_received_file_nested:
-                    locations.append(str(sftp_received_file_nested))
-                logger.warning(f"Capture file not found. Checked: {locations}")
+                # File not found
+                logger.warning(f"Capture file {capture_file} not found in {sftp_upload_dir}")
                 capture.message = f"Capture complete, file retrieval pending"
 
         except (asyncio.TimeoutError, CUCMCommandTimeoutError) as e:
