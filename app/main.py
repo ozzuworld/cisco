@@ -1702,19 +1702,31 @@ async def download_capture(capture_id: str, request: Request):
             }
         )
 
-    if not capture.local_file_path or not capture.local_file_path.exists():
-        logger.warning(f"Capture file not found for {capture_id} (request_id={request_id})")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error": "CAPTURE_FILE_NOT_FOUND",
-                "message": f"Capture file for {capture_id} not found on server",
-                "request_id": request_id
-            }
-        )
+    # Check if local_file_path is set and exists
+    file_path = capture.local_file_path
+    if not file_path or not file_path.exists():
+        # Fallback: check SFTP received directory
+        settings = get_settings()
+        sftp_received_file = settings.artifacts_dir / capture_id / f"{capture.filename}.cap"
+        if sftp_received_file.exists():
+            file_path = sftp_received_file
+            # Update capture for future requests
+            capture.local_file_path = file_path
+            capture.file_size_bytes = file_path.stat().st_size
+            logger.info(f"Found capture file in SFTP received dir: {file_path}")
+        else:
+            logger.warning(f"Capture file not found for {capture_id} (request_id={request_id})")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "CAPTURE_FILE_NOT_FOUND",
+                    "message": f"Capture file for {capture_id} not found on server",
+                    "request_id": request_id
+                }
+            )
 
     return FileResponse(
-        capture.local_file_path,
+        file_path,
         filename=f"{capture.filename}.cap",
         media_type="application/vnd.tcpdump.pcap"
     )

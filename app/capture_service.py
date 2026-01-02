@@ -482,17 +482,33 @@ class CaptureManager:
                     timeout=SFTP_PROMPT_TIMEOUT
                 )
 
-            # Check if file was transferred
-            local_file = capture_dir / capture_file
-            if local_file.exists():
-                capture.local_file_path = local_file
-                capture.file_size_bytes = local_file.stat().st_size
+            # Wait for SFTP transfer to complete
+            await asyncio.sleep(2.0)
+
+            # Check if file was transferred to SFTP received directory
+            # SFTP server chroots to storage/received, so files end up there
+            sftp_received_dir = settings.artifacts_dir / capture.capture_id
+            sftp_received_file = sftp_received_dir / capture_file
+
+            if sftp_received_file.exists():
+                capture.local_file_path = sftp_received_file
+                capture.file_size_bytes = sftp_received_file.stat().st_size
                 capture.message = f"Capture file retrieved: {capture_file}"
-                logger.info(f"Retrieved capture file: {local_file}")
+                logger.info(f"Retrieved capture file: {sftp_received_file}")
             else:
-                # File might be at SFTP server, note the path
-                capture.message = f"Capture file ready: {capture_file}"
-                logger.info(f"Capture file available on SFTP server")
+                # Check the capture storage directory as fallback
+                local_file = capture_dir / capture_file
+                if local_file.exists():
+                    capture.local_file_path = local_file
+                    capture.file_size_bytes = local_file.stat().st_size
+                    capture.message = f"Capture file retrieved: {capture_file}"
+                    logger.info(f"Retrieved capture file: {local_file}")
+                else:
+                    # File not found in either location
+                    logger.warning(
+                        f"Capture file not found at {sftp_received_file} or {local_file}"
+                    )
+                    capture.message = f"Capture complete, file retrieval pending"
 
         except (asyncio.TimeoutError, CUCMCommandTimeoutError) as e:
             logger.warning(f"Timeout retrieving capture file for {capture.capture_id}: {e}")
