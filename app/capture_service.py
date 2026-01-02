@@ -476,8 +476,9 @@ class CaptureManager:
                 await shell.stdin.drain()
 
                 # Handle prompts with timeout
+                # respond_to_prompts expects (stdin, stdout) separately
                 await asyncio.wait_for(
-                    responder.respond_to_prompts(shell),
+                    responder.respond_to_prompts(shell.stdin, shell.stdout),
                     timeout=SFTP_PROMPT_TIMEOUT
                 )
 
