@@ -30,7 +30,9 @@ from app.models import (
     RetryJobResponse,  # BE-030
     EstimateResponse,  # BE-027
     NodeEstimate,  # BE-027
-    CommandEstimate  # BE-027
+    CommandEstimate,  # BE-027
+    ClusterHealthRequest,  # Health Status
+    ClusterHealthResponse,  # Health Status
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -52,6 +54,7 @@ from app.artifact_manager import (
 )
 from app.config import get_settings  # BE-012
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
+from app.health_service import check_cluster_health  # Health Status
 
 
 # Configure logging
@@ -68,7 +71,7 @@ logging.getLogger('asyncssh').setLevel(logging.WARNING)
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.3.3"  # v0.3.3: Cancellation race condition fix
+    version="0.4.0"  # v0.4.0: Cluster health status endpoint
 )
 
 # Wire up middleware (v0.3)
@@ -364,6 +367,147 @@ async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
             detail={
                 "error": "INTERNAL_ERROR",
                 "message": "An unexpected error occurred during node discovery",
+                "request_id": request_id
+            }
+        )
+
+
+# ============================================================================
+# Cluster Health Status Endpoint
+# ============================================================================
+
+
+@app.post(
+    "/cluster/health",
+    response_model=ClusterHealthResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Cluster health status retrieved successfully",
+            "model": ClusterHealthResponse
+        },
+        401: {
+            "description": "Authentication failed",
+            "model": ErrorResponse
+        },
+        502: {
+            "description": "Network error (host unreachable, connection refused, etc)",
+            "model": ErrorResponse
+        },
+        504: {
+            "description": "Connection or command timeout",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_cluster_health(req_body: ClusterHealthRequest, request: Request):
+    """
+    Get health status of a CUCM cluster.
+
+    Connects to CUCM nodes via SSH and runs health check commands to assess:
+    - Database replication status (utils dbreplication runtimestate)
+    - Service status (utils service list)
+    - NTP synchronization (utils ntp status)
+    - System diagnostics (utils diagnose test)
+    - Core files / crash dumps (utils core active list)
+
+    If nodes list is not provided, discovers nodes from the publisher first.
+
+    Args:
+        req_body: ClusterHealthRequest with connection parameters and check options
+        request: FastAPI request object
+
+    Returns:
+        ClusterHealthResponse with health status for all nodes
+
+    Raises:
+        HTTPException: With appropriate status code and error details
+    """
+    request_id = get_request_id(request)
+    checks_str = ", ".join([c.value for c in req_body.checks])
+    logger.info(
+        f"Cluster health check request for {req_body.publisher_host}:{req_body.port} "
+        f"checks=[{checks_str}] (request_id={request_id})"
+    )
+
+    try:
+        response = await check_cluster_health(req_body)
+        logger.info(
+            f"Cluster health check complete: {response.cluster_status.value} "
+            f"({response.healthy_nodes} healthy, {response.degraded_nodes} degraded, "
+            f"{response.critical_nodes} critical, {response.unreachable_nodes} unreachable) "
+            f"(request_id={request_id})"
+        )
+        return response
+
+    except CUCMAuthError as e:
+        logger.error(f"Authentication failed: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "AUTH_FAILED",
+                "message": "Authentication failed. Please check username and password.",
+                "request_id": request_id
+            }
+        )
+
+    except CUCMCommandTimeoutError as e:
+        logger.error(f"Command timeout: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "COMMAND_TIMEOUT",
+                "message": f"Command execution timed out: {str(e)}",
+                "request_id": request_id
+            }
+        )
+
+    except CUCMConnectionError as e:
+        error_msg = str(e).lower()
+        if "timeout" in error_msg:
+            logger.error(f"Connection timeout: {str(e)} (request_id={request_id})")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "CONNECT_TIMEOUT",
+                    "message": f"Connection timeout to {req_body.publisher_host}:{req_body.port}",
+                    "request_id": request_id
+                }
+            )
+        else:
+            logger.error(f"Connection error: {str(e)} (request_id={request_id})")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error": "NETWORK_ERROR",
+                    "message": f"Cannot connect to {req_body.publisher_host}:{req_body.port}. "
+                               f"Please check host is reachable and SSH is available.",
+                    "request_id": request_id
+                }
+            )
+
+    except CUCMSSHClientError as e:
+        logger.error(f"SSH client error: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "SSH_ERROR",
+                "message": "SSH client error occurred",
+                "request_id": request_id
+            }
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error during cluster health check: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred during cluster health check",
                 "request_id": request_id
             }
         )

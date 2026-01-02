@@ -542,3 +542,259 @@ class EstimateResponse(BaseModel):
     computed_reltime_unit: str = Field(..., description="Computed reltime unit")
     computed_reltime_value: int = Field(..., description="Computed reltime value")
     computation_timestamp: datetime = Field(..., description="When reltime was computed")
+
+
+# ============================================================================
+# Cluster Health Status Models
+# ============================================================================
+
+
+class HealthStatus(str, Enum):
+    """Health status levels"""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+
+class HealthCheckType(str, Enum):
+    """Types of health checks available"""
+    REPLICATION = "replication"
+    SERVICES = "services"
+    NTP = "ntp"
+    DIAGNOSTICS = "diagnostics"
+    CORES = "cores"
+
+
+class ClusterHealthRequest(BaseModel):
+    """Request model for cluster health check"""
+
+    publisher_host: str = Field(
+        ...,
+        description="IP address or FQDN of the CUCM Publisher",
+        examples=["10.10.10.10", "cucm-pub.example.com"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port (typically 22)",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username",
+        examples=["admin"]
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds",
+        ge=5,
+        le=300
+    )
+    command_timeout_sec: int = Field(
+        default=120,
+        description="Command execution timeout in seconds",
+        ge=10,
+        le=600
+    )
+    nodes: Optional[List[str]] = Field(
+        default=None,
+        description="List of node IPs to check. If not provided, discovers nodes from publisher."
+    )
+    checks: List[HealthCheckType] = Field(
+        default=[
+            HealthCheckType.REPLICATION,
+            HealthCheckType.SERVICES,
+            HealthCheckType.NTP,
+        ],
+        description="Health checks to perform"
+    )
+
+    @field_validator("publisher_host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        """Validate that host is not empty"""
+        if not v or not v.strip():
+            raise ValueError("publisher_host cannot be empty")
+        return v.strip()
+
+    @field_validator("username", "password")
+    @classmethod
+    def validate_credentials(cls, v: str) -> str:
+        """Validate that credentials are not empty"""
+        if not v:
+            raise ValueError("Credentials cannot be empty")
+        return v
+
+
+class ReplicationNodeStatus(BaseModel):
+    """Replication status for a single node in the cluster"""
+
+    server_name: str = Field(..., description="Server hostname")
+    ip_address: str = Field(..., description="Server IP address")
+    ping_ms: Optional[float] = Field(None, description="Ping time in milliseconds")
+    db_mon: Optional[str] = Field(None, description="DB/RPC/DbMon status (e.g., 'Y/Y/Y')")
+    repl_queue: Optional[int] = Field(None, description="Replication queue depth")
+    group_id: Optional[str] = Field(None, description="Replication group ID")
+    setup_state: Optional[int] = Field(None, description="RTMT replication setup state (2=complete)")
+    setup_status: Optional[str] = Field(None, description="Setup status message")
+
+
+class ReplicationStatus(BaseModel):
+    """Database replication health status"""
+
+    status: HealthStatus = Field(..., description="Overall replication health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    db_version: Optional[str] = Field(None, description="Database version")
+    repl_timeout: Optional[int] = Field(None, description="Replication timeout in seconds")
+    tables_checked: Optional[int] = Field(None, description="Number of tables checked")
+    tables_total: Optional[int] = Field(None, description="Total number of tables")
+    errors_found: bool = Field(default=False, description="Whether errors were found")
+    mismatches_found: bool = Field(default=False, description="Whether mismatches were found")
+    nodes: List[ReplicationNodeStatus] = Field(
+        default_factory=list,
+        description="Per-node replication status"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class ServiceInfo(BaseModel):
+    """Information about a single service"""
+
+    name: str = Field(..., description="Service name")
+    status: str = Field(..., description="Service status (STARTED, STOPPED, etc.)")
+    is_running: bool = Field(..., description="Whether the service is running")
+
+
+class ServicesStatus(BaseModel):
+    """Services health status"""
+
+    status: HealthStatus = Field(..., description="Overall services health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    total_services: int = Field(default=0, description="Total number of services")
+    running_services: int = Field(default=0, description="Number of running services")
+    stopped_services: int = Field(default=0, description="Number of stopped services")
+    critical_services_down: List[str] = Field(
+        default_factory=list,
+        description="List of critical services that are not running"
+    )
+    services: List[ServiceInfo] = Field(
+        default_factory=list,
+        description="All services and their status"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class NTPStatus(BaseModel):
+    """NTP synchronization health status"""
+
+    status: HealthStatus = Field(..., description="Overall NTP health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    synchronized: bool = Field(default=False, description="Whether NTP is synchronized")
+    stratum: Optional[int] = Field(None, description="NTP stratum level (lower is better, <=3 recommended)")
+    ntp_server: Optional[str] = Field(None, description="Current NTP server")
+    offset_ms: Optional[float] = Field(None, description="Time offset in milliseconds")
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class DiagnosticTest(BaseModel):
+    """Result of a single diagnostic test"""
+
+    name: str = Field(..., description="Test name")
+    passed: bool = Field(..., description="Whether the test passed")
+    message: Optional[str] = Field(None, description="Test result message")
+
+
+class DiagnosticsStatus(BaseModel):
+    """System diagnostics health status"""
+
+    status: HealthStatus = Field(..., description="Overall diagnostics health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    total_tests: int = Field(default=0, description="Total number of tests run")
+    passed_tests: int = Field(default=0, description="Number of passed tests")
+    failed_tests: int = Field(default=0, description="Number of failed tests")
+    tests: List[DiagnosticTest] = Field(
+        default_factory=list,
+        description="Individual test results"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class CoreFilesStatus(BaseModel):
+    """Core files (crash dumps) health status"""
+
+    status: HealthStatus = Field(..., description="Overall core files health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    core_count: int = Field(default=0, description="Number of core files found")
+    core_files: List[str] = Field(
+        default_factory=list,
+        description="List of core file names/paths"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class NodeHealthChecks(BaseModel):
+    """Health check results for a single node"""
+
+    replication: Optional[ReplicationStatus] = Field(
+        None, description="Database replication status"
+    )
+    services: Optional[ServicesStatus] = Field(
+        None, description="Services status"
+    )
+    ntp: Optional[NTPStatus] = Field(
+        None, description="NTP synchronization status"
+    )
+    diagnostics: Optional[DiagnosticsStatus] = Field(
+        None, description="System diagnostics status"
+    )
+    cores: Optional[CoreFilesStatus] = Field(
+        None, description="Core files status"
+    )
+
+
+class NodeHealthStatus(BaseModel):
+    """Health status for a single CUCM node"""
+
+    ip: str = Field(..., description="Node IP address")
+    hostname: Optional[str] = Field(None, description="Node hostname")
+    role: Optional[str] = Field(None, description="Node role (Publisher/Subscriber)")
+    status: HealthStatus = Field(..., description="Overall node health status")
+    reachable: bool = Field(default=True, description="Whether the node is reachable via SSH")
+    error: Optional[str] = Field(None, description="Error message if node is unreachable")
+    checks: NodeHealthChecks = Field(
+        default_factory=NodeHealthChecks,
+        description="Individual health check results"
+    )
+    checked_at: datetime = Field(..., description="When the node was checked")
+
+
+class ClusterHealthResponse(BaseModel):
+    """Response model for cluster health check"""
+
+    cluster_status: HealthStatus = Field(..., description="Overall cluster health status")
+    publisher_host: str = Field(..., description="Publisher host used for the check")
+    checked_at: datetime = Field(..., description="When the health check was performed")
+    total_nodes: int = Field(default=0, description="Total number of nodes checked")
+    healthy_nodes: int = Field(default=0, description="Number of healthy nodes")
+    degraded_nodes: int = Field(default=0, description="Number of degraded nodes")
+    critical_nodes: int = Field(default=0, description="Number of critical nodes")
+    unreachable_nodes: int = Field(default=0, description="Number of unreachable nodes")
+    nodes: List[NodeHealthStatus] = Field(
+        default_factory=list,
+        description="Health status for each node"
+    )
+    checks_performed: List[HealthCheckType] = Field(
+        default_factory=list,
+        description="List of health checks that were performed"
+    )
+    message: Optional[str] = Field(None, description="Summary message")
