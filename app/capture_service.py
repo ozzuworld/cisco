@@ -138,6 +138,7 @@ class Capture:
         self.local_file_path: Optional[Path] = None
         self._task: Optional[asyncio.Task] = None
         self._cancelled = False
+        self._stop_event: asyncio.Event = asyncio.Event()
 
     def to_info(self) -> CaptureInfo:
         """Convert to CaptureInfo model"""
@@ -161,8 +162,9 @@ class Capture:
         )
 
     def cancel(self):
-        """Mark capture as cancelled"""
+        """Mark capture as cancelled and signal stop"""
         self._cancelled = True
+        self._stop_event.set()  # Signal the capture to stop
         if self._task and not self._task.done():
             self._task.cancel()
 
@@ -270,7 +272,7 @@ class CaptureManager:
         Execute a packet capture.
 
         This runs the capture command on the CUCM node, waits for the
-        specified duration, then retrieves the capture file.
+        specified duration (or until stopped), then retrieves the capture file.
 
         Args:
             capture_id: Capture identifier
@@ -311,36 +313,56 @@ class CaptureManager:
             ) as client:
                 capture.message = "Capturing packets..."
 
-                # Run capture with duration timeout
-                # The capture will run until we send Ctrl+C or it reaches count limit
+                # Send the capture command WITHOUT waiting for prompt
+                # The capture runs until Ctrl+C is sent
+                await client.send_command_no_wait(cmd)
+
+                # Wait for either:
+                # 1. Duration to elapse
+                # 2. Stop event to be set (user stopped capture)
                 try:
-                    # We use wait_for with the duration as timeout
-                    # This will interrupt the capture after the specified time
-                    output = await asyncio.wait_for(
-                        client.execute_command(cmd),
-                        timeout=float(request.duration_sec + 10)  # Extra buffer
+                    await asyncio.wait_for(
+                        capture._stop_event.wait(),
+                        timeout=float(request.duration_sec)
                     )
+                    # Stop event was set - user requested stop
+                    logger.info(f"Capture {capture_id} stopped by user")
                 except asyncio.TimeoutError:
-                    # This is expected - capture runs until timeout
-                    # Send Ctrl+C to stop the capture
-                    logger.debug(f"Capture {capture_id} duration reached, stopping...")
+                    # Duration elapsed - normal completion
+                    logger.info(f"Capture {capture_id} duration reached")
+
+                # Send Ctrl+C to stop the capture
+                capture.message = "Stopping capture..."
+                await client.send_interrupt()
+
+                # Wait a moment for CUCM to process the interrupt
+                await asyncio.sleep(1.0)
+
+                # Read the output until we get the prompt back
+                try:
+                    output = await client.read_until_prompt(timeout=30.0)
+                    logger.debug(f"Capture output: {output[:200]}...")
+
+                    # Parse capture statistics
+                    stats = parse_capture_output(output)
+                    capture.packets_captured = stats.get("packets_captured")
+                    logger.info(
+                        f"Capture {capture_id} stats: "
+                        f"{capture.packets_captured or 'unknown'} packets captured"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to read capture output: {e}")
                     output = ""
 
-                # Check for cancellation
+                # Check for cancellation before file retrieval
                 if capture._cancelled:
                     capture.status = CaptureStatus.CANCELLED
                     capture.message = "Capture cancelled"
                     capture.completed_at = datetime.now(timezone.utc)
                     return
 
-                capture.message = "Retrieving capture file..."
-
-                # Parse any output we got
-                if output:
-                    stats = parse_capture_output(output)
-                    capture.packets_captured = stats.get("packets_captured")
-
                 # Retrieve the capture file
+                capture.message = "Retrieving capture file..."
                 await self._retrieve_capture_file(client, capture)
 
                 # Mark as completed
@@ -480,6 +502,10 @@ class CaptureManager:
         """
         Stop a running capture.
 
+        Signals the capture to stop by setting the stop event.
+        The capture task will then send Ctrl+C, retrieve the file,
+        and complete normally.
+
         Args:
             capture_id: Capture identifier
 
@@ -493,8 +519,9 @@ class CaptureManager:
         if capture.status != CaptureStatus.RUNNING:
             return False
 
+        logger.info(f"Stop requested for capture {capture_id}")
         capture.status = CaptureStatus.STOPPING
-        capture.cancel()
+        capture._stop_event.set()  # Signal the capture loop to stop
         return True
 
 
