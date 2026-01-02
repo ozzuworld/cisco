@@ -361,6 +361,9 @@ class CaptureManager:
                     capture.completed_at = datetime.now(timezone.utc)
                     return
 
+                # Give CUCM a moment to finish writing the capture file
+                await asyncio.sleep(2.0)
+
                 # Retrieve the capture file
                 capture.message = "Retrieving capture file..."
                 await self._retrieve_capture_file(client, capture)
@@ -433,10 +436,9 @@ class CaptureManager:
         try:
             # First, list the file to verify it exists and get size
             list_cmd = f"file list activelog {remote_path} detail"
-            output = await asyncio.wait_for(
-                client.execute_command(list_cmd),
-                timeout=30.0
-            )
+            logger.info(f"Listing capture file: {list_cmd}")
+            output = await client.execute_command(list_cmd, timeout=30.0)
+            logger.debug(f"File list output: {output[:200] if output else 'empty'}")
 
             # Parse file size from output
             # Format: "12345  Jan 02 16:30  filename.cap"
@@ -470,7 +472,8 @@ class CaptureManager:
             shell = client._session
             if shell:
                 # Send the command
-                shell.channel.write(f"{get_cmd}\n")
+                shell.stdin.write(f"{get_cmd}\n")
+                await shell.stdin.drain()
 
                 # Handle prompts with timeout
                 await asyncio.wait_for(
@@ -490,8 +493,8 @@ class CaptureManager:
                 capture.message = f"Capture file ready: {capture_file}"
                 logger.info(f"Capture file available on SFTP server")
 
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout retrieving capture file for {capture.capture_id}")
+        except (asyncio.TimeoutError, CUCMCommandTimeoutError) as e:
+            logger.warning(f"Timeout retrieving capture file for {capture.capture_id}: {e}")
             capture.message = "Capture complete, file retrieval timed out"
 
         except Exception as e:
