@@ -93,6 +93,9 @@ class IOSXEShellSession:
                     # Read chunk
                     chunk = await self.stdout.read(1024)
                     if chunk:
+                        # Decode bytes to string if needed
+                        if isinstance(chunk, bytes):
+                            chunk = chunk.decode('utf-8', errors='replace')
                         self._buffer += chunk
                         bytes_read += len(chunk)
 
@@ -163,8 +166,8 @@ class IOSXEShellSession:
         """
         logger.debug(f"Sending command: {command[:50]}...")
 
-        # Send command with newline
-        self.stdin.write(command + '\n')
+        # Send command with newline (encode to bytes for binary mode)
+        self.stdin.write((command + '\n').encode('utf-8'))
         await self.stdin.drain()
 
         # Read until we get the prompt back
@@ -180,7 +183,7 @@ class IOSXEShellSession:
             command: Command to execute
         """
         logger.debug(f"Sending command (no wait): {command[:50]}...")
-        self.stdin.write(command + '\n')
+        self.stdin.write((command + '\n').encode('utf-8'))
         await self.stdin.drain()
 
     def close(self):
