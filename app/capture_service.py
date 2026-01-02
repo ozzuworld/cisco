@@ -452,12 +452,22 @@ class CaptureManager:
             sftp_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
 
             # Create directory at SFTP received location for CUCM to upload to
-            # The SFTP server chroots to storage/received, so files land in artifacts_dir
+            # Handle both possible bind mount configurations:
+            # 1. Bind mount at /received/ level: files land at artifacts_dir/<capture_id>/
+            # 2. Bind mount at chroot level: files land at artifacts_dir/<sftp_base>/<capture_id>/
             sftp_upload_dir = settings.artifacts_dir / capture.capture_id
+            sftp_upload_dir_nested = settings.artifacts_dir / sftp_directory if sftp_base else None
+
             try:
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
-                sftp_upload_dir.chmod(0o777)  # World-writable for SFTP user access
+                sftp_upload_dir.chmod(0o777)
                 logger.info(f"Created SFTP upload directory: {sftp_upload_dir}")
+
+                # Also create nested path if sftp_base is set
+                if sftp_upload_dir_nested and sftp_upload_dir_nested != sftp_upload_dir:
+                    sftp_upload_dir_nested.mkdir(parents=True, exist_ok=True)
+                    sftp_upload_dir_nested.chmod(0o777)
+                    logger.info(f"Created nested SFTP directory: {sftp_upload_dir_nested}")
             except Exception as e:
                 logger.warning(f"Failed to create SFTP upload directory: {e}")
 
@@ -491,17 +501,27 @@ class CaptureManager:
             # Wait for SFTP transfer to complete
             await asyncio.sleep(2.0)
 
-            # Check if file was transferred to SFTP upload directory
+            # Check if file was transferred - check both possible locations
             sftp_received_file = sftp_upload_dir / capture_file
+            sftp_received_file_nested = sftp_upload_dir_nested / capture_file if sftp_upload_dir_nested else None
 
+            found_file = None
             if sftp_received_file.exists():
-                capture.local_file_path = sftp_received_file
-                capture.file_size_bytes = sftp_received_file.stat().st_size
+                found_file = sftp_received_file
+            elif sftp_received_file_nested and sftp_received_file_nested.exists():
+                found_file = sftp_received_file_nested
+
+            if found_file:
+                capture.local_file_path = found_file
+                capture.file_size_bytes = found_file.stat().st_size
                 capture.message = f"Capture file retrieved: {capture_file}"
-                logger.info(f"Retrieved capture file: {sftp_received_file}")
+                logger.info(f"Retrieved capture file: {found_file}")
             else:
-                # File not found
-                logger.warning(f"Capture file not found at {sftp_received_file}")
+                # File not found in either location
+                locations = [str(sftp_received_file)]
+                if sftp_received_file_nested:
+                    locations.append(str(sftp_received_file_nested))
+                logger.warning(f"Capture file not found. Checked: {locations}")
                 capture.message = f"Capture complete, file retrieval pending"
 
         except (asyncio.TimeoutError, CUCMCommandTimeoutError) as e:

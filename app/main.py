@@ -1705,17 +1705,29 @@ async def download_capture(capture_id: str, request: Request):
     # Check if local_file_path is set and exists
     file_path = capture.local_file_path
     if not file_path or not file_path.exists():
-        # Fallback: check SFTP received directory
+        # Fallback: check SFTP received directories
+        # Handle both bind mount configurations
         settings = get_settings()
-        sftp_received_file = settings.artifacts_dir / capture_id / f"{capture.filename}.cap"
+        capture_file = f"{capture.filename}.cap"
+
+        # Check primary location: artifacts_dir/<capture_id>/
+        sftp_received_file = settings.artifacts_dir / capture_id / capture_file
+
+        # Check nested location: artifacts_dir/<sftp_base>/<capture_id>/
+        sftp_base = settings.sftp_remote_base_dir or ""
+        sftp_received_file_nested = None
+        if sftp_base:
+            sftp_received_file_nested = settings.artifacts_dir / sftp_base / capture_id / capture_file
+
         if sftp_received_file.exists():
             file_path = sftp_received_file
-            # Update capture for future requests
-            capture.local_file_path = file_path
-            capture.file_size_bytes = file_path.stat().st_size
-            logger.info(f"Found capture file in SFTP received dir: {file_path}")
+        elif sftp_received_file_nested and sftp_received_file_nested.exists():
+            file_path = sftp_received_file_nested
         else:
-            logger.warning(f"Capture file not found for {capture_id} (request_id={request_id})")
+            locations = [str(sftp_received_file)]
+            if sftp_received_file_nested:
+                locations.append(str(sftp_received_file_nested))
+            logger.warning(f"Capture file not found for {capture_id}. Checked: {locations} (request_id={request_id})")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={
@@ -1724,6 +1736,11 @@ async def download_capture(capture_id: str, request: Request):
                     "request_id": request_id
                 }
             )
+
+        # Update capture for future requests
+        capture.local_file_path = file_path
+        capture.file_size_bytes = file_path.stat().st_size
+        logger.info(f"Found capture file: {file_path}")
 
     return FileResponse(
         file_path,
