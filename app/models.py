@@ -819,6 +819,7 @@ class CaptureDeviceType(str, Enum):
     """Type of device for packet capture"""
     CUCM = "cucm"
     CUBE = "cube"
+    CSR1000V = "csr1000v"
 
 
 class CaptureFilter(BaseModel):
@@ -860,10 +861,14 @@ class CaptureFilter(BaseModel):
 class StartCaptureRequest(BaseModel):
     """Request to start a packet capture"""
 
+    device_type: CaptureDeviceType = Field(
+        default=CaptureDeviceType.CUCM,
+        description="Type of device to capture on (cucm, csr1000v)"
+    )
     host: str = Field(
         ...,
-        description="IP address or FQDN of the CUCM node",
-        examples=["10.10.10.10", "cucm-pub.example.com"]
+        description="IP address or FQDN of the device",
+        examples=["10.10.10.10", "cucm-pub.example.com", "csr1000v.example.com"]
     )
     port: int = Field(
         default=22,

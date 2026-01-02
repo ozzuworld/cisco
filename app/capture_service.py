@@ -1,4 +1,4 @@
-"""Packet capture service for CUCM"""
+"""Packet capture service for CUCM and CSR1000v"""
 
 import asyncio
 import logging
@@ -21,6 +21,19 @@ from app.ssh_client import (
     CUCMConnectionError,
     CUCMCommandTimeoutError,
     CUCMSSHClientError,
+)
+from app.csr_client import (
+    CSRSSHClient,
+    CSRAuthError,
+    CSRConnectionError,
+    CSRCommandTimeoutError,
+    CSRSSHClientError,
+    build_epc_capture_config,
+    build_epc_start_command,
+    build_epc_stop_command,
+    build_epc_export_command,
+    build_epc_clear_command,
+    parse_epc_status,
 )
 from app.config import get_settings
 from app.prompt_responder import PromptResponder
@@ -127,7 +140,7 @@ class Capture:
         self.request = request
         self.filename = filename
         self.status = CaptureStatus.PENDING
-        self.device_type = CaptureDeviceType.CUCM
+        self.device_type = request.device_type
         self.created_at = datetime.now(timezone.utc)
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
@@ -269,7 +282,26 @@ class CaptureManager:
 
     async def execute_capture(self, capture_id: str) -> None:
         """
-        Execute a packet capture.
+        Execute a packet capture - routes to appropriate method based on device type.
+
+        Args:
+            capture_id: Capture identifier
+        """
+        capture = self._captures.get(capture_id)
+        if not capture:
+            logger.error(f"Capture {capture_id} not found")
+            return
+
+        # Route based on device type
+        if capture.device_type == CaptureDeviceType.CSR1000V:
+            await self._execute_csr_capture(capture_id)
+        else:
+            # CUCM is the default
+            await self._execute_cucm_capture(capture_id)
+
+    async def _execute_cucm_capture(self, capture_id: str) -> None:
+        """
+        Execute a packet capture on CUCM.
 
         This runs the capture command on the CUCM node, waits for the
         specified duration (or until stopped), then retrieves the capture file.
@@ -288,7 +320,7 @@ class CaptureManager:
         capture.message = "Starting capture..."
 
         logger.info(
-            f"Starting capture {capture_id} on {request.host} "
+            f"Starting CUCM capture {capture_id} on {request.host} "
             f"for {request.duration_sec}s"
         )
 
@@ -535,6 +567,201 @@ class CaptureManager:
         except Exception as e:
             logger.warning(f"Failed to retrieve capture file: {e}")
             capture.message = f"Capture complete, file retrieval failed: {e}"
+
+    async def _execute_csr_capture(self, capture_id: str) -> None:
+        """
+        Execute a packet capture on CSR1000v using IOS-XE EPC.
+
+        This configures EPC, starts capture, waits for duration,
+        stops capture, and exports the file via SCP.
+
+        Args:
+            capture_id: Capture identifier
+        """
+        capture = self._captures.get(capture_id)
+        if not capture:
+            logger.error(f"Capture {capture_id} not found")
+            return
+
+        request = capture.request
+        capture.status = CaptureStatus.RUNNING
+        capture.started_at = datetime.now(timezone.utc)
+        capture.message = "Starting capture..."
+
+        # Generate a unique capture name for EPC
+        capture_name = f"CAP_{capture_id[:8]}"
+        pcap_filename = f"{capture.filename}.pcap"
+
+        logger.info(
+            f"Starting CSR capture {capture_id} on {request.host} "
+            f"for {request.duration_sec}s"
+        )
+
+        settings = get_settings()
+
+        try:
+            # Build EPC configuration commands
+            config_filter = request.filter
+            config_commands = build_epc_capture_config(
+                capture_name=capture_name,
+                interface=request.interface,
+                buffer_size_mb=10,  # 10MB buffer
+                src_ip=config_filter.src if config_filter else None,
+                dst_ip=config_filter.dest if config_filter else None,
+                port=config_filter.port if config_filter else None,
+                protocol=config_filter.protocol if config_filter else None,
+            )
+
+            # Connect and run capture
+            async with CSRSSHClient(
+                host=request.host,
+                port=request.port,
+                username=request.username,
+                password=request.password,
+                connect_timeout=float(request.connect_timeout_sec),
+            ) as client:
+                capture.message = "Configuring capture..."
+
+                # Run configuration commands
+                for cmd in config_commands:
+                    logger.debug(f"EPC config: {cmd}")
+                    output = await client.execute_command(cmd, timeout=30.0)
+                    logger.debug(f"Output: {output[:100] if output else 'empty'}")
+
+                # Start the capture
+                capture.message = "Capturing packets..."
+                start_cmd = build_epc_start_command(capture_name)
+                logger.info(f"Starting EPC: {start_cmd}")
+                await client.execute_command(start_cmd, timeout=30.0)
+
+                # Wait for either:
+                # 1. Duration to elapse
+                # 2. Stop event to be set (user stopped capture)
+                try:
+                    await asyncio.wait_for(
+                        capture._stop_event.wait(),
+                        timeout=float(request.duration_sec)
+                    )
+                    logger.info(f"Capture {capture_id} stopped by user")
+                except asyncio.TimeoutError:
+                    logger.info(f"Capture {capture_id} duration reached")
+
+                # Stop the capture
+                capture.message = "Stopping capture..."
+                stop_cmd = build_epc_stop_command(capture_name)
+                logger.info(f"Stopping EPC: {stop_cmd}")
+                await client.execute_command(stop_cmd, timeout=30.0)
+
+                # Check capture status
+                status_cmd = f"show monitor capture {capture_name}"
+                status_output = await client.execute_command(status_cmd, timeout=30.0)
+                status = parse_epc_status(status_output)
+                capture.packets_captured = status.get("packets")
+                logger.info(
+                    f"Capture {capture_id} stats: "
+                    f"{capture.packets_captured or 'unknown'} packets captured"
+                )
+
+                # Check for cancellation before file retrieval
+                if capture._cancelled:
+                    # Clean up capture point
+                    clear_cmd = build_epc_clear_command(capture_name)
+                    await client.execute_command(clear_cmd, timeout=30.0)
+                    capture.status = CaptureStatus.CANCELLED
+                    capture.message = "Capture cancelled"
+                    capture.completed_at = datetime.now(timezone.utc)
+                    return
+
+                # Export the capture file via SCP
+                capture.message = "Retrieving capture file..."
+
+                # Create local directory for capture
+                sftp_upload_dir = settings.artifacts_dir / capture.capture_id
+                sftp_upload_dir.mkdir(parents=True, exist_ok=True)
+                sftp_upload_dir.chmod(0o777)
+
+                # Build SCP URL: scp://user:pass@host/path/file.pcap
+                # Note: For security, we use the SFTP credentials
+                scp_url = (
+                    f"scp://{settings.sftp_username}:{settings.sftp_password}"
+                    f"@{settings.sftp_host}/{sftp_upload_dir}/{pcap_filename}"
+                )
+
+                export_cmd = build_epc_export_command(capture_name, scp_url)
+                logger.info(f"Exporting capture to SCP")
+                try:
+                    output = await client.execute_command(export_cmd, timeout=120.0)
+                    logger.debug(f"Export output: {output[:200] if output else 'empty'}")
+                except CSRCommandTimeoutError:
+                    logger.warning("Export command timed out, file may still be transferring")
+
+                # Clean up capture point
+                clear_cmd = build_epc_clear_command(capture_name)
+                await client.execute_command(clear_cmd, timeout=30.0)
+
+                # Wait for file transfer to complete
+                await asyncio.sleep(2.0)
+
+                # Search for the capture file
+                found_file = None
+                for pcap in sftp_upload_dir.rglob(pcap_filename):
+                    found_file = pcap
+                    logger.info(f"Found capture file at: {found_file}")
+                    break
+
+                if found_file:
+                    capture.local_file_path = found_file
+                    capture.file_size_bytes = found_file.stat().st_size
+                    capture.message = f"Capture file retrieved: {pcap_filename}"
+                    logger.info(f"Retrieved capture file: {found_file} ({capture.file_size_bytes} bytes)")
+                else:
+                    logger.warning(f"Capture file {pcap_filename} not found in {sftp_upload_dir}")
+                    capture.message = "Capture complete, file retrieval pending"
+
+                # Mark as completed
+                capture.status = CaptureStatus.COMPLETED
+                capture.completed_at = datetime.now(timezone.utc)
+                if not capture.message.startswith("Capture file"):
+                    capture.message = "Capture completed successfully"
+
+                logger.info(
+                    f"Capture {capture_id} completed: "
+                    f"{capture.packets_captured or 'unknown'} packets, "
+                    f"{capture.file_size_bytes or 0} bytes"
+                )
+
+        except CSRAuthError as e:
+            logger.error(f"Capture {capture_id} auth failed: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = f"Authentication failed: {e}"
+            capture.message = "Authentication failed"
+
+        except CSRConnectionError as e:
+            logger.error(f"Capture {capture_id} connection failed: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = f"Connection failed: {e}"
+            capture.message = "Connection failed"
+
+        except CSRCommandTimeoutError as e:
+            logger.error(f"Capture {capture_id} command timeout: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = f"Command timeout: {e}"
+            capture.message = "Command timeout"
+
+        except asyncio.CancelledError:
+            logger.info(f"Capture {capture_id} cancelled")
+            capture.status = CaptureStatus.CANCELLED
+            capture.message = "Capture cancelled"
+
+        except Exception as e:
+            logger.exception(f"Capture {capture_id} failed: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = str(e)
+            capture.message = "Capture failed"
+
+        finally:
+            if not capture.completed_at:
+                capture.completed_at = datetime.now(timezone.utc)
 
     async def stop_capture(self, capture_id: str) -> bool:
         """
