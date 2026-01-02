@@ -33,6 +33,12 @@ from app.models import (
     CommandEstimate,  # BE-027
     ClusterHealthRequest,  # Health Status
     ClusterHealthResponse,  # Health Status
+    StartCaptureRequest,  # Packet Capture
+    StartCaptureResponse,  # Packet Capture
+    CaptureStatusResponse,  # Packet Capture
+    CaptureListResponse,  # Packet Capture
+    StopCaptureResponse,  # Packet Capture
+    CaptureStatus as CaptureStatusEnum,  # Packet Capture
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -55,6 +61,7 @@ from app.artifact_manager import (
 from app.config import get_settings  # BE-012
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
 from app.health_service import check_cluster_health  # Health Status
+from app.capture_service import get_capture_manager  # Packet Capture
 
 
 # Configure logging
@@ -71,7 +78,7 @@ logging.getLogger('asyncssh').setLevel(logging.WARNING)
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.4.0"  # v0.4.0: Cluster health status endpoint
+    version="0.5.0"  # v0.5.0: Packet capture support
 )
 
 # Wire up middleware (v0.3)
@@ -1411,6 +1418,347 @@ async def retry_failed_nodes(job_id: str, request: Request):
         retry_count=len(retried_nodes),
         message=message
     )
+
+
+# ============================================================================
+# Packet Capture Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/captures",
+    response_model=StartCaptureResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {
+            "description": "Capture started successfully",
+            "model": StartCaptureResponse
+        },
+        401: {
+            "description": "Authentication failed",
+            "model": ErrorResponse
+        },
+        502: {
+            "description": "Network error (host unreachable)",
+            "model": ErrorResponse
+        },
+        504: {
+            "description": "Connection timeout",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def start_capture(
+    req_body: StartCaptureRequest,
+    background_tasks: BackgroundTasks,
+    request: Request
+):
+    """
+    Start a new packet capture on a CUCM node.
+
+    The capture runs in the background for the specified duration.
+    Use GET /captures/{capture_id} to check status.
+
+    Args:
+        req_body: Capture request parameters
+        background_tasks: FastAPI background tasks
+        request: FastAPI request object
+
+    Returns:
+        StartCaptureResponse with capture ID and initial status
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Starting packet capture on {req_body.host}:{req_body.port} "
+        f"for {req_body.duration_sec}s (request_id={request_id})"
+    )
+
+    try:
+        capture_manager = get_capture_manager()
+
+        # Create capture session
+        capture = capture_manager.create_capture(req_body)
+
+        # Schedule execution in background
+        background_tasks.add_task(capture_manager.execute_capture, capture.capture_id)
+
+        logger.info(f"Capture {capture.capture_id} created and queued (request_id={request_id})")
+
+        return StartCaptureResponse(
+            capture_id=capture.capture_id,
+            status=capture.status,
+            message="Capture started"
+        )
+
+    except Exception as e:
+        logger.exception(f"Error starting capture: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "Failed to start capture",
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/captures",
+    response_model=CaptureListResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_captures(limit: int = 50):
+    """
+    List recent packet captures.
+
+    Args:
+        limit: Maximum number of captures to return (default 50)
+
+    Returns:
+        CaptureListResponse with list of captures
+    """
+    capture_manager = get_capture_manager()
+    captures = capture_manager.list_captures(limit=limit)
+
+    return CaptureListResponse(
+        captures=[c.to_info() for c in captures],
+        total=len(captures)
+    )
+
+
+@app.get(
+    "/captures/{capture_id}",
+    response_model=CaptureStatusResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Capture status retrieved",
+            "model": CaptureStatusResponse
+        },
+        404: {
+            "description": "Capture not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_capture_status(capture_id: str, request: Request):
+    """
+    Get the status of a packet capture.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        CaptureStatusResponse with capture status and details
+
+    Raises:
+        HTTPException: If capture not found
+    """
+    request_id = get_request_id(request)
+    capture_manager = get_capture_manager()
+    capture = capture_manager.get_capture(capture_id)
+
+    if not capture:
+        logger.warning(f"Capture {capture_id} not found (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return CaptureStatusResponse(capture=capture.to_info())
+
+
+@app.post(
+    "/captures/{capture_id}/stop",
+    response_model=StopCaptureResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Capture stop initiated",
+            "model": StopCaptureResponse
+        },
+        404: {
+            "description": "Capture not found",
+            "model": ErrorResponse
+        },
+        400: {
+            "description": "Capture not running",
+            "model": ErrorResponse
+        }
+    }
+)
+async def stop_capture(capture_id: str, request: Request):
+    """
+    Stop a running packet capture.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        StopCaptureResponse with stop status
+
+    Raises:
+        HTTPException: If capture not found or not running
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Stopping capture {capture_id} (request_id={request_id})")
+
+    capture_manager = get_capture_manager()
+    capture = capture_manager.get_capture(capture_id)
+
+    if not capture:
+        logger.warning(f"Capture {capture_id} not found for stop (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    if capture.status != CaptureStatusEnum.RUNNING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "CAPTURE_NOT_RUNNING",
+                "message": f"Capture {capture_id} is not running (status: {capture.status.value})",
+                "request_id": request_id
+            }
+        )
+
+    success = await capture_manager.stop_capture(capture_id)
+
+    return StopCaptureResponse(
+        capture_id=capture_id,
+        status=capture.status,
+        message="Capture stop initiated" if success else "Failed to stop capture"
+    )
+
+
+@app.get(
+    "/captures/{capture_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Capture file download"},
+        404: {
+            "description": "Capture or file not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_capture(capture_id: str, request: Request):
+    """
+    Download a completed packet capture file.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with capture file (.cap)
+
+    Raises:
+        HTTPException: If capture or file not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Download capture {capture_id} (request_id={request_id})")
+
+    capture_manager = get_capture_manager()
+    capture = capture_manager.get_capture(capture_id)
+
+    if not capture:
+        logger.warning(f"Capture {capture_id} not found for download (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    if capture.status != CaptureStatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "CAPTURE_NOT_READY",
+                "message": f"Capture {capture_id} is not completed (status: {capture.status.value})",
+                "request_id": request_id
+            }
+        )
+
+    if not capture.local_file_path or not capture.local_file_path.exists():
+        logger.warning(f"Capture file not found for {capture_id} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_FILE_NOT_FOUND",
+                "message": f"Capture file for {capture_id} not found on server",
+                "request_id": request_id
+            }
+        )
+
+    return FileResponse(
+        capture.local_file_path,
+        filename=f"{capture.filename}.cap",
+        media_type="application/vnd.tcpdump.pcap"
+    )
+
+
+@app.delete(
+    "/captures/{capture_id}",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Capture deleted"},
+        404: {
+            "description": "Capture not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def delete_capture(capture_id: str, request: Request):
+    """
+    Delete a packet capture and its files.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If capture not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Deleting capture {capture_id} (request_id={request_id})")
+
+    capture_manager = get_capture_manager()
+    success = capture_manager.delete_capture(capture_id)
+
+    if not success:
+        logger.warning(f"Capture {capture_id} not found for deletion (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return {"message": f"Capture {capture_id} deleted"}
 
 
 # ============================================================================

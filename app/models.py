@@ -798,3 +798,197 @@ class ClusterHealthResponse(BaseModel):
         description="List of health checks that were performed"
     )
     message: Optional[str] = Field(None, description="Summary message")
+
+
+# ============================================================================
+# Packet Capture Models
+# ============================================================================
+
+
+class CaptureStatus(str, Enum):
+    """Packet capture status"""
+    PENDING = "pending"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CaptureDeviceType(str, Enum):
+    """Type of device for packet capture"""
+    CUCM = "cucm"
+    CUBE = "cube"
+
+
+class CaptureFilter(BaseModel):
+    """Filter options for packet capture"""
+
+    host: Optional[str] = Field(
+        default=None,
+        description="Filter by host IP address (captures traffic to/from this host)"
+    )
+    src: Optional[str] = Field(
+        default=None,
+        description="Filter by source IP address"
+    )
+    dest: Optional[str] = Field(
+        default=None,
+        description="Filter by destination IP address"
+    )
+    port: Optional[int] = Field(
+        default=None,
+        description="Filter by port number (e.g., 5060 for SIP)",
+        ge=1,
+        le=65535
+    )
+    protocol: Optional[str] = Field(
+        default=None,
+        description="Filter by protocol (ip, arp, rarp, or all)",
+        pattern="^(ip|arp|rarp|all)$"
+    )
+
+    @model_validator(mode="after")
+    def validate_filters(self):
+        """Validate filter combinations"""
+        # Can't use both host and src/dest at the same time
+        if self.host and (self.src or self.dest):
+            raise ValueError("Cannot use 'host' filter together with 'src' or 'dest' filters")
+        return self
+
+
+class StartCaptureRequest(BaseModel):
+    """Request to start a packet capture"""
+
+    host: str = Field(
+        ...,
+        description="IP address or FQDN of the CUCM node",
+        examples=["10.10.10.10", "cucm-pub.example.com"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port (typically 22)",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username",
+        examples=["admin"]
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    duration_sec: int = Field(
+        ...,
+        description="Capture duration in seconds",
+        ge=10,
+        le=600,  # Max 10 minutes
+        examples=[60, 120, 300]
+    )
+    interface: str = Field(
+        default="eth0",
+        description="Network interface to capture on",
+        examples=["eth0"]
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description="Custom filename for capture (without extension). Auto-generated if not provided.",
+        pattern="^[a-zA-Z0-9_-]+$",
+        max_length=50
+    )
+    filter: Optional[CaptureFilter] = Field(
+        default=None,
+        description="Optional capture filters"
+    )
+    packet_count: int = Field(
+        default=100000,
+        description="Maximum number of packets to capture",
+        ge=100,
+        le=100000
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="SSH connection timeout in seconds",
+        ge=5,
+        le=120
+    )
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("host cannot be empty")
+        return v.strip()
+
+    @field_validator("username", "password")
+    @classmethod
+    def validate_credentials(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Credentials cannot be empty")
+        return v
+
+
+class CaptureInfo(BaseModel):
+    """Information about a packet capture"""
+
+    capture_id: str = Field(..., description="Unique capture identifier")
+    status: CaptureStatus = Field(..., description="Current capture status")
+    device_type: CaptureDeviceType = Field(
+        default=CaptureDeviceType.CUCM,
+        description="Type of device"
+    )
+    host: str = Field(..., description="Target host IP or FQDN")
+    interface: str = Field(..., description="Network interface")
+    filename: str = Field(..., description="Capture filename (without path)")
+    duration_sec: int = Field(..., description="Requested capture duration")
+    filter: Optional[CaptureFilter] = Field(None, description="Applied filters")
+    packet_count: int = Field(..., description="Maximum packet count")
+    started_at: Optional[datetime] = Field(None, description="When capture started")
+    completed_at: Optional[datetime] = Field(None, description="When capture completed")
+    created_at: datetime = Field(..., description="When capture was created")
+    file_size_bytes: Optional[int] = Field(None, description="Capture file size in bytes")
+    packets_captured: Optional[int] = Field(None, description="Number of packets captured")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    message: Optional[str] = Field(None, description="Status message")
+
+
+class StartCaptureResponse(BaseModel):
+    """Response when starting a capture"""
+
+    capture_id: str = Field(..., description="Unique capture identifier")
+    status: CaptureStatus = Field(..., description="Initial capture status")
+    host: str = Field(..., description="Target host")
+    filename: str = Field(..., description="Capture filename")
+    duration_sec: int = Field(..., description="Capture duration")
+    message: str = Field(..., description="Status message")
+    created_at: datetime = Field(..., description="When capture was created")
+
+
+class CaptureStatusResponse(BaseModel):
+    """Response for capture status query"""
+
+    capture: CaptureInfo = Field(..., description="Capture information")
+    download_available: bool = Field(
+        default=False,
+        description="Whether the capture file is available for download"
+    )
+
+
+class CaptureListResponse(BaseModel):
+    """Response for listing captures"""
+
+    captures: List[CaptureInfo] = Field(
+        default_factory=list,
+        description="List of captures"
+    )
+    total: int = Field(default=0, description="Total number of captures")
+
+
+class StopCaptureResponse(BaseModel):
+    """Response when stopping a capture"""
+
+    capture_id: str = Field(..., description="Capture identifier")
+    status: CaptureStatus = Field(..., description="Capture status after stop")
+    message: str = Field(..., description="Status message")
