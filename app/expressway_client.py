@@ -178,7 +178,12 @@ class ExpresswayClient:
             logger.info("Diagnostic logging started successfully")
             return response.json() if response.text else {}
         elif response.status_code == 400:
-            error_msg = response.json().get("Message", "Unknown error")
+            error_msg = "Unknown error"
+            if response.text:
+                try:
+                    error_msg = response.json().get("Message", response.text)
+                except Exception:
+                    error_msg = response.text or "Bad request"
             raise ExpresswayAPIError(f"Failed to start logging: {error_msg}")
         else:
             raise ExpresswayAPIError(f"Unexpected status {response.status_code}: {response.text}")
@@ -204,7 +209,12 @@ class ExpresswayClient:
             logger.info("Diagnostic logging stopped successfully")
             return response.json() if response.text else {}
         elif response.status_code == 400:
-            error_msg = response.json().get("Message", "Unknown error")
+            error_msg = "Unknown error"
+            if response.text:
+                try:
+                    error_msg = response.json().get("Message", response.text)
+                except Exception:
+                    error_msg = response.text or "Bad request"
             raise ExpresswayAPIError(f"Failed to stop logging: {error_msg}")
         else:
             raise ExpresswayAPIError(f"Unexpected status {response.status_code}: {response.text}")
@@ -239,7 +249,12 @@ class ExpresswayClient:
             await self._wait_for_collection_complete(timeout=timeout)
             return response.json() if response.text else {}
         elif response.status_code == 400:
-            error_msg = response.json().get("Message", "Unknown error")
+            error_msg = "Unknown error"
+            if response.text:
+                try:
+                    error_msg = response.json().get("Message", response.text)
+                except Exception:
+                    error_msg = response.text or "Bad request"
             raise ExpresswayAPIError(f"Failed to collect logs: {error_msg}")
         else:
             raise ExpresswayAPIError(f"Unexpected status {response.status_code}: {response.text}")
@@ -334,7 +349,12 @@ class ExpresswayClient:
             logger.info(f"Downloaded {content_length} bytes, type={content_type}, filename={filename}")
             return response.content, filename
         elif response.status_code == 400:
-            error_msg = response.json().get("Message", "Unknown error")
+            error_msg = "Unknown error"
+            if response.text:
+                try:
+                    error_msg = response.json().get("Message", response.text)
+                except Exception:
+                    error_msg = response.text or "Bad request"
             raise ExpresswayAPIError(f"Failed to download logs: {error_msg}")
         else:
             raise ExpresswayAPIError(f"Unexpected status {response.status_code}: {response.text}")
