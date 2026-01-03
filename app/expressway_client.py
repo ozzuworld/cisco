@@ -91,6 +91,7 @@ class ExpresswayClient:
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
+                "X-CSRF-Header": "nocheck",  # Required for Expressway X14.2+
             },
         )
 
