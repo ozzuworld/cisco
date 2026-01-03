@@ -93,3 +93,81 @@ profiles:
     compress: true
     recurs: true
     match: null
+
+
+# =============================================================================
+# CUBE Log Collection Profiles
+# =============================================================================
+
+cube_profiles:
+  - name: voip_trace
+    description: "VoIP Trace logs - SIP signaling (recommended, low CPU)"
+    device_type: cube
+    method: voip_trace
+    commands:
+      - "show voip trace all"
+    include_debug: false
+
+  - name: voip_trace_detail
+    description: "Detailed VoIP Trace with internal events"
+    device_type: cube
+    method: voip_trace
+    commands:
+      - "show voip trace all detail"
+    include_debug: false
+
+  - name: sip_debug
+    description: "SIP debug messages (CPU intensive, auto-disables)"
+    device_type: cube
+    method: debug
+    commands:
+      - "debug ccsip messages"
+    include_debug: true
+    duration_sec: 30
+
+  - name: voice_debug_full
+    description: "Full voice debugging (CPU intensive, auto-disables)"
+    device_type: cube
+    method: debug
+    commands:
+      - "debug ccsip messages"
+      - "debug voip ccapi inout"
+      - "debug voip dialpeer"
+    include_debug: true
+    duration_sec: 30
+
+  - name: config_dump
+    description: "Configuration and status dump"
+    device_type: cube
+    method: config
+    commands:
+      - "show running-config"
+      - "show voice port summary"
+      - "show dial-peer voice summary"
+      - "show sip-ua status"
+      - "show sip-ua calls"
+    include_debug: false
+
+
+# =============================================================================
+# Expressway Log Collection Profiles
+# =============================================================================
+
+expressway_profiles:
+  - name: diagnostic_full
+    description: "Full diagnostic logs with packet capture"
+    device_type: expressway
+    method: diagnostic
+    tcpdump: true
+
+  - name: diagnostic_logs
+    description: "Diagnostic logs only (no packet capture, faster)"
+    device_type: expressway
+    method: diagnostic
+    tcpdump: false
+
+  - name: event_log
+    description: "Event log snapshot (quick status check)"
+    device_type: expressway
+    method: event_log
+    tcpdump: false

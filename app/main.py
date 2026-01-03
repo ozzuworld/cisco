@@ -30,7 +30,23 @@ from app.models import (
     RetryJobResponse,  # BE-030
     EstimateResponse,  # BE-027
     NodeEstimate,  # BE-027
-    CommandEstimate  # BE-027
+    CommandEstimate,  # BE-027
+    ClusterHealthRequest,  # Health Status
+    ClusterHealthResponse,  # Health Status
+    StartCaptureRequest,  # Packet Capture
+    StartCaptureResponse,  # Packet Capture
+    CaptureStatusResponse,  # Packet Capture
+    CaptureListResponse,  # Packet Capture
+    StopCaptureResponse,  # Packet Capture
+    CaptureStatus as CaptureStatusEnum,  # Packet Capture
+    StartLogCollectionRequest,  # Log Collection
+    StartLogCollectionResponse,  # Log Collection
+    LogCollectionStatusResponse,  # Log Collection
+    LogCollectionListResponse,  # Log Collection
+    LogCollectionStatus as LogCollectionStatusEnum,  # Log Collection
+    LogProfilesResponse,  # Log Collection Profiles
+    CubeProfileResponse,  # Log Collection Profiles
+    ExpresswayProfileResponse,  # Log Collection Profiles
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -52,6 +68,9 @@ from app.artifact_manager import (
 )
 from app.config import get_settings  # BE-012
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
+from app.health_service import check_cluster_health  # Health Status
+from app.capture_service import get_capture_manager  # Packet Capture
+from app.log_service import get_log_collection_manager  # Log Collection
 
 
 # Configure logging
@@ -68,7 +87,7 @@ logging.getLogger('asyncssh').setLevel(logging.WARNING)
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.3.3"  # v0.3.3: Cancellation race condition fix
+    version="0.5.0"  # v0.5.0: Packet capture support
 )
 
 # Wire up middleware (v0.3)
@@ -364,6 +383,147 @@ async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
             detail={
                 "error": "INTERNAL_ERROR",
                 "message": "An unexpected error occurred during node discovery",
+                "request_id": request_id
+            }
+        )
+
+
+# ============================================================================
+# Cluster Health Status Endpoint
+# ============================================================================
+
+
+@app.post(
+    "/cluster/health",
+    response_model=ClusterHealthResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Cluster health status retrieved successfully",
+            "model": ClusterHealthResponse
+        },
+        401: {
+            "description": "Authentication failed",
+            "model": ErrorResponse
+        },
+        502: {
+            "description": "Network error (host unreachable, connection refused, etc)",
+            "model": ErrorResponse
+        },
+        504: {
+            "description": "Connection or command timeout",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_cluster_health(req_body: ClusterHealthRequest, request: Request):
+    """
+    Get health status of a CUCM cluster.
+
+    Connects to CUCM nodes via SSH and runs health check commands to assess:
+    - Database replication status (utils dbreplication runtimestate)
+    - Service status (utils service list)
+    - NTP synchronization (utils ntp status)
+    - System diagnostics (utils diagnose test)
+    - Core files / crash dumps (utils core active list)
+
+    If nodes list is not provided, discovers nodes from the publisher first.
+
+    Args:
+        req_body: ClusterHealthRequest with connection parameters and check options
+        request: FastAPI request object
+
+    Returns:
+        ClusterHealthResponse with health status for all nodes
+
+    Raises:
+        HTTPException: With appropriate status code and error details
+    """
+    request_id = get_request_id(request)
+    checks_str = ", ".join([c.value for c in req_body.checks])
+    logger.info(
+        f"Cluster health check request for {req_body.publisher_host}:{req_body.port} "
+        f"checks=[{checks_str}] (request_id={request_id})"
+    )
+
+    try:
+        response = await check_cluster_health(req_body)
+        logger.info(
+            f"Cluster health check complete: {response.cluster_status.value} "
+            f"({response.healthy_nodes} healthy, {response.degraded_nodes} degraded, "
+            f"{response.critical_nodes} critical, {response.unreachable_nodes} unreachable) "
+            f"(request_id={request_id})"
+        )
+        return response
+
+    except CUCMAuthError as e:
+        logger.error(f"Authentication failed: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "AUTH_FAILED",
+                "message": "Authentication failed. Please check username and password.",
+                "request_id": request_id
+            }
+        )
+
+    except CUCMCommandTimeoutError as e:
+        logger.error(f"Command timeout: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "COMMAND_TIMEOUT",
+                "message": f"Command execution timed out: {str(e)}",
+                "request_id": request_id
+            }
+        )
+
+    except CUCMConnectionError as e:
+        error_msg = str(e).lower()
+        if "timeout" in error_msg:
+            logger.error(f"Connection timeout: {str(e)} (request_id={request_id})")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "CONNECT_TIMEOUT",
+                    "message": f"Connection timeout to {req_body.publisher_host}:{req_body.port}",
+                    "request_id": request_id
+                }
+            )
+        else:
+            logger.error(f"Connection error: {str(e)} (request_id={request_id})")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error": "NETWORK_ERROR",
+                    "message": f"Cannot connect to {req_body.publisher_host}:{req_body.port}. "
+                               f"Please check host is reachable and SSH is available.",
+                    "request_id": request_id
+                }
+            )
+
+    except CUCMSSHClientError as e:
+        logger.error(f"SSH client error: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "SSH_ERROR",
+                "message": "SSH client error occurred",
+                "request_id": request_id
+            }
+        )
+
+    except Exception as e:
+        logger.exception(f"Unexpected error during cluster health check: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred during cluster health check",
                 "request_id": request_id
             }
         )
@@ -1266,6 +1426,683 @@ async def retry_failed_nodes(job_id: str, request: Request):
         retried_nodes=retried_nodes,
         retry_count=len(retried_nodes),
         message=message
+    )
+
+
+# ============================================================================
+# Packet Capture Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/captures",
+    response_model=StartCaptureResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {
+            "description": "Capture started successfully",
+            "model": StartCaptureResponse
+        },
+        401: {
+            "description": "Authentication failed",
+            "model": ErrorResponse
+        },
+        502: {
+            "description": "Network error (host unreachable)",
+            "model": ErrorResponse
+        },
+        504: {
+            "description": "Connection timeout",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def start_capture(
+    req_body: StartCaptureRequest,
+    background_tasks: BackgroundTasks,
+    request: Request
+):
+    """
+    Start a new packet capture on a CUCM node.
+
+    The capture runs in the background for the specified duration.
+    Use GET /captures/{capture_id} to check status.
+
+    Args:
+        req_body: Capture request parameters
+        background_tasks: FastAPI background tasks
+        request: FastAPI request object
+
+    Returns:
+        StartCaptureResponse with capture ID and initial status
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Starting packet capture on {req_body.host}:{req_body.port} "
+        f"for {req_body.duration_sec}s (request_id={request_id})"
+    )
+
+    try:
+        capture_manager = get_capture_manager()
+
+        # Create capture session
+        capture = capture_manager.create_capture(req_body)
+
+        # Schedule execution in background
+        background_tasks.add_task(capture_manager.execute_capture, capture.capture_id)
+
+        logger.info(f"Capture {capture.capture_id} created and queued (request_id={request_id})")
+
+        return StartCaptureResponse(
+            capture_id=capture.capture_id,
+            status=capture.status,
+            host=req_body.host,
+            filename=capture.filename,
+            duration_sec=req_body.duration_sec,
+            message="Capture started",
+            created_at=capture.created_at
+        )
+
+    except Exception as e:
+        logger.exception(f"Error starting capture: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "Failed to start capture",
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/captures",
+    response_model=CaptureListResponse,
+    status_code=status.HTTP_200_OK
+)
+async def list_captures(limit: int = 50):
+    """
+    List recent packet captures.
+
+    Args:
+        limit: Maximum number of captures to return (default 50)
+
+    Returns:
+        CaptureListResponse with list of captures
+    """
+    capture_manager = get_capture_manager()
+    captures = capture_manager.list_captures(limit=limit)
+
+    return CaptureListResponse(
+        captures=[c.to_info() for c in captures],
+        total=len(captures)
+    )
+
+
+@app.get(
+    "/captures/{capture_id}",
+    response_model=CaptureStatusResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Capture status retrieved",
+            "model": CaptureStatusResponse
+        },
+        404: {
+            "description": "Capture not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_capture_status(capture_id: str, request: Request):
+    """
+    Get the status of a packet capture.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        CaptureStatusResponse with capture status and details
+
+    Raises:
+        HTTPException: If capture not found
+    """
+    request_id = get_request_id(request)
+    capture_manager = get_capture_manager()
+    capture = capture_manager.get_capture(capture_id)
+
+    if not capture:
+        logger.warning(f"Capture {capture_id} not found (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return CaptureStatusResponse(capture=capture.to_info())
+
+
+@app.post(
+    "/captures/{capture_id}/stop",
+    response_model=StopCaptureResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Capture stop initiated",
+            "model": StopCaptureResponse
+        },
+        404: {
+            "description": "Capture not found",
+            "model": ErrorResponse
+        },
+        400: {
+            "description": "Capture not running",
+            "model": ErrorResponse
+        }
+    }
+)
+async def stop_capture(capture_id: str, request: Request):
+    """
+    Stop a running packet capture.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        StopCaptureResponse with stop status
+
+    Raises:
+        HTTPException: If capture not found or not running
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Stopping capture {capture_id} (request_id={request_id})")
+
+    capture_manager = get_capture_manager()
+    capture = capture_manager.get_capture(capture_id)
+
+    if not capture:
+        logger.warning(f"Capture {capture_id} not found for stop (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    if capture.status != CaptureStatusEnum.RUNNING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "CAPTURE_NOT_RUNNING",
+                "message": f"Capture {capture_id} is not running (status: {capture.status.value})",
+                "request_id": request_id
+            }
+        )
+
+    success = await capture_manager.stop_capture(capture_id)
+
+    return StopCaptureResponse(
+        capture_id=capture_id,
+        status=capture.status,
+        message="Capture stop initiated" if success else "Failed to stop capture"
+    )
+
+
+@app.get(
+    "/captures/{capture_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Capture file download"},
+        404: {
+            "description": "Capture or file not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_capture(capture_id: str, request: Request):
+    """
+    Download a completed packet capture file.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with capture file (.cap)
+
+    Raises:
+        HTTPException: If capture or file not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Download capture {capture_id} (request_id={request_id})")
+
+    capture_manager = get_capture_manager()
+    capture = capture_manager.get_capture(capture_id)
+
+    if not capture:
+        logger.warning(f"Capture {capture_id} not found for download (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    if capture.status != CaptureStatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "CAPTURE_NOT_READY",
+                "message": f"Capture {capture_id} is not completed (status: {capture.status.value})",
+                "request_id": request_id
+            }
+        )
+
+    # Check if local_file_path is set and exists
+    file_path = capture.local_file_path
+    if not file_path or not file_path.exists():
+        # Fallback: search for file recursively in SFTP received directories
+        # CUCM preserves directory structure: <capture_id>/<host>/<timestamp>/platform/cli/<file>.cap
+        settings = get_settings()
+        capture_file = f"{capture.filename}.cap"
+        found_file = None
+
+        # Search in primary location: artifacts_dir/<capture_id>/
+        primary_dir = settings.artifacts_dir / capture_id
+        if primary_dir.exists():
+            for cap_file in primary_dir.rglob(capture_file):
+                found_file = cap_file
+                break
+
+        # If not found, try nested location: artifacts_dir/<sftp_base>/<capture_id>/
+        if not found_file:
+            sftp_base = settings.sftp_remote_base_dir or ""
+            if sftp_base:
+                nested_dir = settings.artifacts_dir / sftp_base / capture_id
+                if nested_dir.exists():
+                    for cap_file in nested_dir.rglob(capture_file):
+                        found_file = cap_file
+                        break
+
+        if found_file:
+            file_path = found_file
+            # Update capture for future requests
+            capture.local_file_path = file_path
+            capture.file_size_bytes = file_path.stat().st_size
+            logger.info(f"Found capture file: {file_path}")
+        else:
+            logger.warning(f"Capture file {capture_file} not found for {capture_id} (request_id={request_id})")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "CAPTURE_FILE_NOT_FOUND",
+                    "message": f"Capture file for {capture_id} not found on server",
+                    "request_id": request_id
+                }
+            )
+
+    return FileResponse(
+        file_path,
+        filename=f"{capture.filename}.cap",
+        media_type="application/vnd.tcpdump.pcap"
+    )
+
+
+@app.delete(
+    "/captures/{capture_id}",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Capture deleted"},
+        404: {
+            "description": "Capture not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def delete_capture(capture_id: str, request: Request):
+    """
+    Delete a packet capture and its files.
+
+    Args:
+        capture_id: Capture identifier
+        request: FastAPI request object
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If capture not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Deleting capture {capture_id} (request_id={request_id})")
+
+    capture_manager = get_capture_manager()
+    success = capture_manager.delete_capture(capture_id)
+
+    if not success:
+        logger.warning(f"Capture {capture_id} not found for deletion (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "CAPTURE_NOT_FOUND",
+                "message": f"Capture {capture_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return {"message": f"Capture {capture_id} deleted"}
+
+
+# ============================================================================
+# Log Collection Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/logs",
+    response_model=StartLogCollectionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Log collection started"},
+        400: {
+            "description": "Invalid request",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def start_log_collection(
+    req_body: StartLogCollectionRequest,
+    background_tasks: BackgroundTasks,
+    request: Request
+):
+    """
+    Start log collection from a CUBE or Expressway device.
+
+    For CUBE:
+    - Uses VoIP Trace (IOS-XE 17.3.2+) by default - minimal CPU impact
+    - Set include_debug=true for traditional debug collection (CPU intensive)
+
+    For Expressway:
+    - Uses diagnostic logging REST API
+    - Collects event logs and system diagnostics
+
+    The collection runs in the background. Use GET /logs/{collection_id} to check status.
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Starting log collection on {req_body.host} "
+        f"(device_type={req_body.device_type}, request_id={request_id})"
+    )
+
+    try:
+        manager = get_log_collection_manager()
+        collection = manager.create_collection(req_body)
+
+        # Start collection in background
+        background_tasks.add_task(manager.execute_collection, collection.collection_id)
+
+        logger.info(
+            f"Log collection {collection.collection_id} created and queued "
+            f"(request_id={request_id})"
+        )
+
+        return StartLogCollectionResponse(
+            collection_id=collection.collection_id,
+            status=collection.status,
+            host=req_body.host,
+            device_type=req_body.device_type,
+            message="Log collection started",
+            created_at=collection.created_at
+        )
+
+    except Exception as e:
+        logger.exception(f"Failed to start log collection: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "COLLECTION_START_FAILED",
+                "message": str(e),
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/logs",
+    response_model=LogCollectionListResponse,
+    responses={
+        200: {"description": "List of log collections"}
+    }
+)
+async def list_log_collections(
+    limit: int = 50,
+    request: Request = None
+):
+    """
+    List recent log collection operations.
+
+    Returns up to 'limit' most recent collections, ordered by creation time descending.
+    """
+    manager = get_log_collection_manager()
+    collections = manager.list_collections(limit=limit)
+
+    return LogCollectionListResponse(
+        collections=[c.to_info() for c in collections],
+        total=len(collections)
+    )
+
+
+@app.get(
+    "/logs/{collection_id}",
+    response_model=LogCollectionStatusResponse,
+    responses={
+        200: {"description": "Collection status"},
+        404: {
+            "description": "Collection not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_log_collection_status(collection_id: str, request: Request):
+    """
+    Get the status of a log collection operation.
+
+    Returns current status, progress, and download availability.
+    """
+    request_id = get_request_id(request)
+    manager = get_log_collection_manager()
+    collection = manager.get_collection(collection_id)
+
+    if not collection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_FOUND",
+                "message": f"Log collection {collection_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    download_available = (
+        collection.status == LogCollectionStatusEnum.COMPLETED and
+        collection.local_file_path is not None and
+        collection.local_file_path.exists()
+    )
+
+    return LogCollectionStatusResponse(
+        collection=collection.to_info(),
+        download_available=download_available
+    )
+
+
+@app.get(
+    "/logs/{collection_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Log file download"},
+        404: {
+            "description": "Collection or file not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_log_collection(collection_id: str, request: Request):
+    """
+    Download the collected log file.
+
+    Returns the log file as a downloadable attachment.
+    """
+    request_id = get_request_id(request)
+    manager = get_log_collection_manager()
+    collection = manager.get_collection(collection_id)
+
+    if not collection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_FOUND",
+                "message": f"Log collection {collection_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    if collection.status != LogCollectionStatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_READY",
+                "message": f"Log collection is {collection.status.value}, not ready for download",
+                "request_id": request_id
+            }
+        )
+
+    if not collection.local_file_path or not collection.local_file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "FILE_NOT_FOUND",
+                "message": "Log file not found on server",
+                "request_id": request_id
+            }
+        )
+
+    file_path = collection.local_file_path
+    filename = file_path.name
+
+    # Determine media type based on file extension
+    if filename.endswith('.tar.gz'):
+        media_type = "application/gzip"
+    elif filename.endswith('.txt'):
+        media_type = "text/plain"
+    else:
+        media_type = "application/octet-stream"
+
+    logger.info(f"Downloading log file {filename} (request_id={request_id})")
+
+    return FileResponse(
+        file_path,
+        filename=filename,
+        media_type=media_type
+    )
+
+
+@app.delete(
+    "/logs/{collection_id}",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Collection deleted"},
+        404: {
+            "description": "Collection not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def delete_log_collection(collection_id: str, request: Request):
+    """
+    Delete a log collection and its files.
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Deleting log collection {collection_id} (request_id={request_id})")
+
+    manager = get_log_collection_manager()
+    success = manager.delete_collection(collection_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_FOUND",
+                "message": f"Log collection {collection_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return {"message": f"Log collection {collection_id} deleted"}
+
+
+@app.get(
+    "/logs/profiles",
+    response_model=LogProfilesResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "List of available profiles for CUBE and Expressway"}
+    }
+)
+async def list_log_profiles():
+    """
+    List available log collection profiles for CUBE and Expressway devices.
+
+    Returns all configured profiles with their settings.
+    Use these profile names when starting log collection.
+    """
+    catalog = get_profile_catalog()
+
+    # Get CUBE profiles
+    cube_profiles = [
+        CubeProfileResponse(
+            name=p.name,
+            description=p.description,
+            device_type=p.device_type,
+            method=p.method,
+            commands=p.commands,
+            include_debug=p.include_debug,
+            duration_sec=p.duration_sec
+        )
+        for p in catalog.list_cube_profiles()
+    ]
+
+    # Get Expressway profiles
+    expressway_profiles = [
+        ExpresswayProfileResponse(
+            name=p.name,
+            description=p.description,
+            device_type=p.device_type,
+            method=p.method,
+            tcpdump=p.tcpdump
+        )
+        for p in catalog.list_expressway_profiles()
+    ]
+
+    return LogProfilesResponse(
+        cube_profiles=cube_profiles,
+        expressway_profiles=expressway_profiles
     )
 
 

@@ -542,3 +542,629 @@ class EstimateResponse(BaseModel):
     computed_reltime_unit: str = Field(..., description="Computed reltime unit")
     computed_reltime_value: int = Field(..., description="Computed reltime value")
     computation_timestamp: datetime = Field(..., description="When reltime was computed")
+
+
+# ============================================================================
+# Cluster Health Status Models
+# ============================================================================
+
+
+class HealthStatus(str, Enum):
+    """Health status levels"""
+    HEALTHY = "healthy"
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+    UNKNOWN = "unknown"
+
+
+class HealthCheckType(str, Enum):
+    """Types of health checks available"""
+    REPLICATION = "replication"
+    SERVICES = "services"
+    NTP = "ntp"
+    DIAGNOSTICS = "diagnostics"
+    CORES = "cores"
+
+
+class ClusterHealthRequest(BaseModel):
+    """Request model for cluster health check"""
+
+    publisher_host: str = Field(
+        ...,
+        description="IP address or FQDN of the CUCM Publisher",
+        examples=["10.10.10.10", "cucm-pub.example.com"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port (typically 22)",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username",
+        examples=["admin"]
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds",
+        ge=5,
+        le=300
+    )
+    command_timeout_sec: int = Field(
+        default=120,
+        description="Command execution timeout in seconds",
+        ge=10,
+        le=600
+    )
+    nodes: Optional[List[str]] = Field(
+        default=None,
+        description="List of node IPs to check. If not provided, discovers nodes from publisher."
+    )
+    checks: List[HealthCheckType] = Field(
+        default=[
+            HealthCheckType.REPLICATION,
+            HealthCheckType.SERVICES,
+            HealthCheckType.NTP,
+        ],
+        description="Health checks to perform"
+    )
+
+    @field_validator("publisher_host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        """Validate that host is not empty"""
+        if not v or not v.strip():
+            raise ValueError("publisher_host cannot be empty")
+        return v.strip()
+
+    @field_validator("username", "password")
+    @classmethod
+    def validate_credentials(cls, v: str) -> str:
+        """Validate that credentials are not empty"""
+        if not v:
+            raise ValueError("Credentials cannot be empty")
+        return v
+
+
+class ReplicationNodeStatus(BaseModel):
+    """Replication status for a single node in the cluster"""
+
+    server_name: str = Field(..., description="Server hostname")
+    ip_address: str = Field(..., description="Server IP address")
+    ping_ms: Optional[float] = Field(None, description="Ping time in milliseconds")
+    db_mon: Optional[str] = Field(None, description="DB/RPC/DbMon status (e.g., 'Y/Y/Y')")
+    repl_queue: Optional[int] = Field(None, description="Replication queue depth")
+    group_id: Optional[str] = Field(None, description="Replication group ID")
+    setup_state: Optional[int] = Field(None, description="RTMT replication setup state (2=complete)")
+    setup_status: Optional[str] = Field(None, description="Setup status message")
+
+
+class ReplicationStatus(BaseModel):
+    """Database replication health status"""
+
+    status: HealthStatus = Field(..., description="Overall replication health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    db_version: Optional[str] = Field(None, description="Database version")
+    repl_timeout: Optional[int] = Field(None, description="Replication timeout in seconds")
+    tables_checked: Optional[int] = Field(None, description="Number of tables checked")
+    tables_total: Optional[int] = Field(None, description="Total number of tables")
+    errors_found: bool = Field(default=False, description="Whether errors were found")
+    mismatches_found: bool = Field(default=False, description="Whether mismatches were found")
+    nodes: List[ReplicationNodeStatus] = Field(
+        default_factory=list,
+        description="Per-node replication status"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class ServiceInfo(BaseModel):
+    """Information about a single service"""
+
+    name: str = Field(..., description="Service name")
+    status: str = Field(..., description="Service status (STARTED, STOPPED, etc.)")
+    is_running: bool = Field(..., description="Whether the service is running")
+
+
+class ServicesStatus(BaseModel):
+    """Services health status"""
+
+    status: HealthStatus = Field(..., description="Overall services health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    total_services: int = Field(default=0, description="Total number of services")
+    running_services: int = Field(default=0, description="Number of running services")
+    stopped_services: int = Field(default=0, description="Number of stopped services")
+    critical_services_down: List[str] = Field(
+        default_factory=list,
+        description="List of critical services that are not running"
+    )
+    services: List[ServiceInfo] = Field(
+        default_factory=list,
+        description="All services and their status"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class NTPStatus(BaseModel):
+    """NTP synchronization health status"""
+
+    status: HealthStatus = Field(..., description="Overall NTP health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    synchronized: bool = Field(default=False, description="Whether NTP is synchronized")
+    stratum: Optional[int] = Field(None, description="NTP stratum level (lower is better, <=3 recommended)")
+    ntp_server: Optional[str] = Field(None, description="Current NTP server")
+    offset_ms: Optional[float] = Field(None, description="Time offset in milliseconds")
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class DiagnosticTest(BaseModel):
+    """Result of a single diagnostic test"""
+
+    name: str = Field(..., description="Test name")
+    passed: bool = Field(..., description="Whether the test passed")
+    message: Optional[str] = Field(None, description="Test result message")
+
+
+class DiagnosticsStatus(BaseModel):
+    """System diagnostics health status"""
+
+    status: HealthStatus = Field(..., description="Overall diagnostics health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    total_tests: int = Field(default=0, description="Total number of tests run")
+    passed_tests: int = Field(default=0, description="Number of passed tests")
+    failed_tests: int = Field(default=0, description="Number of failed tests")
+    tests: List[DiagnosticTest] = Field(
+        default_factory=list,
+        description="Individual test results"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class CoreFilesStatus(BaseModel):
+    """Core files (crash dumps) health status"""
+
+    status: HealthStatus = Field(..., description="Overall core files health")
+    checked_at: datetime = Field(..., description="When the check was performed")
+    core_count: int = Field(default=0, description="Number of core files found")
+    core_files: List[str] = Field(
+        default_factory=list,
+        description="List of core file names/paths"
+    )
+    raw_output: Optional[str] = Field(None, description="Raw command output for debugging")
+    message: Optional[str] = Field(None, description="Status message or error details")
+
+
+class NodeHealthChecks(BaseModel):
+    """Health check results for a single node"""
+
+    replication: Optional[ReplicationStatus] = Field(
+        None, description="Database replication status"
+    )
+    services: Optional[ServicesStatus] = Field(
+        None, description="Services status"
+    )
+    ntp: Optional[NTPStatus] = Field(
+        None, description="NTP synchronization status"
+    )
+    diagnostics: Optional[DiagnosticsStatus] = Field(
+        None, description="System diagnostics status"
+    )
+    cores: Optional[CoreFilesStatus] = Field(
+        None, description="Core files status"
+    )
+
+
+class NodeHealthStatus(BaseModel):
+    """Health status for a single CUCM node"""
+
+    ip: str = Field(..., description="Node IP address")
+    hostname: Optional[str] = Field(None, description="Node hostname")
+    role: Optional[str] = Field(None, description="Node role (Publisher/Subscriber)")
+    status: HealthStatus = Field(..., description="Overall node health status")
+    reachable: bool = Field(default=True, description="Whether the node is reachable via SSH")
+    error: Optional[str] = Field(None, description="Error message if node is unreachable")
+    checks: NodeHealthChecks = Field(
+        default_factory=NodeHealthChecks,
+        description="Individual health check results"
+    )
+    checked_at: datetime = Field(..., description="When the node was checked")
+
+
+class ClusterHealthResponse(BaseModel):
+    """Response model for cluster health check"""
+
+    cluster_status: HealthStatus = Field(..., description="Overall cluster health status")
+    publisher_host: str = Field(..., description="Publisher host used for the check")
+    checked_at: datetime = Field(..., description="When the health check was performed")
+    total_nodes: int = Field(default=0, description="Total number of nodes checked")
+    healthy_nodes: int = Field(default=0, description="Number of healthy nodes")
+    degraded_nodes: int = Field(default=0, description="Number of degraded nodes")
+    critical_nodes: int = Field(default=0, description="Number of critical nodes")
+    unreachable_nodes: int = Field(default=0, description="Number of unreachable nodes")
+    nodes: List[NodeHealthStatus] = Field(
+        default_factory=list,
+        description="Health status for each node"
+    )
+    checks_performed: List[HealthCheckType] = Field(
+        default_factory=list,
+        description="List of health checks that were performed"
+    )
+    message: Optional[str] = Field(None, description="Summary message")
+
+
+# ============================================================================
+# Packet Capture Models
+# ============================================================================
+
+
+class CaptureStatus(str, Enum):
+    """Packet capture status"""
+    PENDING = "pending"
+    RUNNING = "running"
+    STOPPING = "stopping"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CaptureDeviceType(str, Enum):
+    """Type of device for packet capture"""
+    CUCM = "cucm"
+    CUBE = "cube"
+    CSR1000V = "csr1000v"
+    EXPRESSWAY = "expressway"
+
+
+class CaptureFilter(BaseModel):
+    """Filter options for packet capture"""
+
+    host: Optional[str] = Field(
+        default=None,
+        description="Filter by host IP address (captures traffic to/from this host)"
+    )
+    src: Optional[str] = Field(
+        default=None,
+        description="Filter by source IP address"
+    )
+    dest: Optional[str] = Field(
+        default=None,
+        description="Filter by destination IP address"
+    )
+    port: Optional[int] = Field(
+        default=None,
+        description="Filter by port number (e.g., 5060 for SIP)",
+        ge=1,
+        le=65535
+    )
+    protocol: Optional[str] = Field(
+        default=None,
+        description="Filter by protocol (ip, arp, rarp, or all)",
+        pattern="^(ip|arp|rarp|all)$"
+    )
+
+    @model_validator(mode="after")
+    def validate_filters(self):
+        """Validate filter combinations"""
+        # Can't use both host and src/dest at the same time
+        if self.host and (self.src or self.dest):
+            raise ValueError("Cannot use 'host' filter together with 'src' or 'dest' filters")
+        return self
+
+
+class StartCaptureRequest(BaseModel):
+    """Request to start a packet capture"""
+
+    device_type: CaptureDeviceType = Field(
+        default=CaptureDeviceType.CUCM,
+        description="Type of device to capture on (cucm, csr1000v)"
+    )
+    host: str = Field(
+        ...,
+        description="IP address or FQDN of the device",
+        examples=["10.10.10.10", "cucm-pub.example.com", "csr1000v.example.com"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port (typically 22)",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username",
+        examples=["admin"]
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    duration_sec: int = Field(
+        ...,
+        description="Capture duration in seconds",
+        ge=10,
+        le=600,  # Max 10 minutes
+        examples=[60, 120, 300]
+    )
+    interface: str = Field(
+        default="eth0",
+        description="Network interface to capture on",
+        examples=["eth0"]
+    )
+    filename: Optional[str] = Field(
+        default=None,
+        description="Custom filename for capture (without extension). Auto-generated if not provided.",
+        pattern="^[a-zA-Z0-9_-]+$",
+        max_length=50
+    )
+    filter: Optional[CaptureFilter] = Field(
+        default=None,
+        description="Optional capture filters"
+    )
+    packet_count: int = Field(
+        default=100000,
+        description="Maximum number of packets to capture",
+        ge=100,
+        le=100000
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="SSH connection timeout in seconds",
+        ge=5,
+        le=120
+    )
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("host cannot be empty")
+        return v.strip()
+
+    @field_validator("username", "password")
+    @classmethod
+    def validate_credentials(cls, v: str) -> str:
+        if not v:
+            raise ValueError("Credentials cannot be empty")
+        return v
+
+
+class CaptureInfo(BaseModel):
+    """Information about a packet capture"""
+
+    capture_id: str = Field(..., description="Unique capture identifier")
+    status: CaptureStatus = Field(..., description="Current capture status")
+    device_type: CaptureDeviceType = Field(
+        default=CaptureDeviceType.CUCM,
+        description="Type of device"
+    )
+    host: str = Field(..., description="Target host IP or FQDN")
+    interface: str = Field(..., description="Network interface")
+    filename: str = Field(..., description="Capture filename (without path)")
+    duration_sec: int = Field(..., description="Requested capture duration")
+    filter: Optional[CaptureFilter] = Field(None, description="Applied filters")
+    packet_count: int = Field(..., description="Maximum packet count")
+    started_at: Optional[datetime] = Field(None, description="When capture started")
+    completed_at: Optional[datetime] = Field(None, description="When capture completed")
+    created_at: datetime = Field(..., description="When capture was created")
+    file_size_bytes: Optional[int] = Field(None, description="Capture file size in bytes")
+    packets_captured: Optional[int] = Field(None, description="Number of packets captured")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    message: Optional[str] = Field(None, description="Status message")
+
+
+class StartCaptureResponse(BaseModel):
+    """Response when starting a capture"""
+
+    capture_id: str = Field(..., description="Unique capture identifier")
+    status: CaptureStatus = Field(..., description="Initial capture status")
+    host: str = Field(..., description="Target host")
+    filename: str = Field(..., description="Capture filename")
+    duration_sec: int = Field(..., description="Capture duration")
+    message: str = Field(..., description="Status message")
+    created_at: datetime = Field(..., description="When capture was created")
+
+
+class CaptureStatusResponse(BaseModel):
+    """Response for capture status query"""
+
+    capture: CaptureInfo = Field(..., description="Capture information")
+    download_available: bool = Field(
+        default=False,
+        description="Whether the capture file is available for download"
+    )
+
+
+class CaptureListResponse(BaseModel):
+    """Response for listing captures"""
+
+    captures: List[CaptureInfo] = Field(
+        default_factory=list,
+        description="List of captures"
+    )
+    total: int = Field(default=0, description="Total number of captures")
+
+
+class StopCaptureResponse(BaseModel):
+    """Response when stopping a capture"""
+
+    capture_id: str = Field(..., description="Capture identifier")
+    status: CaptureStatus = Field(..., description="Capture status after stop")
+    message: str = Field(..., description="Status message")
+
+
+# ============================================================================
+# Log Collection Models
+# ============================================================================
+
+
+class LogDeviceType(str, Enum):
+    """Type of device for log collection"""
+    CUBE = "cube"
+    EXPRESSWAY = "expressway"
+
+
+class LogCollectionMethod(str, Enum):
+    """Method used for log collection"""
+    VOIP_TRACE = "voip_trace"  # CUBE: show voip trace (IOS-XE 17.3.2+)
+    DEBUG_CCSIP = "debug_ccsip"  # CUBE: Traditional debug (older IOS-XE)
+    DIAGNOSTIC = "diagnostic"  # Expressway: diagnostic logging API
+
+
+class LogCollectionStatus(str, Enum):
+    """Status of a log collection operation"""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class StartLogCollectionRequest(BaseModel):
+    """Request to start log collection from a device"""
+
+    device_type: LogDeviceType = Field(
+        ...,
+        description="Type of device to collect logs from"
+    )
+    host: str = Field(
+        ...,
+        description="IP address or FQDN of the device",
+        examples=["10.10.10.10", "cube.example.com", "expressway.example.com"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH/HTTPS port (22 for CUBE, 443 for Expressway)",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="Admin username",
+        examples=["admin"]
+    )
+    password: str = Field(
+        ...,
+        description="Admin password (not logged)"
+    )
+    profile: Optional[str] = Field(
+        default=None,
+        description="Collection profile name (e.g., 'voip_trace', 'diagnostic_full'). Uses device default if not specified."
+    )
+    method: Optional[LogCollectionMethod] = Field(
+        default=None,
+        description="Collection method (auto-detected from profile if not specified)"
+    )
+    duration_sec: int = Field(
+        default=30,
+        description="For debug collection: how long to enable debug before collecting",
+        ge=5,
+        le=300
+    )
+    include_debug: bool = Field(
+        default=False,
+        description="CUBE: Enable debug ccsip messages before collection (CPU intensive)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds",
+        ge=5,
+        le=120
+    )
+
+    @model_validator(mode="after")
+    def set_default_port(self):
+        """Set default port based on device type if port is default SSH"""
+        if self.port == 22 and self.device_type == LogDeviceType.EXPRESSWAY:
+            object.__setattr__(self, 'port', 443)
+        return self
+
+
+class LogCollectionInfo(BaseModel):
+    """Information about a log collection operation"""
+
+    collection_id: str = Field(..., description="Unique collection identifier")
+    status: LogCollectionStatus = Field(..., description="Current status")
+    device_type: LogDeviceType = Field(..., description="Device type")
+    profile: Optional[str] = Field(None, description="Profile used for collection")
+    method: Optional[LogCollectionMethod] = Field(None, description="Collection method used")
+    host: str = Field(..., description="Target host")
+    started_at: Optional[datetime] = Field(None, description="When collection started")
+    completed_at: Optional[datetime] = Field(None, description="When collection completed")
+    created_at: datetime = Field(..., description="When collection was created")
+    file_size_bytes: Optional[int] = Field(None, description="Collected log file size")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    message: Optional[str] = Field(None, description="Status message")
+
+
+class StartLogCollectionResponse(BaseModel):
+    """Response when starting log collection"""
+
+    collection_id: str = Field(..., description="Unique collection identifier")
+    status: LogCollectionStatus = Field(..., description="Initial status")
+    host: str = Field(..., description="Target host")
+    device_type: LogDeviceType = Field(..., description="Device type")
+    message: str = Field(..., description="Status message")
+    created_at: datetime = Field(..., description="When collection was created")
+
+
+class LogCollectionStatusResponse(BaseModel):
+    """Response for log collection status query"""
+
+    collection: LogCollectionInfo = Field(..., description="Collection information")
+    download_available: bool = Field(
+        default=False,
+        description="Whether the log file is available for download"
+    )
+
+
+class LogCollectionListResponse(BaseModel):
+    """Response for listing log collections"""
+
+    collections: List[LogCollectionInfo] = Field(
+        default_factory=list,
+        description="List of log collections"
+    )
+    total: int = Field(default=0, description="Total number of collections")
+
+
+class CubeProfileResponse(BaseModel):
+    """Response model for a CUBE profile"""
+
+    name: str = Field(..., description="Profile name")
+    description: str = Field(..., description="Profile description")
+    device_type: str = Field(default="cube", description="Device type")
+    method: str = Field(..., description="Collection method")
+    commands: List[str] = Field(default_factory=list, description="Commands to execute")
+    include_debug: bool = Field(default=False, description="Whether debug is enabled")
+    duration_sec: int = Field(default=30, description="Debug duration in seconds")
+
+
+class ExpresswayProfileResponse(BaseModel):
+    """Response model for an Expressway profile"""
+
+    name: str = Field(..., description="Profile name")
+    description: str = Field(..., description="Profile description")
+    device_type: str = Field(default="expressway", description="Device type")
+    method: str = Field(..., description="Collection method")
+    tcpdump: bool = Field(default=False, description="Include packet capture")
+
+
+class LogProfilesResponse(BaseModel):
+    """Response for listing CUBE and Expressway profiles"""
+
+    cube_profiles: List[CubeProfileResponse] = Field(
+        default_factory=list,
+        description="List of CUBE profiles"
+    )
+    expressway_profiles: List[ExpresswayProfileResponse] = Field(
+        default_factory=list,
+        description="List of Expressway profiles"
+    )

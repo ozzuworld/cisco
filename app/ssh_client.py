@@ -171,6 +171,18 @@ class InteractiveShellSession:
                             return output_text
 
         except TimeoutError:
+            # One final prompt check before raising timeout error
+            # The prompt might be there, but read() was blocking waiting for more data
+            match = prompt_pattern.search(self._buffer)
+            if match:
+                logger.debug(
+                    f"Found prompt after timeout - data was already buffered. "
+                    f"bytes_read={bytes_read}"
+                )
+                output_text = self._buffer[:match.start()]
+                self._buffer = self._buffer[match.end():]
+                return output_text
+
             # Debug logging on timeout
             buffer_tail = self._buffer[-500:] if len(self._buffer) > 500 else self._buffer
             logger.error(
@@ -214,6 +226,30 @@ class InteractiveShellSession:
         output = await self.read_until_prompt(timeout=timeout)
 
         return output
+
+    async def send_command_no_wait(self, command: str) -> None:
+        """
+        Send a command without waiting for response.
+
+        Used for long-running commands like packet capture where we need
+        to manually stop with Ctrl+C later.
+
+        Args:
+            command: Command to execute
+        """
+        logger.debug(f"Sending command (no wait): {command[:50]}...")
+        self.stdin.write(command + '\n')
+        await self.stdin.drain()
+
+    async def send_interrupt(self) -> None:
+        """
+        Send Ctrl+C (interrupt) signal to stop a running command.
+
+        Used to stop long-running commands like packet capture.
+        """
+        logger.debug("Sending Ctrl+C interrupt")
+        self.stdin.write('\x03')  # Ctrl+C
+        await self.stdin.drain()
 
     def close(self):
         """Close the stdin writer"""
@@ -372,6 +408,46 @@ class CUCMSSHClient:
         logger.debug(f"Command output length: {len(output)} bytes")
 
         return output
+
+    async def send_command_no_wait(self, command: str) -> None:
+        """
+        Send a command without waiting for response.
+
+        Used for long-running commands like packet capture.
+
+        Args:
+            command: Command to execute
+        """
+        if not self._session:
+            raise CUCMSSHClientError("Not connected. Call connect() first.")
+
+        logger.info(f"Executing command (no wait): {command}")
+        await self._session.send_command_no_wait(command)
+
+    async def send_interrupt(self) -> None:
+        """
+        Send Ctrl+C to interrupt a running command.
+        """
+        if not self._session:
+            raise CUCMSSHClientError("Not connected. Call connect() first.")
+
+        logger.info("Sending interrupt (Ctrl+C)")
+        await self._session.send_interrupt()
+
+    async def read_until_prompt(self, timeout: float = 30.0) -> str:
+        """
+        Read output until the prompt is seen.
+
+        Args:
+            timeout: Timeout in seconds
+
+        Returns:
+            Output text
+        """
+        if not self._session:
+            raise CUCMSSHClientError("Not connected. Call connect() first.")
+
+        return await self._session.read_until_prompt(timeout=timeout)
 
     async def disconnect(self) -> None:
         """Close the SSH connection gracefully"""
