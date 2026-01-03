@@ -214,6 +214,7 @@ class ExpresswayClient:
         Collect diagnostic logs (aggregates from cluster peers).
 
         This step is required before downloading logs on clustered Expressways.
+        The collection runs asynchronously on the server, so we poll for completion.
 
         Args:
             timeout: Timeout for collection (can take a while on clusters)
@@ -233,13 +234,64 @@ class ExpresswayClient:
         )
 
         if response.status_code == 200:
-            logger.info("Diagnostic logs collected successfully")
+            logger.info("Diagnostic logs collection started, waiting for completion...")
+            # Collection is async - wait for it to complete
+            await self._wait_for_collection_complete(timeout=timeout)
             return response.json() if response.text else {}
         elif response.status_code == 400:
             error_msg = response.json().get("Message", "Unknown error")
             raise ExpresswayAPIError(f"Failed to collect logs: {error_msg}")
         else:
             raise ExpresswayAPIError(f"Unexpected status {response.status_code}: {response.text}")
+
+    async def _wait_for_collection_complete(
+        self,
+        timeout: float = 120.0,
+        poll_interval: float = 3.0
+    ) -> None:
+        """
+        Wait for log collection to complete by polling status.
+
+        Args:
+            timeout: Maximum time to wait
+            poll_interval: Time between status checks
+        """
+        import time
+        start_time = time.monotonic()
+
+        while time.monotonic() - start_time < timeout:
+            # Check if download is available by trying to get status
+            try:
+                response = await self._api_request(
+                    "GET",
+                    "/api/v1/provisioning/common/diagnosticlogging",
+                    timeout=10.0,
+                )
+
+                if response.status_code == 200:
+                    data = response.json() if response.text else {}
+                    status = data.get("Status", "").lower()
+                    logger.debug(f"Diagnostic logging status: {status}")
+
+                    # Check if collection is complete
+                    if "complete" in status or "ready" in status or "collected" in status:
+                        logger.info("Log collection complete")
+                        return
+                    elif "collecting" in status or "progress" in status:
+                        logger.debug("Collection in progress...")
+                    else:
+                        # Unknown status, wait a bit and assume it might be ready
+                        await asyncio.sleep(poll_interval)
+                        elapsed = time.monotonic() - start_time
+                        if elapsed >= 10.0:  # After 10s, try download anyway
+                            logger.info(f"Collection status unknown ({status}), proceeding after {elapsed:.1f}s")
+                            return
+            except ExpresswayAPIError as e:
+                logger.debug(f"Status check failed: {e}")
+
+            await asyncio.sleep(poll_interval)
+
+        logger.warning(f"Collection timeout after {timeout}s, attempting download anyway")
 
     async def download_diagnostic_logs(self, timeout: float = 300.0) -> bytes:
         """
