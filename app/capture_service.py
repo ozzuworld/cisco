@@ -589,8 +589,9 @@ class CaptureManager:
         capture.started_at = datetime.now(timezone.utc)
         capture.message = "Starting capture..."
 
-        # Generate a unique capture name for EPC
-        capture_name = f"CAP_{capture_id[:8]}"
+        # Generate a unique capture name for EPC (max 8 chars, alphanumeric only)
+        # IOS-XE EPC has strict 8-character limit
+        capture_name = capture_id[:8].replace("-", "")
         pcap_filename = f"{capture.filename}.pcap"
 
         logger.info(
