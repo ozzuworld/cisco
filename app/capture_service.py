@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional, List
 from pathlib import Path
+from urllib.parse import quote as url_quote
 
 from app.models import (
     StartCaptureRequest,
@@ -689,16 +690,34 @@ class CaptureManager:
                     scp_remote_path = f"{capture.capture_id}/{pcap_filename}"
 
                 # Build SCP URL: scp://user:pass@host/path/file.pcap
+                # URL-encode the password to handle special characters like ! @ # etc.
+                encoded_password = url_quote(settings.sftp_password, safe='')
                 scp_url = (
-                    f"scp://{settings.sftp_username}:{settings.sftp_password}"
+                    f"scp://{settings.sftp_username}:{encoded_password}"
                     f"@{settings.sftp_host}/{scp_remote_path}"
                 )
 
                 export_cmd = build_epc_export_command(capture_name, scp_url)
-                logger.info(f"Exporting capture to SCP")
+                logger.info(f"Exporting capture via SCP to {settings.sftp_host}")
+                logger.debug(f"SCP path: {scp_remote_path}")
                 try:
                     output = await client.execute_command(export_cmd, timeout=120.0)
-                    logger.debug(f"Export output: {output[:200] if output else 'empty'}")
+                    logger.info(f"Export command output: {output.strip() if output else '(empty)'}")
+
+                    # Check for common error patterns in the output
+                    output_lower = output.lower() if output else ""
+                    if "error" in output_lower or "failed" in output_lower:
+                        logger.error(f"SCP export reported error: {output}")
+                        capture.error = f"SCP export failed: {output[:200]}"
+                    elif "permission denied" in output_lower:
+                        logger.error(f"SCP permission denied - check server config")
+                        capture.error = "SCP permission denied - server may require SCP config"
+                    elif "connection refused" in output_lower:
+                        logger.error(f"SCP connection refused")
+                        capture.error = "SCP connection refused"
+                    elif "exported" in output_lower or "copied" in output_lower or len(output.strip()) == 0:
+                        # Success - IOS-XE often just returns to prompt with no message on success
+                        logger.info("SCP export appears successful")
                 except CSRCommandTimeoutError:
                     logger.warning("Export command timed out, file may still be transferring")
 

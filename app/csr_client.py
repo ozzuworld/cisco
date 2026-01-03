@@ -58,8 +58,9 @@ class IOSXEShellSession:
         self.stdin = stdin
         self.stdout = stdout
         self.stderr = stderr
-        # Match prompt at end of line (handles \r\n variations)
-        self.prompt_pattern = re.compile(r'(?m)(^|\r|\n)' + prompt_pattern + r'$')
+        # Simple pattern to match IOS-XE prompt (hostname#) at end of output
+        # The prompt appears after \r\n or \n, followed by optional whitespace
+        self.prompt_pattern = re.compile(prompt_pattern + r'\s*$')
         self._buffer = ""
 
     async def read_until_prompt(
