@@ -686,18 +686,20 @@ class CaptureManager:
                 # Export the capture file via SCP
                 capture.message = "Retrieving capture file..."
 
-                # Create local directory for capture (where SCP will put the file)
-                sftp_upload_dir = settings.artifacts_dir / capture.capture_id
+                # For CSR/IOS-XE SCP export, put files directly in received/
+                # IOS-XE SCP cannot create directories, so we use flat structure
+                # with capture_id in the filename
+                sftp_upload_dir = settings.artifacts_dir
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
-                sftp_upload_dir.chmod(0o777)
 
-                # Build SCP path relative to SCP user's home/chroot
-                # The SCP user is chrooted with 'received/' mapped to artifacts_dir
+                # Build SCP path - put file directly in received/ directory
+                # Use capture_id prefix in filename for uniqueness
+                scp_filename = f"{capture.capture_id[:8]}_{pcap_filename}"
                 sftp_base = settings.sftp_remote_base_dir or ""
                 if sftp_base:
-                    scp_remote_path = f"{sftp_base}/{capture.capture_id}/{pcap_filename}"
+                    scp_remote_path = f"{sftp_base}/{scp_filename}"
                 else:
-                    scp_remote_path = f"{capture.capture_id}/{pcap_filename}"
+                    scp_remote_path = scp_filename
 
                 # Build SCP URL: scp://user:pass@host/path/file.pcap
                 # URL-encode the password to handle special characters like ! @ # etc.
@@ -716,17 +718,20 @@ class CaptureManager:
 
                     # Check for common error patterns in the output
                     output_lower = output.lower() if output else ""
-                    if "error" in output_lower or "failed" in output_lower:
-                        logger.error(f"SCP export reported error: {output}")
-                        capture.error = f"SCP export failed: {output[:200]}"
+                    # Check for success first (IOS-XE may show both "failed" and "Exported Successfully")
+                    if "exported successfully" in output_lower:
+                        logger.info("SCP export successful")
                     elif "permission denied" in output_lower:
                         logger.error(f"SCP permission denied - check server config")
                         capture.error = "SCP permission denied - server may require SCP config"
                     elif "connection refused" in output_lower:
                         logger.error(f"SCP connection refused")
                         capture.error = "SCP connection refused"
-                    elif "exported" in output_lower or "copied" in output_lower or len(output.strip()) == 0:
-                        # Success - IOS-XE often just returns to prompt with no message on success
+                    elif "error" in output_lower or "failed" in output_lower:
+                        logger.error(f"SCP export reported error: {output}")
+                        capture.error = f"SCP export failed: {output[:200]}"
+                    else:
+                        # No error indicators - assume success
                         logger.info("SCP export appears successful")
                 except CSRCommandTimeoutError:
                     logger.warning("Export command timed out, file may still be transferring")
@@ -738,20 +743,34 @@ class CaptureManager:
                 # Wait for file transfer to complete
                 await asyncio.sleep(2.0)
 
-                # Search for the capture file
+                # Search for the capture file (use scp_filename we exported)
                 found_file = None
-                for pcap in sftp_upload_dir.rglob(pcap_filename):
-                    found_file = pcap
+                expected_path = sftp_upload_dir / scp_filename
+                logger.info(f"Looking for capture file at: {expected_path}")
+
+                if expected_path.exists():
+                    found_file = expected_path
                     logger.info(f"Found capture file at: {found_file}")
-                    break
+                else:
+                    # Also search recursively in case of different structure
+                    for pcap in sftp_upload_dir.rglob(f"*{pcap_filename}"):
+                        found_file = pcap
+                        logger.info(f"Found capture file via search: {found_file}")
+                        break
 
                 if found_file:
                     capture.local_file_path = found_file
                     capture.file_size_bytes = found_file.stat().st_size
-                    capture.message = f"Capture file retrieved: {pcap_filename}"
+                    capture.message = f"Capture file retrieved: {scp_filename}"
                     logger.info(f"Retrieved capture file: {found_file} ({capture.file_size_bytes} bytes)")
                 else:
-                    logger.warning(f"Capture file {pcap_filename} not found in {sftp_upload_dir}")
+                    logger.warning(f"Capture file {scp_filename} not found in {sftp_upload_dir}")
+                    # List what files ARE in the directory
+                    try:
+                        files = list(sftp_upload_dir.iterdir())
+                        logger.info(f"Files in {sftp_upload_dir}: {[f.name for f in files[:10]]}")
+                    except Exception as e:
+                        logger.debug(f"Could not list directory: {e}")
                     capture.message = "Capture complete, file retrieval pending"
 
                 # Mark as completed
