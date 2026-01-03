@@ -297,6 +297,8 @@ class ExpresswayClient:
         """
         Download diagnostic logs as a zip file.
 
+        The Expressway returns a URL to download the file, not the file itself.
+
         Args:
             timeout: Download timeout (large files may take time)
 
@@ -315,8 +317,41 @@ class ExpresswayClient:
         )
 
         if response.status_code == 200:
+            content_type = response.headers.get("content-type", "")
             content_length = len(response.content)
-            logger.info(f"Downloaded diagnostic logs: {content_length} bytes")
+            logger.info(f"Download response: {content_length} bytes, type={content_type}")
+
+            # Check if response is JSON with download URL
+            if "application/json" in content_type or response.content[:1] == b"{":
+                try:
+                    data = response.json()
+                    logger.info(f"Download response JSON: {data}")
+                    # Check for download URL in response
+                    download_url = data.get("URL") or data.get("url") or data.get("DownloadURL")
+                    if download_url:
+                        logger.info(f"Fetching actual file from: {download_url}")
+                        # Download the actual file
+                        file_response = await self._client.get(
+                            download_url,
+                            timeout=timeout,
+                        )
+                        if file_response.status_code == 200:
+                            logger.info(f"Downloaded file: {len(file_response.content)} bytes")
+                            return file_response.content
+                        else:
+                            raise ExpresswayAPIError(
+                                f"Failed to download file: {file_response.status_code}"
+                            )
+                except Exception as e:
+                    logger.warning(f"Failed to parse download response as JSON: {e}")
+
+            # Check if it's actually a zip file (starts with PK)
+            if response.content[:2] == b"PK":
+                logger.info("Response is a valid zip file")
+                return response.content
+
+            # Log first bytes for debugging
+            logger.warning(f"Unexpected content, first 200 bytes: {response.content[:200]}")
             return response.content
         elif response.status_code == 400:
             error_msg = response.json().get("Message", "Unknown error")
