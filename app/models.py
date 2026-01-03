@@ -1054,9 +1054,13 @@ class StartLogCollectionRequest(BaseModel):
         ...,
         description="Admin password (not logged)"
     )
+    profile: Optional[str] = Field(
+        default=None,
+        description="Collection profile name (e.g., 'voip_trace', 'diagnostic_full'). Uses device default if not specified."
+    )
     method: Optional[LogCollectionMethod] = Field(
         default=None,
-        description="Collection method (auto-detected if not specified)"
+        description="Collection method (auto-detected from profile if not specified)"
     )
     duration_sec: int = Field(
         default=30,
@@ -1089,6 +1093,7 @@ class LogCollectionInfo(BaseModel):
     collection_id: str = Field(..., description="Unique collection identifier")
     status: LogCollectionStatus = Field(..., description="Current status")
     device_type: LogDeviceType = Field(..., description="Device type")
+    profile: Optional[str] = Field(None, description="Profile used for collection")
     method: Optional[LogCollectionMethod] = Field(None, description="Collection method used")
     host: str = Field(..., description="Target host")
     started_at: Optional[datetime] = Field(None, description="When collection started")
@@ -1128,3 +1133,38 @@ class LogCollectionListResponse(BaseModel):
         description="List of log collections"
     )
     total: int = Field(default=0, description="Total number of collections")
+
+
+class CubeProfileResponse(BaseModel):
+    """Response model for a CUBE profile"""
+
+    name: str = Field(..., description="Profile name")
+    description: str = Field(..., description="Profile description")
+    device_type: str = Field(default="cube", description="Device type")
+    method: str = Field(..., description="Collection method")
+    commands: List[str] = Field(default_factory=list, description="Commands to execute")
+    include_debug: bool = Field(default=False, description="Whether debug is enabled")
+    duration_sec: int = Field(default=30, description="Debug duration in seconds")
+
+
+class ExpresswayProfileResponse(BaseModel):
+    """Response model for an Expressway profile"""
+
+    name: str = Field(..., description="Profile name")
+    description: str = Field(..., description="Profile description")
+    device_type: str = Field(default="expressway", description="Device type")
+    method: str = Field(..., description="Collection method")
+    tcpdump: bool = Field(default=False, description="Include packet capture")
+
+
+class LogProfilesResponse(BaseModel):
+    """Response for listing CUBE and Expressway profiles"""
+
+    cube_profiles: List[CubeProfileResponse] = Field(
+        default_factory=list,
+        description="List of CUBE profiles"
+    )
+    expressway_profiles: List[ExpresswayProfileResponse] = Field(
+        default_factory=list,
+        description="List of Expressway profiles"
+    )

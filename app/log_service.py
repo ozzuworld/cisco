@@ -32,6 +32,7 @@ from app.expressway_client import (
     ExpresswayAPIError,
 )
 from app.config import get_settings
+from app.profiles import get_profile_catalog, CubeProfile, ExpresswayProfile
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ class LogCollection:
         self.status = LogCollectionStatus.PENDING
         self.device_type = request.device_type
         self.method: Optional[LogCollectionMethod] = request.method
+        self.profile_name: Optional[str] = request.profile
         self.created_at = datetime.now(timezone.utc)
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
@@ -65,6 +67,7 @@ class LogCollection:
             collection_id=self.collection_id,
             status=self.status,
             device_type=self.device_type,
+            profile=self.profile_name,
             method=self.method,
             host=self.request.host,
             started_at=self.started_at,
@@ -105,13 +108,35 @@ class LogCollectionManager:
         """Create a new log collection operation"""
         collection_id = str(uuid.uuid4())
 
+        # Validate profile if specified
+        if request.profile:
+            catalog = get_profile_catalog()
+
+            if request.device_type == LogDeviceType.CUBE:
+                if not catalog.cube_profile_exists(request.profile):
+                    available = [p.name for p in catalog.list_cube_profiles()]
+                    raise ValueError(
+                        f"Profile not found: {request.profile}. "
+                        f"Available CUBE profiles: {', '.join(available) or 'none'}"
+                    )
+            elif request.device_type == LogDeviceType.EXPRESSWAY:
+                if not catalog.expressway_profile_exists(request.profile):
+                    available = [p.name for p in catalog.list_expressway_profiles()]
+                    raise ValueError(
+                        f"Profile not found: {request.profile}. "
+                        f"Available Expressway profiles: {', '.join(available) or 'none'}"
+                    )
+
         collection = LogCollection(
             collection_id=collection_id,
             request=request,
         )
 
         self._collections[collection_id] = collection
-        logger.info(f"Created log collection {collection_id} for {request.device_type} at {request.host}")
+        logger.info(
+            f"Created log collection {collection_id} for {request.device_type} "
+            f"at {request.host} (profile={request.profile or 'default'})"
+        )
 
         return collection
 
@@ -184,6 +209,15 @@ class LogCollectionManager:
 
         logger.info(f"Starting CUBE log collection {collection_id} on {request.host}")
 
+        # Load profile if specified
+        cube_profile: Optional[CubeProfile] = None
+        if request.profile:
+            catalog = get_profile_catalog()
+            cube_profile = catalog.get_cube_profile(request.profile)
+            if cube_profile:
+                collection.profile_name = cube_profile.name
+                logger.info(f"Using CUBE profile: {cube_profile.name}")
+
         settings = get_settings()
 
         try:
@@ -194,13 +228,17 @@ class LogCollectionManager:
                 password=request.password,
                 connect_timeout=float(request.connect_timeout_sec),
             ) as client:
-                # Determine collection method
-                if request.include_debug:
+                # Determine collection method from profile or request
+                include_debug = request.include_debug
+                if cube_profile:
+                    include_debug = cube_profile.include_debug
+
+                if include_debug:
                     collection.method = LogCollectionMethod.DEBUG_CCSIP
-                    await self._collect_cube_debug(client, collection)
+                    await self._collect_cube_debug(client, collection, cube_profile)
                 else:
                     collection.method = LogCollectionMethod.VOIP_TRACE
-                    await self._collect_cube_voip_trace(client, collection)
+                    await self._collect_cube_voip_trace(client, collection, cube_profile)
 
                 # Mark as completed
                 collection.status = LogCollectionStatus.COMPLETED
@@ -242,7 +280,8 @@ class LogCollectionManager:
     async def _collect_cube_voip_trace(
         self,
         client: CSRSSHClient,
-        collection: LogCollection
+        collection: LogCollection,
+        profile: Optional[CubeProfile] = None
     ) -> None:
         """
         Collect VoIP Trace logs from CUBE.
@@ -253,25 +292,35 @@ class LogCollectionManager:
         collection.message = "Collecting VoIP Trace logs..."
         logger.info(f"Collecting VoIP Trace from {collection.request.host}")
 
-        # Get VoIP trace output
-        output = await client.execute_command(
-            "show voip trace all",
-            timeout=120.0
-        )
+        # Get commands from profile or use default
+        commands = ["show voip trace all"]
+        if profile and profile.commands:
+            commands = profile.commands
 
-        if not output or "No traces" in output:
+        # Execute all commands and combine output
+        all_output = []
+        for cmd in commands:
+            logger.info(f"Executing: {cmd}")
+            output = await client.execute_command(cmd, timeout=120.0)
+            if output:
+                all_output.append(f"=== {cmd} ===\n{output}\n")
+
+        combined_output = "\n".join(all_output) if all_output else ""
+
+        if not combined_output or "No traces" in combined_output:
             logger.warning("No VoIP trace data available")
             collection.message = "No trace data available"
             # Still save empty file for consistency
-            output = "# No VoIP trace data available\n"
+            combined_output = "# No VoIP trace data available\n"
 
         # Save output to file
         output_dir = self.storage_root / collection.collection_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = output_dir / f"voip_trace_{timestamp}.txt"
-        output_file.write_text(output)
+        profile_suffix = f"_{profile.name}" if profile else ""
+        output_file = output_dir / f"voip_trace{profile_suffix}_{timestamp}.txt"
+        output_file.write_text(combined_output)
 
         collection.local_file_path = output_file
         collection.file_size_bytes = output_file.stat().st_size
@@ -282,7 +331,8 @@ class LogCollectionManager:
     async def _collect_cube_debug(
         self,
         client: CSRSSHClient,
-        collection: LogCollection
+        collection: LogCollection,
+        profile: Optional[CubeProfile] = None
     ) -> None:
         """
         Collect logs using traditional debug commands.
@@ -299,21 +349,33 @@ class LogCollectionManager:
         """
         request = collection.request
 
+        # Get duration from profile or request
+        duration_sec = request.duration_sec
+        if profile and profile.duration_sec:
+            duration_sec = profile.duration_sec
+
+        # Get debug commands from profile or use defaults
+        debug_commands = ["debug ccsip messages", "debug voip ccapi inout"]
+        if profile and profile.commands:
+            # Filter to only debug commands
+            debug_commands = [cmd for cmd in profile.commands if cmd.startswith("debug ")]
+
         try:
             collection.message = "Enabling debug logging..."
-            logger.info(f"Enabling debug on {request.host} for {request.duration_sec}s")
+            logger.info(f"Enabling debug on {request.host} for {duration_sec}s")
 
             # Clear logging buffer first
             await client.execute_command("clear logging", timeout=10.0)
 
             # Enable debugs
-            await client.execute_command("debug ccsip messages", timeout=10.0)
-            await client.execute_command("debug voip ccapi inout", timeout=10.0)
+            for cmd in debug_commands:
+                logger.info(f"Enabling: {cmd}")
+                await client.execute_command(cmd, timeout=10.0)
 
-            collection.message = f"Capturing debug logs for {request.duration_sec}s..."
+            collection.message = f"Capturing debug logs for {duration_sec}s..."
 
             # Wait for duration
-            await asyncio.sleep(request.duration_sec)
+            await asyncio.sleep(duration_sec)
 
         finally:
             # CRITICAL: Always disable debugs to prevent CPU impact
@@ -342,7 +404,8 @@ class LogCollectionManager:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = output_dir / f"debug_log_{timestamp}.txt"
+        profile_suffix = f"_{profile.name}" if profile else ""
+        output_file = output_dir / f"debug_log{profile_suffix}_{timestamp}.txt"
         output_file.write_text(output)
 
         collection.local_file_path = output_file
@@ -374,6 +437,20 @@ class LogCollectionManager:
 
         logger.info(f"Starting Expressway log collection {collection_id} on {request.host}")
 
+        # Load profile if specified
+        exp_profile: Optional[ExpresswayProfile] = None
+        if request.profile:
+            catalog = get_profile_catalog()
+            exp_profile = catalog.get_expressway_profile(request.profile)
+            if exp_profile:
+                collection.profile_name = exp_profile.name
+                logger.info(f"Using Expressway profile: {exp_profile.name}")
+
+        # Get tcpdump setting from profile (default: False for faster collection)
+        enable_tcpdump = False
+        if exp_profile:
+            enable_tcpdump = exp_profile.tcpdump
+
         try:
             async with ExpresswayClient(
                 host=request.host,
@@ -381,9 +458,9 @@ class LogCollectionManager:
                 password=request.password,
                 port=request.port or 443,
             ) as client:
-                # Start diagnostic logging (without tcpdump for faster collection)
+                # Start diagnostic logging
                 collection.message = "Starting diagnostic logging..."
-                await client.start_diagnostic_logging(tcpdump=False)
+                await client.start_diagnostic_logging(tcpdump=enable_tcpdump)
 
                 # Brief pause to capture some activity
                 collection.message = "Collecting logs..."
