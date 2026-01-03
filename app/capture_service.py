@@ -625,15 +625,21 @@ class CaptureManager:
 
                 # Run configuration commands
                 for cmd in config_commands:
-                    logger.debug(f"EPC config: {cmd}")
+                    logger.info(f"EPC config: {cmd}")
                     output = await client.execute_command(cmd, timeout=30.0)
-                    logger.debug(f"Output: {output[:100] if output else 'empty'}")
+                    output_clean = output.strip() if output else "(empty)"
+                    logger.info(f"EPC config output: {output_clean[:200]}")
+                    # Check for errors in configuration
+                    if output and ("error" in output.lower() or "invalid" in output.lower()):
+                        logger.error(f"EPC configuration failed: {output}")
+                        raise CSRSSHClientError(f"EPC configuration failed: {output[:200]}")
 
                 # Start the capture
                 capture.message = "Capturing packets..."
                 start_cmd = build_epc_start_command(capture_name)
                 logger.info(f"Starting EPC: {start_cmd}")
-                await client.execute_command(start_cmd, timeout=30.0)
+                start_output = await client.execute_command(start_cmd, timeout=30.0)
+                logger.info(f"Start output: {start_output.strip() if start_output else '(empty)'}")
 
                 # Wait for either:
                 # 1. Duration to elapse
@@ -651,11 +657,14 @@ class CaptureManager:
                 capture.message = "Stopping capture..."
                 stop_cmd = build_epc_stop_command(capture_name)
                 logger.info(f"Stopping EPC: {stop_cmd}")
-                await client.execute_command(stop_cmd, timeout=30.0)
+                stop_output = await client.execute_command(stop_cmd, timeout=30.0)
+                logger.info(f"Stop output: {stop_output.strip() if stop_output else '(empty)'}")
 
                 # Check capture status
                 status_cmd = f"show monitor capture {capture_name}"
+                logger.info(f"Checking status: {status_cmd}")
                 status_output = await client.execute_command(status_cmd, timeout=30.0)
+                logger.info(f"Status output: {status_output.strip()[:300] if status_output else '(empty)'}")
                 status = parse_epc_status(status_output)
                 capture.packets_captured = status.get("packets")
                 logger.info(
