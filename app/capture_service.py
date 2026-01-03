@@ -675,16 +675,23 @@ class CaptureManager:
                 # Export the capture file via SCP
                 capture.message = "Retrieving capture file..."
 
-                # Create local directory for capture
+                # Create local directory for capture (where SCP will put the file)
                 sftp_upload_dir = settings.artifacts_dir / capture.capture_id
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
                 sftp_upload_dir.chmod(0o777)
 
+                # Build SCP path relative to SCP user's home/chroot
+                # The SCP user is chrooted with 'received/' mapped to artifacts_dir
+                sftp_base = settings.sftp_remote_base_dir or ""
+                if sftp_base:
+                    scp_remote_path = f"{sftp_base}/{capture.capture_id}/{pcap_filename}"
+                else:
+                    scp_remote_path = f"{capture.capture_id}/{pcap_filename}"
+
                 # Build SCP URL: scp://user:pass@host/path/file.pcap
-                # Note: For security, we use the SFTP credentials
                 scp_url = (
                     f"scp://{settings.sftp_username}:{settings.sftp_password}"
-                    f"@{settings.sftp_host}/{sftp_upload_dir}/{pcap_filename}"
+                    f"@{settings.sftp_host}/{scp_remote_path}"
                 )
 
                 export_cmd = build_epc_export_command(capture_name, scp_url)

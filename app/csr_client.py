@@ -44,7 +44,7 @@ class IOSXEShellSession:
         stdin: asyncssh.SSHWriter,
         stdout: asyncssh.SSHReader,
         stderr: asyncssh.SSHReader,
-        prompt_pattern: str = r"[\w\-]+#\s*$"
+        prompt_pattern: str = r"[\w\-]+#\s*"
     ):
         """
         Initialize the interactive shell session.
@@ -58,13 +58,14 @@ class IOSXEShellSession:
         self.stdin = stdin
         self.stdout = stdout
         self.stderr = stderr
-        self.prompt_pattern = re.compile(prompt_pattern)
+        # Match prompt at end of line (handles \r\n variations)
+        self.prompt_pattern = re.compile(r'(?m)(^|\r|\n)' + prompt_pattern + r'$')
         self._buffer = ""
 
     async def read_until_prompt(
         self,
         timeout: float = 30.0,
-        min_read_duration: float = 0.5,
+        min_read_duration: float = 0.1,  # Reduced for faster IOS-XE response
         request_id: Optional[str] = None
     ) -> str:
         """
@@ -90,8 +91,16 @@ class IOSXEShellSession:
                 while True:
                     iterations += 1
 
-                    # Read chunk
-                    chunk = await self.stdout.read(1024)
+                    # Read chunk with short timeout to be responsive
+                    try:
+                        chunk = await asyncio.wait_for(
+                            self.stdout.read(1024),
+                            timeout=0.5
+                        )
+                    except asyncio.TimeoutError:
+                        # No data available, check if we have a prompt
+                        chunk = None
+
                     if chunk:
                         # Decode bytes to string if needed
                         if isinstance(chunk, bytes):
@@ -101,7 +110,7 @@ class IOSXEShellSession:
 
                     elapsed = time.time() - start_time
 
-                    # Check for prompt only after minimum read duration
+                    # Check for prompt after minimum read duration
                     if elapsed >= min_read_duration:
                         match = self.prompt_pattern.search(self._buffer)
                         if match:
