@@ -998,3 +998,133 @@ class StopCaptureResponse(BaseModel):
     capture_id: str = Field(..., description="Capture identifier")
     status: CaptureStatus = Field(..., description="Capture status after stop")
     message: str = Field(..., description="Status message")
+
+
+# ============================================================================
+# Log Collection Models
+# ============================================================================
+
+
+class LogDeviceType(str, Enum):
+    """Type of device for log collection"""
+    CUBE = "cube"
+    EXPRESSWAY = "expressway"
+
+
+class LogCollectionMethod(str, Enum):
+    """Method used for log collection"""
+    VOIP_TRACE = "voip_trace"  # CUBE: show voip trace (IOS-XE 17.3.2+)
+    DEBUG_CCSIP = "debug_ccsip"  # CUBE: Traditional debug (older IOS-XE)
+    DIAGNOSTIC = "diagnostic"  # Expressway: diagnostic logging API
+
+
+class LogCollectionStatus(str, Enum):
+    """Status of a log collection operation"""
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class StartLogCollectionRequest(BaseModel):
+    """Request to start log collection from a device"""
+
+    device_type: LogDeviceType = Field(
+        ...,
+        description="Type of device to collect logs from"
+    )
+    host: str = Field(
+        ...,
+        description="IP address or FQDN of the device",
+        examples=["10.10.10.10", "cube.example.com", "expressway.example.com"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH/HTTPS port (22 for CUBE, 443 for Expressway)",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="Admin username",
+        examples=["admin"]
+    )
+    password: str = Field(
+        ...,
+        description="Admin password (not logged)"
+    )
+    method: Optional[LogCollectionMethod] = Field(
+        default=None,
+        description="Collection method (auto-detected if not specified)"
+    )
+    duration_sec: int = Field(
+        default=30,
+        description="For debug collection: how long to enable debug before collecting",
+        ge=5,
+        le=300
+    )
+    include_debug: bool = Field(
+        default=False,
+        description="CUBE: Enable debug ccsip messages before collection (CPU intensive)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds",
+        ge=5,
+        le=120
+    )
+
+    @model_validator(mode="after")
+    def set_default_port(self):
+        """Set default port based on device type if port is default SSH"""
+        if self.port == 22 and self.device_type == LogDeviceType.EXPRESSWAY:
+            object.__setattr__(self, 'port', 443)
+        return self
+
+
+class LogCollectionInfo(BaseModel):
+    """Information about a log collection operation"""
+
+    collection_id: str = Field(..., description="Unique collection identifier")
+    status: LogCollectionStatus = Field(..., description="Current status")
+    device_type: LogDeviceType = Field(..., description="Device type")
+    method: Optional[LogCollectionMethod] = Field(None, description="Collection method used")
+    host: str = Field(..., description="Target host")
+    started_at: Optional[datetime] = Field(None, description="When collection started")
+    completed_at: Optional[datetime] = Field(None, description="When collection completed")
+    created_at: datetime = Field(..., description="When collection was created")
+    file_size_bytes: Optional[int] = Field(None, description="Collected log file size")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    message: Optional[str] = Field(None, description="Status message")
+
+
+class StartLogCollectionResponse(BaseModel):
+    """Response when starting log collection"""
+
+    collection_id: str = Field(..., description="Unique collection identifier")
+    status: LogCollectionStatus = Field(..., description="Initial status")
+    host: str = Field(..., description="Target host")
+    device_type: LogDeviceType = Field(..., description="Device type")
+    message: str = Field(..., description="Status message")
+    created_at: datetime = Field(..., description="When collection was created")
+
+
+class LogCollectionStatusResponse(BaseModel):
+    """Response for log collection status query"""
+
+    collection: LogCollectionInfo = Field(..., description="Collection information")
+    download_available: bool = Field(
+        default=False,
+        description="Whether the log file is available for download"
+    )
+
+
+class LogCollectionListResponse(BaseModel):
+    """Response for listing log collections"""
+
+    collections: List[LogCollectionInfo] = Field(
+        default_factory=list,
+        description="List of log collections"
+    )
+    total: int = Field(default=0, description="Total number of collections")

@@ -39,6 +39,11 @@ from app.models import (
     CaptureListResponse,  # Packet Capture
     StopCaptureResponse,  # Packet Capture
     CaptureStatus as CaptureStatusEnum,  # Packet Capture
+    StartLogCollectionRequest,  # Log Collection
+    StartLogCollectionResponse,  # Log Collection
+    LogCollectionStatusResponse,  # Log Collection
+    LogCollectionListResponse,  # Log Collection
+    LogCollectionStatus as LogCollectionStatusEnum,  # Log Collection
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -62,6 +67,7 @@ from app.config import get_settings  # BE-012
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
 from app.health_service import check_cluster_health  # Health Status
 from app.capture_service import get_capture_manager  # Packet Capture
+from app.log_service import get_log_collection_manager  # Log Collection
 
 
 # Configure logging
@@ -1795,6 +1801,257 @@ async def delete_capture(capture_id: str, request: Request):
         )
 
     return {"message": f"Capture {capture_id} deleted"}
+
+
+# ============================================================================
+# Log Collection Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/logs",
+    response_model=StartLogCollectionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Log collection started"},
+        400: {
+            "description": "Invalid request",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def start_log_collection(
+    req_body: StartLogCollectionRequest,
+    background_tasks: BackgroundTasks,
+    request: Request
+):
+    """
+    Start log collection from a CUBE or Expressway device.
+
+    For CUBE:
+    - Uses VoIP Trace (IOS-XE 17.3.2+) by default - minimal CPU impact
+    - Set include_debug=true for traditional debug collection (CPU intensive)
+
+    For Expressway:
+    - Uses diagnostic logging REST API
+    - Collects event logs and system diagnostics
+
+    The collection runs in the background. Use GET /logs/{collection_id} to check status.
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Starting log collection on {req_body.host} "
+        f"(device_type={req_body.device_type}, request_id={request_id})"
+    )
+
+    try:
+        manager = get_log_collection_manager()
+        collection = manager.create_collection(req_body)
+
+        # Start collection in background
+        background_tasks.add_task(manager.execute_collection, collection.collection_id)
+
+        logger.info(
+            f"Log collection {collection.collection_id} created and queued "
+            f"(request_id={request_id})"
+        )
+
+        return StartLogCollectionResponse(
+            collection_id=collection.collection_id,
+            status=collection.status,
+            host=req_body.host,
+            device_type=req_body.device_type,
+            message="Log collection started",
+            created_at=collection.created_at
+        )
+
+    except Exception as e:
+        logger.exception(f"Failed to start log collection: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "COLLECTION_START_FAILED",
+                "message": str(e),
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/logs",
+    response_model=LogCollectionListResponse,
+    responses={
+        200: {"description": "List of log collections"}
+    }
+)
+async def list_log_collections(
+    limit: int = 50,
+    request: Request = None
+):
+    """
+    List recent log collection operations.
+
+    Returns up to 'limit' most recent collections, ordered by creation time descending.
+    """
+    manager = get_log_collection_manager()
+    collections = manager.list_collections(limit=limit)
+
+    return LogCollectionListResponse(
+        collections=[c.to_info() for c in collections],
+        total=len(collections)
+    )
+
+
+@app.get(
+    "/logs/{collection_id}",
+    response_model=LogCollectionStatusResponse,
+    responses={
+        200: {"description": "Collection status"},
+        404: {
+            "description": "Collection not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_log_collection_status(collection_id: str, request: Request):
+    """
+    Get the status of a log collection operation.
+
+    Returns current status, progress, and download availability.
+    """
+    request_id = get_request_id(request)
+    manager = get_log_collection_manager()
+    collection = manager.get_collection(collection_id)
+
+    if not collection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_FOUND",
+                "message": f"Log collection {collection_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    download_available = (
+        collection.status == LogCollectionStatusEnum.COMPLETED and
+        collection.local_file_path is not None and
+        collection.local_file_path.exists()
+    )
+
+    return LogCollectionStatusResponse(
+        collection=collection.to_info(),
+        download_available=download_available
+    )
+
+
+@app.get(
+    "/logs/{collection_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Log file download"},
+        404: {
+            "description": "Collection or file not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_log_collection(collection_id: str, request: Request):
+    """
+    Download the collected log file.
+
+    Returns the log file as a downloadable attachment.
+    """
+    request_id = get_request_id(request)
+    manager = get_log_collection_manager()
+    collection = manager.get_collection(collection_id)
+
+    if not collection:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_FOUND",
+                "message": f"Log collection {collection_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    if collection.status != LogCollectionStatusEnum.COMPLETED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_READY",
+                "message": f"Log collection is {collection.status.value}, not ready for download",
+                "request_id": request_id
+            }
+        )
+
+    if not collection.local_file_path or not collection.local_file_path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "FILE_NOT_FOUND",
+                "message": "Log file not found on server",
+                "request_id": request_id
+            }
+        )
+
+    file_path = collection.local_file_path
+    filename = file_path.name
+
+    # Determine media type based on file extension
+    if filename.endswith('.tar.gz'):
+        media_type = "application/gzip"
+    elif filename.endswith('.txt'):
+        media_type = "text/plain"
+    else:
+        media_type = "application/octet-stream"
+
+    logger.info(f"Downloading log file {filename} (request_id={request_id})")
+
+    return FileResponse(
+        file_path,
+        filename=filename,
+        media_type=media_type
+    )
+
+
+@app.delete(
+    "/logs/{collection_id}",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Collection deleted"},
+        404: {
+            "description": "Collection not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def delete_log_collection(collection_id: str, request: Request):
+    """
+    Delete a log collection and its files.
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Deleting log collection {collection_id} (request_id={request_id})")
+
+    manager = get_log_collection_manager()
+    success = manager.delete_collection(collection_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "COLLECTION_NOT_FOUND",
+                "message": f"Log collection {collection_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return {"message": f"Log collection {collection_id} deleted"}
 
 
 # ============================================================================
