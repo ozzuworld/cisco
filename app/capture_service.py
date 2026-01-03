@@ -1,4 +1,4 @@
-"""Packet capture service for CUCM and CSR1000v"""
+"""Packet capture service for CUCM, CSR1000v, and Expressway"""
 
 import asyncio
 import logging
@@ -35,6 +35,12 @@ from app.csr_client import (
     build_epc_export_command,
     build_epc_clear_command,
     parse_epc_status,
+)
+from app.expressway_client import (
+    ExpresswayClient,
+    ExpresswayAuthError,
+    ExpresswayConnectionError,
+    ExpresswayAPIError,
 )
 from app.config import get_settings
 from app.prompt_responder import PromptResponder
@@ -296,6 +302,8 @@ class CaptureManager:
         # Route based on device type
         if capture.device_type == CaptureDeviceType.CSR1000V:
             await self._execute_csr_capture(capture_id)
+        elif capture.device_type == CaptureDeviceType.EXPRESSWAY:
+            await self._execute_expressway_capture(capture_id)
         else:
             # CUCM is the default
             await self._execute_cucm_capture(capture_id)
@@ -802,6 +810,171 @@ class CaptureManager:
             capture.status = CaptureStatus.FAILED
             capture.error = f"Command timeout: {e}"
             capture.message = "Command timeout"
+
+        except asyncio.CancelledError:
+            logger.info(f"Capture {capture_id} cancelled")
+            capture.status = CaptureStatus.CANCELLED
+            capture.message = "Capture cancelled"
+
+        except Exception as e:
+            logger.exception(f"Capture {capture_id} failed: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = str(e)
+            capture.message = "Capture failed"
+
+        finally:
+            if not capture.completed_at:
+                capture.completed_at = datetime.now(timezone.utc)
+
+    async def _execute_expressway_capture(self, capture_id: str) -> None:
+        """
+        Execute a packet capture on Cisco Expressway using REST API.
+
+        This uses the diagnostic logging API to start tcpdump,
+        waits for duration, stops capture, collects logs, and
+        downloads the pcap file.
+
+        Args:
+            capture_id: Capture identifier
+        """
+        capture = self._captures.get(capture_id)
+        if not capture:
+            logger.error(f"Capture {capture_id} not found")
+            return
+
+        request = capture.request
+        capture.status = CaptureStatus.RUNNING
+        capture.started_at = datetime.now(timezone.utc)
+        capture.message = "Starting capture..."
+
+        logger.info(
+            f"Starting Expressway capture {capture_id} on {request.host} "
+            f"for {request.duration_sec}s"
+        )
+
+        try:
+            # Connect to Expressway REST API
+            async with ExpresswayClient(
+                host=request.host,
+                username=request.username,
+                password=request.password,
+                port=request.port or 443,
+            ) as client:
+                capture.message = "Starting diagnostic logging..."
+
+                # Start diagnostic logging with tcpdump
+                await client.start_diagnostic_logging(tcpdump=True)
+
+                capture.message = "Capturing packets..."
+
+                # Wait for either:
+                # 1. Duration to elapse
+                # 2. Stop event to be set (user stopped capture)
+                try:
+                    await asyncio.wait_for(
+                        capture._stop_event.wait(),
+                        timeout=float(request.duration_sec)
+                    )
+                    logger.info(f"Capture {capture_id} stopped by user")
+                except asyncio.TimeoutError:
+                    logger.info(f"Capture {capture_id} duration reached")
+
+                # Check for cancellation
+                if capture._cancelled:
+                    # Stop diagnostic logging without collecting
+                    await client.stop_diagnostic_logging()
+                    capture.status = CaptureStatus.CANCELLED
+                    capture.message = "Capture cancelled"
+                    capture.completed_at = datetime.now(timezone.utc)
+                    return
+
+                # Stop diagnostic logging
+                capture.message = "Stopping capture..."
+                await client.stop_diagnostic_logging()
+
+                # Collect logs (required for cluster sync)
+                capture.message = "Collecting diagnostic logs..."
+                await client.collect_diagnostic_logs()
+
+                # Download the diagnostic logs zip
+                capture.message = "Downloading capture file..."
+                zip_content = await client.download_diagnostic_logs()
+
+                # Create output directory for this capture
+                output_dir = self.storage_root / capture_id
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                # Extract pcap files from the zip
+                import zipfile
+                import io
+
+                pcap_files = []
+                try:
+                    with zipfile.ZipFile(io.BytesIO(zip_content)) as zf:
+                        for name in zf.namelist():
+                            if name.endswith('.pcap'):
+                                # Extract pcap file
+                                pcap_data = zf.read(name)
+                                # Use just the filename, not the full path in zip
+                                pcap_name = Path(name).name
+                                output_path = output_dir / f"{capture.filename}_{pcap_name}"
+                                output_path.write_bytes(pcap_data)
+                                pcap_files.append(output_path)
+                                logger.info(f"Extracted pcap: {output_path} ({len(pcap_data)} bytes)")
+                except zipfile.BadZipFile as e:
+                    logger.error(f"Invalid zip file: {e}")
+                    # Save raw content for debugging
+                    raw_path = output_dir / f"{capture.filename}_diagnostic.zip"
+                    raw_path.write_bytes(zip_content)
+                    logger.info(f"Saved raw download to {raw_path}")
+                    capture.local_file_path = raw_path
+                    capture.file_size_bytes = len(zip_content)
+
+                if pcap_files:
+                    # Use the largest pcap file
+                    pcap_files.sort(key=lambda p: p.stat().st_size, reverse=True)
+                    capture.local_file_path = pcap_files[0]
+                    capture.file_size_bytes = pcap_files[0].stat().st_size
+                    capture.message = f"Capture file retrieved: {pcap_files[0].name}"
+                    logger.info(
+                        f"Retrieved capture file: {capture.local_file_path} "
+                        f"({capture.file_size_bytes} bytes)"
+                    )
+                elif not capture.local_file_path:
+                    # No pcap files found, save the zip
+                    zip_path = output_dir / f"{capture.filename}_diagnostic.zip"
+                    zip_path.write_bytes(zip_content)
+                    capture.local_file_path = zip_path
+                    capture.file_size_bytes = len(zip_content)
+                    capture.message = "Capture complete (diagnostic zip saved)"
+                    logger.warning("No pcap files found in diagnostic logs, saved zip")
+
+                # Mark as completed
+                capture.status = CaptureStatus.COMPLETED
+                capture.completed_at = datetime.now(timezone.utc)
+
+                logger.info(
+                    f"Capture {capture_id} completed: "
+                    f"{capture.file_size_bytes or 0} bytes"
+                )
+
+        except ExpresswayAuthError as e:
+            logger.error(f"Capture {capture_id} auth failed: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = f"Authentication failed: {e}"
+            capture.message = "Authentication failed"
+
+        except ExpresswayConnectionError as e:
+            logger.error(f"Capture {capture_id} connection failed: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = f"Connection failed: {e}"
+            capture.message = "Connection failed"
+
+        except ExpresswayAPIError as e:
+            logger.error(f"Capture {capture_id} API error: {e}")
+            capture.status = CaptureStatus.FAILED
+            capture.error = f"API error: {e}"
+            capture.message = "API request failed"
 
         except asyncio.CancelledError:
             logger.info(f"Capture {capture_id} cancelled")

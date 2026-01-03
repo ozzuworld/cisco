@@ -820,6 +820,7 @@ class CaptureDeviceType(str, Enum):
     CUCM = "cucm"
     CUBE = "cube"
     CSR1000V = "csr1000v"
+    EXPRESSWAY = "expressway"
 
 
 class CaptureFilter(BaseModel):
