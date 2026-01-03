@@ -293,17 +293,18 @@ class ExpresswayClient:
 
         logger.warning(f"Collection timeout after {timeout}s, attempting download anyway")
 
-    async def download_diagnostic_logs(self, timeout: float = 300.0) -> bytes:
+    async def download_diagnostic_logs(self, timeout: float = 300.0) -> tuple[bytes, str]:
         """
-        Download diagnostic logs as a zip file.
+        Download diagnostic logs as a tar.gz file.
 
-        The Expressway returns a URL to download the file, not the file itself.
+        The Expressway returns the file directly in the response body.
+        Filename is in the Content-Disposition header.
 
         Args:
             timeout: Download timeout (large files may take time)
 
         Returns:
-            Zip file content as bytes
+            Tuple of (file content as bytes, filename)
         """
         logger.info(f"Downloading diagnostic logs from {self.host}")
 
@@ -319,40 +320,19 @@ class ExpresswayClient:
         if response.status_code == 200:
             content_type = response.headers.get("content-type", "")
             content_length = len(response.content)
-            logger.info(f"Download response: {content_length} bytes, type={content_type}")
 
-            # Check if response is JSON with download URL
-            if "application/json" in content_type or response.content[:1] == b"{":
-                try:
-                    data = response.json()
-                    logger.info(f"Download response JSON: {data}")
-                    # Check for download URL in response
-                    download_url = data.get("URL") or data.get("url") or data.get("DownloadURL")
-                    if download_url:
-                        logger.info(f"Fetching actual file from: {download_url}")
-                        # Download the actual file
-                        file_response = await self._client.get(
-                            download_url,
-                            timeout=timeout,
-                        )
-                        if file_response.status_code == 200:
-                            logger.info(f"Downloaded file: {len(file_response.content)} bytes")
-                            return file_response.content
-                        else:
-                            raise ExpresswayAPIError(
-                                f"Failed to download file: {file_response.status_code}"
-                            )
-                except Exception as e:
-                    logger.warning(f"Failed to parse download response as JSON: {e}")
+            # Get filename from Content-Disposition header
+            content_disposition = response.headers.get("content-disposition", "")
+            filename = "diagnostic.tar.gz"
+            if "filename=" in content_disposition:
+                # Parse filename from header like: attachment; filename="file.tar.gz"
+                import re
+                match = re.search(r'filename[*]?=["\']?([^"\';\s]+)', content_disposition)
+                if match:
+                    filename = match.group(1)
 
-            # Check if it's actually a zip file (starts with PK)
-            if response.content[:2] == b"PK":
-                logger.info("Response is a valid zip file")
-                return response.content
-
-            # Log first bytes for debugging
-            logger.warning(f"Unexpected content, first 200 bytes: {response.content[:200]}")
-            return response.content
+            logger.info(f"Downloaded {content_length} bytes, type={content_type}, filename={filename}")
+            return response.content, filename
         elif response.status_code == 400:
             error_msg = response.json().get("Message", "Unknown error")
             raise ExpresswayAPIError(f"Failed to download logs: {error_msg}")

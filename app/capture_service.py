@@ -896,39 +896,42 @@ class CaptureManager:
                 capture.message = "Collecting diagnostic logs..."
                 await client.collect_diagnostic_logs()
 
-                # Download the diagnostic logs zip
+                # Download the diagnostic logs (tar.gz format)
                 capture.message = "Downloading capture file..."
-                zip_content = await client.download_diagnostic_logs()
+                tar_content, tar_filename = await client.download_diagnostic_logs()
 
                 # Create output directory for this capture
                 output_dir = self.storage_root / capture_id
                 output_dir.mkdir(parents=True, exist_ok=True)
 
-                # Extract pcap files from the zip
-                import zipfile
+                # Extract pcap files from the tar.gz archive
+                import tarfile
+                import gzip
                 import io
 
                 pcap_files = []
                 try:
-                    with zipfile.ZipFile(io.BytesIO(zip_content)) as zf:
-                        for name in zf.namelist():
-                            if name.endswith('.pcap'):
-                                # Extract pcap file
-                                pcap_data = zf.read(name)
-                                # Use just the filename, not the full path in zip
-                                pcap_name = Path(name).name
-                                output_path = output_dir / f"{capture.filename}_{pcap_name}"
-                                output_path.write_bytes(pcap_data)
-                                pcap_files.append(output_path)
-                                logger.info(f"Extracted pcap: {output_path} ({len(pcap_data)} bytes)")
-                except zipfile.BadZipFile as e:
-                    logger.error(f"Invalid zip file: {e}")
+                    # Decompress gzip and extract tar
+                    with gzip.GzipFile(fileobj=io.BytesIO(tar_content)) as gz:
+                        with tarfile.open(fileobj=gz, mode='r:') as tf:
+                            for member in tf.getmembers():
+                                if member.name.endswith('.pcap') and member.isfile():
+                                    # Extract pcap file
+                                    pcap_data = tf.extractfile(member).read()
+                                    # Use just the filename, not the full path in tar
+                                    pcap_name = Path(member.name).name
+                                    output_path = output_dir / f"{capture.filename}_{pcap_name}"
+                                    output_path.write_bytes(pcap_data)
+                                    pcap_files.append(output_path)
+                                    logger.info(f"Extracted pcap: {output_path} ({len(pcap_data)} bytes)")
+                except Exception as e:
+                    logger.error(f"Failed to extract tar.gz: {e}")
                     # Save raw content for debugging
-                    raw_path = output_dir / f"{capture.filename}_diagnostic.zip"
-                    raw_path.write_bytes(zip_content)
+                    raw_path = output_dir / tar_filename
+                    raw_path.write_bytes(tar_content)
                     logger.info(f"Saved raw download to {raw_path}")
                     capture.local_file_path = raw_path
-                    capture.file_size_bytes = len(zip_content)
+                    capture.file_size_bytes = len(tar_content)
 
                 if pcap_files:
                     # Use the largest pcap file
@@ -941,13 +944,13 @@ class CaptureManager:
                         f"({capture.file_size_bytes} bytes)"
                     )
                 elif not capture.local_file_path:
-                    # No pcap files found, save the zip
-                    zip_path = output_dir / f"{capture.filename}_diagnostic.zip"
-                    zip_path.write_bytes(zip_content)
-                    capture.local_file_path = zip_path
-                    capture.file_size_bytes = len(zip_content)
-                    capture.message = "Capture complete (diagnostic zip saved)"
-                    logger.warning("No pcap files found in diagnostic logs, saved zip")
+                    # No pcap files found, save the tar.gz
+                    tar_path = output_dir / tar_filename
+                    tar_path.write_bytes(tar_content)
+                    capture.local_file_path = tar_path
+                    capture.file_size_bytes = len(tar_content)
+                    capture.message = "Capture complete (diagnostic archive saved)"
+                    logger.warning("No pcap files found in diagnostic logs, saved tar.gz")
 
                 # Mark as completed
                 capture.status = CaptureStatus.COMPLETED
