@@ -153,7 +153,12 @@ mkdir -p /etc/ssh/sshd_config.d
 
 cat > "$CONF_FILE" <<EOF
 # Auto-generated config for ${SFTP_USER} - SFTP + SCP support
-# Enables legacy ssh-rsa hostkey algorithm for older clients (e.g., CUCM, IOS-XE)
+# Enables legacy algorithms for older clients (e.g., CUCM, IOS-XE, CSR1000v)
+
+# Legacy key exchange algorithms (required for IOS-XE SCP)
+KexAlgorithms +diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1
+
+# Legacy host key algorithms
 HostKeyAlgorithms +ssh-rsa
 PubkeyAcceptedAlgorithms +ssh-rsa
 
