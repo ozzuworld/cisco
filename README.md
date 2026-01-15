@@ -1,22 +1,18 @@
-# CUCM Log Collector Backend (v0.2.0)
+# CUCM Log Collector Backend
 
 A Python backend service for discovering Cisco Unified Communications Manager (CUCM) cluster nodes and collecting logs via automated SSH sessions.
 
 ## Features
 
-### v0.1 - Node Discovery
-- 🔍 **Node Discovery**: Connect to CUCM Publisher and discover all cluster nodes
-- 🔐 **Secure SSH**: AsyncSSH-based interactive shell sessions with robust timeout handling
-- 📊 **REST API**: FastAPI-powered endpoints for integration with frontend applications
-- 🧪 **Well-tested**: Comprehensive unit tests with sample CUCM output
-
-### v0.2 - Log Collection (Current)
-- 📁 **Profiles**: Pre-defined log collection profiles for common scenarios
-- 🔄 **Job Management**: Create and track asynchronous log collection jobs
-- 📝 **Transcripts**: Complete session transcripts for troubleshooting
-- 📦 **Artifact Tracking**: Automatic discovery and cataloging of collected files
-- ⚡ **Concurrency Control**: Configurable parallel execution per job
-- 🎯 **Interactive Prompts**: Automatic response to CUCM CLI prompts
+- **Node Discovery**: Connect to CUCM Publisher and discover all cluster nodes
+- **Secure SSH**: AsyncSSH-based interactive shell sessions with robust timeout handling
+- **REST API**: FastAPI-powered endpoints for integration with frontend applications
+- **Profiles**: Pre-defined log collection profiles for common scenarios
+- **Job Management**: Create and track asynchronous log collection jobs
+- **Transcripts**: Complete session transcripts for troubleshooting
+- **Artifact Tracking**: Automatic discovery and cataloging of collected files
+- **Concurrency Control**: Configurable parallel execution per job
+- **Interactive Prompts**: Automatic response to CUCM CLI prompts
 
 ## Quick Start
 
@@ -41,7 +37,7 @@ See full documentation below for detailed setup and usage.
 
 ```
 app/
-├── main.py              # FastAPI app (v0.2)
+├── main.py              # FastAPI application
 ├── config.py            # Configuration management
 ├── models.py            # Pydantic models
 ├── ssh_client.py        # AsyncSSH client
@@ -50,10 +46,7 @@ app/
 ├── prompt_responder.py  # Interactive prompts
 └── job_manager.py       # Job execution
 
-tests/
-├── test_parser.py
-├── test_profiles.py
-└── test_prompt_responder.py
+tests/                   # Unit tests
 
 profiles.yaml            # Profile definitions
 ```
@@ -89,7 +82,7 @@ docker run -p 2222:22 -d \
 
 ## API Reference
 
-### Node Discovery (v0.1)
+### Node Discovery
 
 **POST /discover-nodes** - Discover cluster nodes
 
@@ -103,7 +96,7 @@ Request:
 }
 ```
 
-### Profiles (v0.2)
+### Profiles
 
 **GET /profiles** - List available profiles
 
@@ -113,7 +106,7 @@ Response includes built-in profiles:
 - `emergency_debug` - All logs, last 30 min
 - And more...
 
-### Jobs (v0.2)
+### Jobs
 
 **POST /jobs** - Create log collection job
 
@@ -331,23 +324,13 @@ See `.env.example` for all options.
 
 ## Security
 
-- ✅ Passwords never logged or persisted
-- ✅ AsyncSSH logging reduced to WARNING
-- ✅ SFTP credentials from environment only
-- ⚠️ Use HTTPS in production
-- ⚠️ Secure SFTP server access
-- ⚠️ Protect `storage/` directory
-
-## What's Next
-
-- Web UI for job management
-- Scheduled jobs
-- Log parsing and analysis
-- API authentication
-- Multi-cluster support
+- Passwords never logged or persisted
+- AsyncSSH logging reduced to WARNING
+- SFTP credentials from environment only
+- Use HTTPS in production
+- Secure SFTP server access
+- Protect `storage/` directory
 
 ---
 
-**Version**: 0.2.0
-**Full Documentation**: See README.md
-**API Docs**: http://localhost:8000/docs
+**API Docs**: http://localhost:8000/docs (when running)

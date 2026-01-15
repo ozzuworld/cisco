@@ -1,20 +1,18 @@
-# SFTP Setup Instructions for BE-017
+# SFTP Setup Instructions
 
 ## Architecture Overview
 
 For the bind mount approach to work, **SFTP and Backend MUST run on the SAME server**.
 
-Current server: `21.0.0.92`
-- Backend runs here: `/home/user/cisco`
-- SFTP must also run here (localhost)
-- CUCM will connect to this server's IP for file uploads
+- Backend and SFTP run on the same host
+- CUCM connects to this server's IP for file uploads
 
 ## Setup Steps
 
-### 1. Run install-sftp.sh on THIS server
+### 1. Run install-sftp.sh
 
 ```bash
-cd /home/user/cisco
+cd <project-directory>
 sudo bash scripts/install-sftp.sh
 ```
 
@@ -29,32 +27,32 @@ This will create:
 After install-sftp.sh completes, run:
 
 ```bash
-sudo mount --bind /home/user/cisco/storage/received /sftp/cucm-collector/received
+sudo mount --bind <project-directory>/storage/received /sftp/cucm-collector/received
 ```
 
 Verify the mount:
 ```bash
 mount | grep received
-# Should show: /home/user/cisco/storage/received on /sftp/cucm-collector/received type none (rw,bind)
+# Should show: <project-directory>/storage/received on /sftp/cucm-collector/received type none (rw,bind)
 ```
 
 ### 3. Make mount permanent
 
 Add to `/etc/fstab`:
 ```bash
-echo '/home/user/cisco/storage/received /sftp/cucm-collector/received none bind 0 0' | sudo tee -a /etc/fstab
+echo '<project-directory>/storage/received /sftp/cucm-collector/received none bind 0 0' | sudo tee -a /etc/fstab
 ```
 
 ### 4. Update .env with SFTP password
 
-Edit `/home/user/cisco/.env` and set:
+Edit `.env` and set:
 ```bash
 SFTP_PASSWORD=<the password you set in step 1>
 ```
 
-The .env file already has:
+The .env file should have:
 ```bash
-SFTP_HOST=localhost  # Correct - SFTP runs on same server
+SFTP_HOST=localhost  # SFTP runs on same server
 SFTP_REMOTE_BASE_DIR=  # Empty - backend creates job dirs directly
 ```
 
@@ -80,7 +78,7 @@ pkill -f uvicorn
 ### 7. Configure CUCM
 
 In CUCM's SFTP settings for log collection:
-- **SFTP Server IP**: `21.0.0.92` (THIS server's IP)
+- **SFTP Server IP**: Your server's IP address
 - **Port**: `22`
 - **Username**: `cucm-collector`
 - **Password**: (the password you set)
@@ -91,9 +89,9 @@ In CUCM's SFTP settings for log collection:
 After setup, when a job runs:
 
 1. Backend pre-creates: `{job-id}/{node}/` via SFTP to localhost
-2. CUCM uploads to: `sftp://cucm-collector@21.0.0.92/{job-id}/{node}/`
+2. CUCM uploads to: `sftp://cucm-collector@<server-ip>/{job-id}/{node}/`
 3. Files land in: `/sftp/cucm-collector/received/{job-id}/{node}/`
-4. Via bind mount, files appear in: `/home/user/cisco/storage/received/{job-id}/{node}/`
+4. Via bind mount, files appear in: `<project-directory>/storage/received/{job-id}/{node}/`
 5. Backend finds files immediately in `storage/received/`
 
 ## Troubleshooting
@@ -113,7 +111,7 @@ sudo tail -50 /var/log/auth.log
 ```bash
 ls -la /sftp/
 ls -la /sftp/cucm-collector/
-ls -la /home/user/cisco/storage/
+ls -la <project-directory>/storage/
 ```
 
 ### Test directory creation

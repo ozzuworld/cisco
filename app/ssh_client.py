@@ -33,7 +33,7 @@ class CUCMCommandTimeoutError(CUCMSSHClientError):
 
 
 class CUCMSFTPTimeoutError(CUCMSSHClientError):
-    """BE-032: SFTP upload operation timed out"""
+    """SFTP upload operation timed out"""
     pass
 
 
