@@ -902,18 +902,18 @@ class JobManager:
         Raises:
             Exception: If directory creation fails
         """
-        logger.info(f"Pre-creating SFTP directory: {directory_path} on {self.settings.sftp_host}:{self.settings.sftp_port}")
+        logger.info(f"Pre-creating SFTP directory: {directory_path} on {self.settings.effective_sftp_host}:{self.settings.sftp_port}")
 
         try:
             async with asyncssh.connect(
-                host=self.settings.sftp_host,
+                host=self.settings.effective_sftp_host,
                 port=self.settings.sftp_port,
                 username=self.settings.sftp_username,
                 password=self.settings.sftp_password,
                 known_hosts=None,  # Don't use known_hosts file
                 server_host_key_algs=None  # Accept any host key algorithm (CUCM compatibility)
             ) as conn:
-                logger.debug(f"Connected to SFTP server {self.settings.sftp_host}")
+                logger.debug(f"Connected to SFTP server {self.settings.effective_sftp_host}")
 
                 # Use SFTP subsystem to create directory
                 async with conn.start_sftp_client() as sftp:
@@ -954,7 +954,7 @@ class JobManager:
                 logger.info(f"SFTP directory ready: {directory_path}")
 
         except asyncssh.Error as e:
-            error_msg = f"SSH/SFTP connection failed to {self.settings.sftp_host}:{self.settings.sftp_port}: {type(e).__name__}: {str(e)}"
+            error_msg = f"SSH/SFTP connection failed to {self.settings.effective_sftp_host}:{self.settings.sftp_port}: {type(e).__name__}: {str(e)}"
             logger.error(error_msg)
             raise Exception(error_msg) from e
         except Exception as e:
@@ -1153,7 +1153,7 @@ class JobManager:
 
                     # Create prompt responder
                     responder = PromptResponder(
-                        sftp_host=self.settings.sftp_host,
+                        sftp_host=self.settings.effective_sftp_host,
                         sftp_port=self.settings.sftp_port,
                         sftp_username=self.settings.sftp_username,
                         sftp_password=self.settings.sftp_password,

@@ -514,7 +514,7 @@ class CaptureManager:
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
-                sftp_host=settings.sftp_host,
+                sftp_host=settings.effective_sftp_host,
                 sftp_port=settings.sftp_port,
                 sftp_username=settings.sftp_username,
                 sftp_password=settings.sftp_password,
@@ -714,11 +714,11 @@ class CaptureManager:
                 encoded_password = url_quote(settings.sftp_password, safe='')
                 scp_url = (
                     f"scp://{settings.sftp_username}:{encoded_password}"
-                    f"@{settings.sftp_host}/{scp_remote_path}"
+                    f"@{settings.effective_sftp_host}/{scp_remote_path}"
                 )
 
                 export_cmd = build_epc_export_command(capture_name, scp_url)
-                logger.info(f"Exporting capture via SCP to {settings.sftp_host}")
+                logger.info(f"Exporting capture via SCP to {settings.effective_sftp_host}")
                 logger.debug(f"SCP path: {scp_remote_path}")
                 try:
                     output = await client.execute_command(export_cmd, timeout=120.0)
