@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
@@ -71,6 +72,7 @@ from app.prompt_responder import compute_reltime_from_range, build_file_get_comm
 from app.health_service import check_cluster_health  # Health Status
 from app.capture_service import get_capture_manager  # Packet Capture
 from app.log_service import get_log_collection_manager  # Log Collection
+from app.sftp_server import start_sftp_server, stop_sftp_server, get_sftp_server  # Embedded SFTP
 
 
 # Configure logging
@@ -83,11 +85,52 @@ logger = logging.getLogger(__name__)
 # Reduce AsyncSSH library noise
 logging.getLogger('asyncssh').setLevel(logging.WARNING)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    FastAPI lifespan context manager.
+
+    Starts the embedded SFTP server on startup (if enabled) and
+    stops it on shutdown.
+    """
+    # Startup
+    settings = get_settings()
+
+    if settings.sftp_server_enabled:
+        logger.info("Starting embedded SFTP server...")
+        try:
+            await start_sftp_server(
+                host=settings.sftp_server_host,
+                port=settings.sftp_server_port,
+                root_path=settings.artifacts_dir,
+                username=settings.sftp_username,
+                password=settings.sftp_password,
+                host_key_path=settings.ssh_host_key_path
+            )
+            logger.info(
+                f"Embedded SFTP server running on port {settings.sftp_server_port}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to start SFTP server: {e}")
+            # Continue without SFTP server - don't crash the app
+    else:
+        logger.info("Embedded SFTP server disabled (SFTP_SERVER_ENABLED=false)")
+
+    yield  # Application runs here
+
+    # Shutdown
+    if settings.sftp_server_enabled:
+        logger.info("Stopping embedded SFTP server...")
+        await stop_sftp_server()
+
+
 # Create FastAPI app
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.5.0"  # v0.5.0: Packet capture support
+    version="0.5.0",  # v0.5.0: Packet capture support
+    lifespan=lifespan  # Enable SFTP server lifecycle
 )
 
 # Wire up middleware (v0.3)
@@ -213,7 +256,20 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint"""
-    return {"status": "healthy"}
+    settings = get_settings()
+    sftp_server = get_sftp_server()
+
+    response = {"status": "healthy"}
+
+    # Include SFTP server status if enabled
+    if settings.sftp_server_enabled:
+        response["sftp_server"] = {
+            "enabled": True,
+            "running": sftp_server.is_running if sftp_server else False,
+            "port": settings.sftp_server_port
+        }
+
+    return response
 
 
 @app.post(

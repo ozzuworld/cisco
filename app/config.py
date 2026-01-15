@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # Backend creates {job-id}/{node}/ and CUCM uploads there
     sftp_remote_base_dir: str = ""
 
+    # Embedded SFTP Server Settings (Docker mode)
+    # When enabled, runs an SFTP server inside the container
+    sftp_server_enabled: bool = False  # Set to True in Docker
+    sftp_server_host: str = "0.0.0.0"
+    sftp_server_port: int = 2222  # Different from 22 to avoid conflicts
+    sftp_server_host_key_path: Optional[str] = None  # Auto-generated if not set
+
     # Storage Settings
     storage_root: Path = Path("./storage")
 
@@ -77,6 +84,13 @@ class Settings(BaseSettings):
     def artifacts_dir(self) -> Path:
         """Directory where SFTP receives artifacts"""
         return self.storage_root / "received"
+
+    @property
+    def ssh_host_key_path(self) -> Path:
+        """Path to SSH host key for embedded SFTP server"""
+        if self.sftp_server_host_key_path:
+            return Path(self.sftp_server_host_key_path)
+        return self.storage_root / "ssh_host_key"
 
     def ensure_directories(self):
         """Create necessary storage directories if they don't exist"""
