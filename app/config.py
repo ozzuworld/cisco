@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     # Debug Settings
     debug_http: bool = False  # Enable detailed HTTP request logging
 
-    # CORS Settings - allows localhost, loopback, and private network ranges by default
-    # For Docker deployments, this ensures browsers can access from the host's IP
-    cors_allowed_origins: str = r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)(:\d+)?$"
+    # CORS Settings - allows all origins by default for ease of deployment
+    # For production, set CORS_ALLOWED_ORIGINS to a specific regex pattern
+    cors_allowed_origins: str = r".*"
 
     # Authentication
     api_key: Optional[str] = None  # If set, enables API key auth
