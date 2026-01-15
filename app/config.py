@@ -1,9 +1,11 @@
 """Configuration management for CUCM Log Collector"""
 
-import os
+import logging
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -24,10 +26,11 @@ class Settings(BaseSettings):
     api_key: Optional[str] = None  # If set, enables API key auth
 
     # SFTP Server Settings (where CUCM pushes logs)
-    sftp_host: str
-    sftp_port: int = 22
-    sftp_username: str
-    sftp_password: str  # Never logged
+    # sftp_host: If empty/None, auto-detects the host's IP at runtime
+    sftp_host: Optional[str] = None  # Auto-detect if not set
+    sftp_port: int = 2222  # Default to embedded SFTP port
+    sftp_username: str = "cucm-collector"
+    sftp_password: str = ""  # Never logged
     # BE-017: Empty base dir - SFTP chroots directly to storage/received
     # Backend creates {job-id}/{node}/ and CUCM uploads there
     sftp_remote_base_dir: str = ""
@@ -91,6 +94,31 @@ class Settings(BaseSettings):
         if self.sftp_server_host_key_path:
             return Path(self.sftp_server_host_key_path)
         return self.storage_root / "ssh_host_key"
+
+    @property
+    def effective_sftp_host(self) -> str:
+        """
+        Get the effective SFTP host address.
+
+        If sftp_host is set, returns that value.
+        Otherwise, auto-detects the host's IP address.
+
+        Returns:
+            IP address or hostname for SFTP connections
+        """
+        if self.sftp_host:
+            return self.sftp_host
+
+        # Auto-detect IP
+        from app.network_utils import get_host_ip
+        detected_ip = get_host_ip()
+        if detected_ip:
+            logger.info(f"Auto-detected SFTP host IP: {detected_ip}")
+            return detected_ip
+
+        # Fallback - this likely won't work for external CUCM
+        logger.warning("Could not auto-detect IP, using 127.0.0.1 (may not work!)")
+        return "127.0.0.1"
 
     def ensure_directories(self):
         """Create necessary storage directories if they don't exist"""
