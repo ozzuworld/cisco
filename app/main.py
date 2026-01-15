@@ -138,8 +138,9 @@ app = FastAPI(
 # Use environment variable directly to avoid loading full settings at import time
 cors_allowed_origins = os.getenv(
     "CORS_ALLOWED_ORIGINS",
-    # Default: localhost, loopback, and private network ranges (for Docker deployments)
-    r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2[0-9]|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)(:\d+)?$"
+    # Default: allow all origins for ease of deployment
+    # For production with specific domain requirements, set CORS_ALLOWED_ORIGINS env var
+    r".*"
 )
 app.add_middleware(
     CORSMiddleware,
