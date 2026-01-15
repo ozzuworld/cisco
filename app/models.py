@@ -95,7 +95,7 @@ class ErrorResponse(BaseModel):
     message: str = Field(..., description="Human-readable error message")
     request_id: Optional[str] = Field(
         default=None,
-        description="Request ID for tracing (v0.3)"
+        description="Request ID for tracing"
     )
     details: Optional[str] = Field(
         default=None,
@@ -104,7 +104,7 @@ class ErrorResponse(BaseModel):
 
 
 # ============================================================================
-# Job Management Models (v0.2)
+# Job Management Models
 # ============================================================================
 
 
@@ -115,21 +115,21 @@ class JobStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
     PARTIAL = "partial"  # Some nodes succeeded, some failed
-    CANCELLED = "cancelled"  # Job was cancelled (v0.3)
+    CANCELLED = "cancelled"  # Job was cancelled
 
 
 class NodeStatus(str, Enum):
     """Individual node processing status"""
     PENDING = "pending"
-    QUEUED = "queued"  # BE-031: Waiting for concurrency slot
+    QUEUED = "queued"  # Waiting for concurrency slot
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
-    CANCELLED = "cancelled"  # Node processing was cancelled (v0.3)
+    CANCELLED = "cancelled"  # Node processing was cancelled
 
 
 class FailureClassification(str, Enum):
-    """BE-032: Classification of node failures for actionable error reporting"""
+    """Classification of node failures for actionable error reporting"""
     AUTH_FAILED = "auth_failed"  # SSH authentication failed
     SSH_TIMEOUT = "ssh_timeout"  # SSH connection timeout
     SFTP_TIMEOUT = "sftp_timeout"  # SFTP upload timeout
@@ -140,7 +140,7 @@ class FailureClassification(str, Enum):
 class CollectionOptions(BaseModel):
     """Options for log collection (can override profile defaults)"""
 
-    # BE-024: Time collection mode
+    # Time collection mode
     time_mode: Optional[Literal["relative", "range"]] = Field(
         default="relative",
         description="Time collection mode: 'relative' for reltime_minutes, 'range' for absolute datetime range"
@@ -154,7 +154,7 @@ class CollectionOptions(BaseModel):
         le=10080
     )
 
-    # BE-024: Absolute time range mode (new)
+    # Absolute time range mode (new)
     start_time: Optional[datetime] = Field(
         default=None,
         description="Start of time range (ISO-8601 datetime, used when time_mode='range')"
@@ -179,7 +179,7 @@ class CollectionOptions(BaseModel):
 
     @model_validator(mode="after")
     def validate_time_settings(self):
-        """BE-024: Validate time mode consistency"""
+        """Validate time mode consistency"""
         if self.time_mode == "range":
             # Range mode requires both start_time and end_time
             if self.start_time is None or self.end_time is None:
@@ -266,10 +266,10 @@ class Artifact(BaseModel):
     created_at: datetime = Field(..., description="File creation timestamp")
     artifact_id: Optional[str] = Field(
         default=None,
-        description="Stable artifact ID for downloads (v0.3)"
+        description="Stable artifact ID for downloads"
     )
 
-    # BE-024: Time range collection metadata
+    # Time range collection metadata
     collection_start_time: Optional[datetime] = Field(
         default=None,
         description="Start of the time range for log collection"
@@ -295,7 +295,7 @@ class NodeJobStatus(BaseModel):
     )
     failure_classification: Optional[FailureClassification] = Field(
         default=None,
-        description="BE-032: Classification of failure type for actionable error reporting"
+        description="Classification of failure type for actionable error reporting"
     )
     transcript_path: Optional[str] = Field(
         default=None,
@@ -313,7 +313,7 @@ class NodeJobStatus(BaseModel):
         default=None,
         description="When processing completed for this node"
     )
-    # BE-019: Progress tracking fields
+    # Progress tracking fields
     step: Optional[str] = Field(
         default=None,
         description="Current processing step (e.g., 'connecting', 'collecting', 'discovering')"
@@ -333,7 +333,7 @@ class NodeJobStatus(BaseModel):
         le=100
     )
 
-    # BE-030: Retry tracking
+    # Retry tracking
     retry_count: int = Field(
         default=0,
         description="Number of retry attempts (0 for initial attempt)"
@@ -363,7 +363,7 @@ class JobStatusResponse(BaseModel):
         default_factory=list,
         description="Status for each node"
     )
-    # BE-019: Progress metrics
+    # Progress metrics
     total_nodes: int = Field(..., description="Total number of nodes in this job")
     completed_nodes: int = Field(..., description="Number of completed nodes (succeeded + failed)")
     succeeded_nodes: int = Field(..., description="Number of succeeded nodes")
@@ -380,7 +380,7 @@ class JobStatusResponse(BaseModel):
         description="Last time any node status was updated"
     )
 
-    # BE-026: Time window configuration (for auditability and reproducibility)
+    # Time window configuration (for auditability and reproducibility)
     requested_start_time: Optional[datetime] = Field(
         default=None,
         description="Requested start time for log collection (range mode)"
@@ -458,7 +458,7 @@ class JobsListResponse(BaseModel):
 
 
 # ============================================================================
-# v0.3 Models - Cancellation
+# Cancellation Models
 # ============================================================================
 
 
@@ -472,7 +472,7 @@ class CancelJobResponse(BaseModel):
 
 
 # ============================================================================
-# BE-030 Models - Retry Failed Nodes
+# Retry Failed Nodes Models
 # ============================================================================
 
 
@@ -490,7 +490,7 @@ class RetryJobResponse(BaseModel):
 
 
 # ============================================================================
-# BE-027 Models - Dry-run / Estimate
+# Dry-run / Estimate Models
 # ============================================================================
 
 

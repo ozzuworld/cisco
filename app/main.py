@@ -27,11 +27,11 @@ from app.models import (
     JobsListResponse,
     JobSummary,
     JobStatus as JobStatusEnum,
-    CancelJobResponse,  # v0.3
-    RetryJobResponse,  # BE-030
-    EstimateResponse,  # BE-027
-    NodeEstimate,  # BE-027
-    CommandEstimate,  # BE-027
+    CancelJobResponse,
+    RetryJobResponse,
+    EstimateResponse,
+    NodeEstimate,
+    CommandEstimate,
     ClusterHealthRequest,  # Health Status
     ClusterHealthResponse,  # Health Status
     StartCaptureRequest,  # Packet Capture
@@ -59,16 +59,16 @@ from app.ssh_client import (
 from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
 from app.job_manager import get_job_manager
-from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id  # v0.3
+from app.middleware import RequestIDMiddleware, APIKeyAuthMiddleware, get_request_id
 from app.artifact_manager import (
     get_artifact_path,
     get_transcript_path,
     create_zip_archive,
-    generate_manifest,  # BE-029
-    generate_zip_filename  # BE-029
+    generate_manifest,
+    generate_zip_filename
 )
-from app.config import get_settings  # BE-012
-from app.prompt_responder import compute_reltime_from_range, build_file_get_command  # BE-027
+from app.config import get_settings
+from app.prompt_responder import compute_reltime_from_range, build_file_get_command
 from app.health_service import check_cluster_health  # Health Status
 from app.capture_service import get_capture_manager  # Packet Capture
 from app.log_service import get_log_collection_manager  # Log Collection
@@ -129,23 +129,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CUCM Log Collector API",
     description="Backend service for discovering and collecting logs from CUCM clusters",
-    version="0.5.0",  # v0.5.0: Packet capture support
+    version="0.5.0",
     lifespan=lifespan  # Enable SFTP server lifecycle
 )
 
-# Wire up middleware (v0.3)
-# CORS middleware must be first (BE-008: Flutter Web support)
-# BE-015: Use environment variable directly to avoid loading full settings at import time
+# Wire up middleware
+# CORS middleware must be first
+# Use environment variable directly to avoid loading full settings at import time
 cors_allowed_origins = os.getenv(
     "CORS_ALLOWED_ORIGINS",
     r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"  # Default: localhost/127.0.0.1
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=cors_allowed_origins,  # BE-015: Configurable CORS origins
+    allow_origin_regex=cors_allowed_origins,  # Configurable CORS origins
     allow_methods=["*"],  # Allow all methods (GET, POST, OPTIONS, etc.)
     allow_headers=["*"],  # Allow all headers (including Authorization, Content-Type)
-    expose_headers=["X-Request-ID", "Content-Disposition"],  # BE-015: Expose headers for downloads
+    expose_headers=["X-Request-ID", "Content-Disposition"],  # Expose headers for downloads
     allow_credentials=True  # Allow cookies/auth headers
 )
 app.add_middleware(RequestIDMiddleware)  # Adds request_id
@@ -153,7 +153,7 @@ app.add_middleware(APIKeyAuthMiddleware)  # Auth (if API_KEY env set)
 
 
 # ============================================================================
-# Exception Handlers (v0.3.1)
+# Exception Handlers
 # ============================================================================
 
 
@@ -323,7 +323,7 @@ async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
     )
     # NEVER log the password
 
-    # BE-012: Safe debug logging (only when DEBUG_HTTP=true)
+    # Safe debug logging (only when DEBUG_HTTP=true)
     settings = get_settings()
     if settings.debug_http:
         password_len = len(req_body.password) if req_body.password else 0
@@ -586,7 +586,7 @@ async def get_cluster_health(req_body: ClusterHealthRequest, request: Request):
 
 
 # ============================================================================
-# Job Management Endpoints (v0.2)
+# Job Management Endpoints
 # ============================================================================
 
 
@@ -628,7 +628,7 @@ async def list_profiles():
 )
 async def estimate_job(req_body: CreateJobRequest, request: Request):
     """
-    BE-027: Estimate what a log collection job would do (dry-run).
+    Estimate what a log collection job would do (dry-run).
 
     Returns a preview of commands, paths, and computed reltime without
     creating or executing a job. Helps users avoid wasted runs.
@@ -864,7 +864,7 @@ async def get_job_status(job_id: str, request: Request):
             }
         )
 
-    # BE-019: Get progress metrics
+    # Get progress metrics
     progress = job.get_progress_metrics()
 
     return JobStatusResponse(
@@ -875,7 +875,7 @@ async def get_job_status(job_id: str, request: Request):
         completed_at=job.completed_at,
         profile=job.profile.name,
         nodes=list(job.node_statuses.values()),
-        # BE-019: Include progress metrics
+        # Include progress metrics
         total_nodes=progress["total_nodes"],
         completed_nodes=progress["completed_nodes"],
         succeeded_nodes=progress["succeeded_nodes"],
@@ -883,7 +883,7 @@ async def get_job_status(job_id: str, request: Request):
         running_nodes=progress["running_nodes"],
         percent_complete=progress["percent_complete"],
         last_updated_at=progress["last_updated_at"],
-        # BE-026: Include time window configuration
+        # Include time window configuration
         requested_start_time=job.requested_start_time,
         requested_end_time=job.requested_end_time,
         requested_reltime_minutes=job.requested_reltime_minutes,
@@ -971,7 +971,7 @@ async def list_jobs(limit: int = 20):
 
 
 # ============================================================================
-# v0.3 Endpoints - Downloads and Cancellation
+# Download and Cancellation Endpoints
 # ============================================================================
 
 
@@ -988,7 +988,7 @@ async def list_jobs(limit: int = 20):
 )
 async def download_artifact(artifact_id: str, request: Request):
     """
-    Download an artifact by its stable ID (v0.3).
+    Download an artifact by its stable ID.
 
     Args:
         artifact_id: Stable artifact identifier
@@ -1035,7 +1035,7 @@ async def download_artifact(artifact_id: str, request: Request):
 )
 async def download_job_artifact(job_id: str, artifact_id: str, request: Request):
     """
-    Download a single artifact from a specific job (BE-021.2).
+    Download a single artifact from a specific job.
 
     This is the hierarchical route that follows REST conventions:
     /jobs/{job_id}/artifacts/{artifact_id}/download
@@ -1132,7 +1132,7 @@ async def download_job_artifact(job_id: str, artifact_id: str, request: Request)
 )
 async def download_node_artifacts(job_id: str, node_ip: str, request: Request):
     """
-    Download all artifacts for a specific node as a zip file (BE-017).
+    Download all artifacts for a specific node as a zip file.
 
     Args:
         job_id: Job identifier
@@ -1188,7 +1188,7 @@ async def download_node_artifacts(job_id: str, node_ip: str, request: Request):
             }
         )
 
-    # BE-029: Generate manifest and standardized filename
+    # Generate manifest and standardized filename
     try:
         # Generate manifest
         manifest = generate_manifest(
@@ -1251,7 +1251,7 @@ async def download_node_artifacts(job_id: str, node_ip: str, request: Request):
 )
 async def download_job_artifacts(job_id: str, request: Request):
     """
-    Download all artifacts for all nodes in a job as a zip file (BE-017).
+    Download all artifacts for all nodes in a job as a zip file.
 
     Args:
         job_id: Job identifier
@@ -1296,7 +1296,7 @@ async def download_job_artifacts(job_id: str, request: Request):
             }
         )
 
-    # BE-029: Generate manifest and standardized filename
+    # Generate manifest and standardized filename
     try:
         # Get list of all nodes
         all_nodes = list(job.node_statuses.keys())
@@ -1365,7 +1365,7 @@ async def download_job_artifacts(job_id: str, request: Request):
 )
 async def cancel_job(job_id: str, request: Request):
     """
-    Cancel a running job (best-effort) (v0.3).
+    Cancel a running job (best-effort).
 
     This will stop scheduling new nodes and attempt to cancel the running task.
     Nodes that are already being processed may complete.
@@ -1407,7 +1407,7 @@ async def cancel_job(job_id: str, request: Request):
 
 
 # ============================================================================
-# BE-030: Retry Failed Nodes
+# Retry Failed Nodes
 # ============================================================================
 
 
@@ -1428,7 +1428,7 @@ async def cancel_job(job_id: str, request: Request):
 )
 async def retry_failed_nodes(job_id: str, request: Request):
     """
-    BE-030: Retry only the failed nodes in a job.
+    Retry only the failed nodes in a job.
 
     Reuses the same job configuration (profile, time window, credentials)
     but only re-executes nodes that have FAILED status.

@@ -174,7 +174,7 @@ def generate_manifest(
     computation_timestamp: Optional[datetime] = None
 ) -> Dict[str, Any]:
     """
-    BE-029: Generate manifest.json content for zip archive.
+    Generate manifest.json content for zip archive.
 
     Args:
         job_id: Job identifier
@@ -251,7 +251,7 @@ def generate_zip_filename(
     node: Optional[str] = None
 ) -> str:
     """
-    BE-029: Generate standardized zip filename.
+    Generate standardized zip filename.
 
     Format: job_<id>_<profile>_<time-info>[_node_<node>].zip
 
@@ -302,7 +302,7 @@ def create_zip_archive(
     Create a zip archive containing specified artifacts.
 
     Creates a temporary zip file that should be deleted after serving.
-    BE-029: Can include manifest.json with job metadata.
+    Can include manifest.json with job metadata.
 
     Args:
         artifacts: List of artifacts to include in zip
@@ -330,7 +330,7 @@ def create_zip_archive(
 
         # Create zip file
         with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # BE-029: Add manifest.json first (if provided)
+            # Add manifest.json first (if provided)
             if manifest_data:
                 manifest_json = json.dumps(manifest_data, indent=2)
                 zipf.writestr("manifest.json", manifest_json)

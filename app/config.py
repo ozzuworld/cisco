@@ -16,13 +16,13 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = "INFO"
 
-    # Debug Settings (BE-012)
+    # Debug Settings
     debug_http: bool = False  # Enable detailed HTTP request logging
 
-    # CORS Settings (BE-015)
+    # CORS Settings
     cors_allowed_origins: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"  # Regex pattern for allowed origins (dev: localhost, prod: set to specific domains)
 
-    # Authentication (v0.3)
+    # Authentication
     api_key: Optional[str] = None  # If set, enables API key auth
 
     # SFTP Server Settings (where CUCM pushes logs)
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     sftp_port: int = 2222  # Default to embedded SFTP port
     sftp_username: str = "cucm-collector"
     sftp_password: str = ""  # Never logged
-    # BE-017: Empty base dir - SFTP chroots directly to storage/received
+    # Empty base dir - SFTP chroots directly to storage/received
     # Backend creates {job-id}/{node}/ and CUCM uploads there
     sftp_remote_base_dir: str = ""
 
@@ -50,19 +50,19 @@ class Settings(BaseSettings):
     job_command_timeout_sec: int = 600  # 10 minutes per file get command
     job_connect_timeout_sec: int = 30
 
-    # Security Settings (BE-021)
+    # Security Settings
     max_ssh_retries: int = 3  # Maximum SSH connection retry attempts per host
     max_sftp_retries: int = 3  # Maximum SFTP connection retry attempts
 
     # Profiles
     profiles_path: Path = Path("./profiles.yaml")
 
-    # Input Validation Limits (v0.4)
+    # Input Validation Limits
     max_reltime_minutes: int = 1440  # 24 hours max
     max_nodes_per_job: int = 20  # Max nodes per job
     max_concurrency_limit: int = 5  # Max concurrency setting
 
-    # Retention & Cleanup (v0.4)
+    # Retention & Cleanup
     retention_days: int = 7  # Keep jobs for 7 days
     cleanup_enabled: bool = True  # Enable automatic cleanup
 

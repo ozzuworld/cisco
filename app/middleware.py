@@ -72,13 +72,13 @@ class APIKeyAuthMiddleware(BaseHTTPMiddleware):
         if request.url.path in ["/", "/health", "/docs", "/redoc", "/openapi.json"]:
             return await call_next(request)
 
-        # Skip auth for OPTIONS (CORS preflight) requests (BE-008)
+        # Skip auth for OPTIONS (CORS preflight) requests
         if request.method == "OPTIONS":
             return await call_next(request)
 
         if self.auth_enabled:
             # Get request_id from request state (set by RequestIDMiddleware)
-            # If missing (race condition), generate one defensively (v0.3.1)
+            # If missing (race condition), generate one defensively
             request_id = getattr(request.state, 'request_id', None)
             if not request_id:
                 request_id = str(uuid.uuid4())
@@ -139,7 +139,7 @@ def get_request_id(request: Request) -> str:
     """
     Get the request ID from the request state.
 
-    If missing (edge case), generates a new UUID and attaches it (v0.3.1).
+    If missing (edge case), generates a new UUID and attaches it.
 
     Args:
         request: FastAPI request object

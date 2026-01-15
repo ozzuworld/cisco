@@ -7,7 +7,7 @@ from typing import Dict, Optional, Callable, Tuple
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-# BE-032: Import SFTP timeout exception
+# Import SFTP timeout exception
 from app.ssh_client import CUCMSFTPTimeoutError
 
 
@@ -61,7 +61,7 @@ class PromptResponder:
         self.sftp_directory = sftp_directory
 
         # Define prompt patterns (case-insensitive)
-        # BE-017: Added proceed and host key prompts for activelog operations
+        # Added proceed and host key prompts for activelog operations
         # FIX: Updated patterns to match actual CUCM CLI prompts
         self.patterns = [
             # Proceed prompts (appear before and after file sizing)
@@ -254,7 +254,7 @@ class PromptResponder:
                         buffer = ""
 
         except asyncio.TimeoutError as e:
-            # BE-032: Convert generic timeout to SFTP timeout
+            # Convert generic timeout to SFTP timeout
             error_msg = str(e) if str(e) else f"SFTP upload timed out after {timeout}s"
             logger.error(f"Prompt responder timed out: {error_msg}")
             if transcript_file:
@@ -270,7 +270,7 @@ class PromptResponder:
 
 def compute_reltime_from_range(start_time: datetime, end_time: datetime) -> Tuple[str, int]:
     """
-    BE-024: Convert absolute time range to CUCM reltime format.
+    Convert absolute time range to CUCM reltime format.
 
     Computes the relative time from now back to start_time and selects
     the most appropriate CUCM time unit (minutes/hours/days/weeks/months).
@@ -349,7 +349,7 @@ def build_file_get_command(
     Args:
         path: Log path to collect (e.g., "syslog/messages*")
         reltime_value: Relative time window value
-        reltime_unit: Relative time unit (minutes/hours/days/weeks/months) - BE-024
+        reltime_unit: Relative time unit (minutes/hours/days/weeks/months)
         compress: Whether to compress the files
         recurs: Whether to collect recursively
         match: Optional regex pattern to match filenames
@@ -363,7 +363,7 @@ def build_file_get_command(
         >>> build_file_get_command("cm/trace/sdl*", 3, "hours", compress=True)
         'file get activelog cm/trace/sdl* reltime hours 3 compress'
     """
-    # Start with base command - BE-024: Support dynamic time units
+    # Start with base command: Support dynamic time units
     cmd = f"file get activelog {path} reltime {reltime_unit} {reltime_value}"
 
     # Add optional flags

@@ -29,14 +29,14 @@ from app.artifact_manager import list_artifacts_for_job
 
 logger = logging.getLogger(__name__)
 
-# BE-018: Per-job write locks to prevent concurrent modifications
+# Per-job write locks to prevent concurrent modifications
 _job_write_locks: Dict[str, threading.Lock] = {}
 _job_write_locks_lock = threading.Lock()  # Lock for the locks dict itself
 
 
 def _get_job_write_lock(job_id: str) -> threading.Lock:
     """
-    Get or create a write lock for a specific job (BE-018).
+    Get or create a write lock for a specific job.
 
     Args:
         job_id: Job identifier
@@ -52,7 +52,7 @@ def _get_job_write_lock(job_id: str) -> threading.Lock:
 
 def _classify_failure(exception: Exception, error_context: str = "") -> tuple[FailureClassification, str]:
     """
-    BE-032: Classify failure type and generate actionable error message.
+    Classify failure type and generate actionable error message.
 
     Args:
         exception: The exception that occurred
@@ -81,7 +81,7 @@ def _classify_failure(exception: Exception, error_context: str = "") -> tuple[Fa
                 f"SSH connection failed: {str(exception)}. Check network connectivity and node availability."
             )
 
-    # Check for SFTP timeout (BE-032: specific SFTP timeout exception)
+    # Check for SFTP timeout
     if isinstance(exception, CUCMSFTPTimeoutError):
         return (
             FailureClassification.SFTP_TIMEOUT,
@@ -155,10 +155,10 @@ class Job:
         self.created_at = datetime.utcnow()
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
-        self.cancelled = False  # v0.3: cancellation flag
-        self.last_updated_at = datetime.utcnow()  # BE-019: track last update
+        self.cancelled = False
+        self.last_updated_at = datetime.utcnow()  # track last update
 
-        # BE-026: Time window configuration (set during execution)
+        # Time window configuration (set during execution)
         self.requested_start_time: Optional[datetime] = None
         self.requested_end_time: Optional[datetime] = None
         self.requested_reltime_minutes: Optional[int] = None
@@ -172,7 +172,7 @@ class Job:
             self.node_statuses[node] = NodeJobStatus(
                 node=node,
                 status=NodeStatus.PENDING,
-                last_updated_at=datetime.utcnow()  # BE-019
+                last_updated_at=datetime.utcnow()
             )
 
     def to_dict(self) -> dict:
@@ -193,12 +193,12 @@ class Job:
             "nodes": self.nodes_list,
             "profile": self.profile.name,
             "status": self.status.value,
-            "cancelled": self.cancelled,  # v0.3
+            "cancelled": self.cancelled,
             "created_at": self.created_at.isoformat(),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
-            "last_updated_at": self.last_updated_at.isoformat() if self.last_updated_at else None,  # BE-019
-            # BE-026: Time window configuration
+            "last_updated_at": self.last_updated_at.isoformat() if self.last_updated_at else None,
+            # Time window configuration
             "requested_start_time": self.requested_start_time.isoformat() if self.requested_start_time else None,
             "requested_end_time": self.requested_end_time.isoformat() if self.requested_end_time else None,
             "requested_reltime_minutes": self.requested_reltime_minutes,
@@ -206,7 +206,7 @@ class Job:
             "computed_reltime_value": self.computed_reltime_value,
             "computation_timestamp": self.computation_timestamp.isoformat() if self.computation_timestamp else None,
             "node_statuses": {
-                node: status.model_dump(mode='json')  # BE-016: mode='json' serializes datetime properly
+                node: status.model_dump(mode='json')  # mode='json' serializes datetime properly
                 for node, status in self.node_statuses.items()
             }
         }
@@ -249,9 +249,9 @@ class Job:
         job.created_at = datetime.fromisoformat(data["created_at"])
         job.started_at = datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None
         job.completed_at = datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
-        job.last_updated_at = datetime.fromisoformat(data["last_updated_at"]) if data.get("last_updated_at") else job.created_at  # BE-019
+        job.last_updated_at = datetime.fromisoformat(data["last_updated_at"]) if data.get("last_updated_at") else job.created_at
 
-        # BE-026: Restore time window configuration
+        # Restore time window configuration
         job.requested_start_time = datetime.fromisoformat(data["requested_start_time"]) if data.get("requested_start_time") else None
         job.requested_end_time = datetime.fromisoformat(data["requested_end_time"]) if data.get("requested_end_time") else None
         job.requested_reltime_minutes = data.get("requested_reltime_minutes")
@@ -271,11 +271,11 @@ class Job:
         Persist job state to disk atomically.
 
         Uses atomic write (temp file + fsync + rename) to prevent corruption if process
-        crashes during write (BE-018).
+        crashes during write.
 
         Thread-safe: Uses per-job write lock to prevent concurrent modifications.
         """
-        # BE-018: Acquire per-job write lock
+        # Acquire per-job write lock
         lock = _get_job_write_lock(self.job_id)
         with lock:
             settings = get_settings()
@@ -289,7 +289,7 @@ class Job:
                 # Write to temp file first
                 with open(temp_file, 'w') as f:
                     json.dump(self.to_dict(), f, indent=2)
-                    # BE-018: Flush and fsync to ensure data is written to disk
+                    # Flush and fsync to ensure data is written to disk
                     f.flush()
                     os.fsync(f.fileno())
 
@@ -309,7 +309,7 @@ class Job:
     def update_status(self, new_status: JobStatus):
         """Update job status and save"""
         self.status = new_status
-        self.last_updated_at = datetime.utcnow()  # BE-019
+        self.last_updated_at = datetime.utcnow()
         if new_status == JobStatus.RUNNING and not self.started_at:
             self.started_at = datetime.utcnow()
         elif new_status in [JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.PARTIAL, JobStatus.CANCELLED]:
@@ -321,39 +321,39 @@ class Job:
         node: str,
         status: NodeStatus,
         error: Optional[str] = None,
-        failure_classification: Optional[FailureClassification] = None,  # BE-032
-        step: Optional[str] = None,  # BE-019
-        message: Optional[str] = None,  # BE-019
-        percent: Optional[int] = None  # BE-019
+        failure_classification: Optional[FailureClassification] = None,
+        step: Optional[str] = None,
+        message: Optional[str] = None,
+        percent: Optional[int] = None
     ):
         """Update status for a specific node"""
         if node in self.node_statuses:
             now = datetime.utcnow()
             self.node_statuses[node].status = status
-            self.node_statuses[node].last_updated_at = now  # BE-019
-            self.last_updated_at = now  # BE-019: update job last_updated too
+            self.node_statuses[node].last_updated_at = now
+            self.last_updated_at = now  # update job last_updated too
 
             if error:
                 self.node_statuses[node].error = error
-            if failure_classification:  # BE-032
+            if failure_classification:
                 self.node_statuses[node].failure_classification = failure_classification
-            if step:  # BE-019
+            if step:
                 self.node_statuses[node].step = step
-            if message:  # BE-019
+            if message:
                 self.node_statuses[node].message = message
-            if percent is not None:  # BE-019
+            if percent is not None:
                 self.node_statuses[node].percent = percent
 
             if status == NodeStatus.RUNNING:
                 self.node_statuses[node].started_at = now
             elif status in [NodeStatus.SUCCEEDED, NodeStatus.FAILED, NodeStatus.CANCELLED]:
                 self.node_statuses[node].completed_at = now
-                self.node_statuses[node].percent = 100  # BE-019: mark complete
+                self.node_statuses[node].percent = 100  # mark complete
             self.save()
 
     def get_progress_metrics(self) -> dict:
         """
-        Calculate real-time progress metrics (BE-019).
+        Calculate real-time progress metrics.
 
         Returns:
             Dictionary with progress metrics
@@ -398,16 +398,16 @@ class JobManager:
     def __init__(self):
         """Initialize job manager"""
         self.jobs: Dict[str, Job] = {}
-        self.running_tasks: Dict[str, asyncio.Task] = {}  # v0.3: track tasks for cancellation
-        self.node_tasks: Dict[str, Dict[str, asyncio.Task]] = {}  # v0.3.3: track per-node tasks
+        self.running_tasks: Dict[str, asyncio.Task] = {}
+        self.node_tasks: Dict[str, Dict[str, asyncio.Task]] = {}
         self.settings = get_settings()
         self._load_existing_jobs()
 
     def _load_existing_jobs(self):
         """
-        Load existing jobs from disk on startup (BE-016, BE-018).
+        Load existing jobs from disk on startup.
 
-        BE-018: Corrupted job files are moved to _corrupt/ directory for safe recovery.
+        Corrupted job files are moved to _corrupt/ directory for safe recovery.
         """
         jobs_dir = self.settings.jobs_dir
         if not jobs_dir.exists():
@@ -419,7 +419,7 @@ class JobManager:
         loaded_count = 0
         corrupted_count = 0
 
-        # BE-018: Ensure _corrupt directory exists for quarantining bad files
+        # Ensure _corrupt directory exists for quarantining bad files
         corrupt_dir = jobs_dir / "_corrupt"
         corrupt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -434,7 +434,7 @@ class JobManager:
                 loaded_count += 1
                 logger.debug(f"Loaded job {job.job_id} (status: {job.status.value})")
             except Exception as e:
-                # BE-018: Move corrupted file to _corrupt/ directory
+                # Move corrupted file to _corrupt/ directory
                 corrupted_count += 1
                 corrupt_file = corrupt_dir / job_file.name
                 try:
@@ -503,7 +503,7 @@ class JobManager:
         """
         Get a job by ID.
 
-        Jobs are loaded from disk at startup (BE-016), so all jobs are in memory.
+        Jobs are loaded from disk at startup, so all jobs are in memory.
 
         Args:
             job_id: Job identifier
@@ -533,7 +533,7 @@ class JobManager:
         """
         Cancel a running job (best-effort).
 
-        v0.3.3: Immediately finalizes node and job status for fast visibility.
+        Immediately finalizes node and job status for fast visibility.
 
         Args:
             job_id: Job to cancel
@@ -549,28 +549,28 @@ class JobManager:
         # Mark job as cancelled
         job.cancelled = True
 
-        # v0.3.3: Cancel job-level task (if running)
+      
         if job_id in self.running_tasks:
             task = self.running_tasks[job_id]
             if not task.done():
                 task.cancel()
                 logger.info(f"Job {job_id} main task cancelled")
 
-        # v0.3.3: Cancel all per-node tasks immediately (if running)
+      
         if job_id in self.node_tasks:
             for node, task in self.node_tasks[job_id].items():
                 if not task.done():
                     task.cancel()
                     logger.info(f"Job {job_id} node {node} task cancelled")
 
-        # v0.3.3: Immediately mark PENDING, QUEUED, and RUNNING nodes as CANCELLED
+      
         # This ensures UI sees cancellation immediately
         for node, node_status in job.node_statuses.items():
             if node_status.status in [NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING]:
                 job.update_node_status(node, NodeStatus.CANCELLED)
                 logger.info(f"Job {job_id} node {node} marked CANCELLED")
 
-        # v0.3.3: Determine final job status immediately
+      
         node_statuses = [ns.status for ns in job.node_statuses.values()]
         if any(s == NodeStatus.SUCCEEDED for s in node_statuses):
             job.update_status(JobStatus.PARTIAL)
@@ -583,7 +583,7 @@ class JobManager:
 
     def retry_failed_nodes(self, job_id: str) -> Optional[List[str]]:
         """
-        BE-030: Retry only the failed nodes in a job.
+        Retry only the failed nodes in a job.
 
         Reuses the same job configuration (profile, time window, credentials)
         but only re-executes nodes that have FAILED status.
@@ -646,7 +646,7 @@ class JobManager:
 
     async def _retry_nodes_async(self, job: Job, nodes: List[str]):
         """
-        BE-030: Asynchronously retry a list of nodes for a job.
+        Asynchronously retry a list of nodes for a job.
 
         Args:
             job: Job to retry nodes for
@@ -665,7 +665,7 @@ class JobManager:
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
 
-                # BE-031: Set node to QUEUED before waiting for semaphore
+                # Set node to QUEUED before waiting for semaphore
                 job.update_node_status(
                     node,
                     NodeStatus.QUEUED,
@@ -762,7 +762,7 @@ class JobManager:
         logger.info(f"Starting execution of job {job_id}")
         job.update_status(JobStatus.RUNNING)
 
-        # BE-026: Populate time window configuration for auditability
+        # Populate time window configuration for auditability
         time_mode = job.options.time_mode if job.options.time_mode else "relative"
         computation_now = datetime.utcnow()
 
@@ -781,7 +781,7 @@ class JobManager:
             job.computed_reltime_value = reltime_value
 
             logger.info(
-                f"[Job {job_id}] BE-026: Time range mode - "
+                f"[Job {job_id}] Time range mode - "
                 f"start={job.requested_start_time}, end={job.requested_end_time}, "
                 f"computed={reltime_unit} {reltime_value} at {computation_now}"
             )
@@ -793,7 +793,7 @@ class JobManager:
             job.computation_timestamp = computation_now
 
             logger.info(
-                f"[Job {job_id}] BE-026: Relative time mode - "
+                f"[Job {job_id}] Relative time mode - "
                 f"{job.requested_reltime_minutes} minutes at {computation_now}"
             )
 
@@ -810,7 +810,7 @@ class JobManager:
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
 
-                # BE-031: Set node to QUEUED before waiting for semaphore
+                # Set node to QUEUED before waiting for semaphore
                 job.update_node_status(
                     node,
                     NodeStatus.QUEUED,
@@ -826,7 +826,7 @@ class JobManager:
                         return
                     await self._process_node(job, node)
 
-            # v0.3.3: Track per-node tasks for immediate cancellation
+          
             self.node_tasks[job_id] = {}
             tasks = []
             for node in job.nodes_list:
@@ -865,7 +865,7 @@ class JobManager:
         except asyncio.CancelledError:
             logger.info(f"Job {job_id} was cancelled")
             job.cancelled = True
-            # v0.3.2: Mark any non-completed nodes as cancelled (including QUEUED - BE-031)
+          
             for node, ns in job.node_statuses.items():
                 if ns.status in [NodeStatus.PENDING, NodeStatus.QUEUED, NodeStatus.RUNNING]:
                     job.update_node_status(node, NodeStatus.CANCELLED)
@@ -883,7 +883,7 @@ class JobManager:
             job.update_status(JobStatus.FAILED)
 
         finally:
-            # v0.3.3: Clean up task tracking
+          
             if job_id in self.running_tasks:
                 del self.running_tasks[job_id]
             if job_id in self.node_tasks:
@@ -932,7 +932,7 @@ class JobManager:
 
                         try:
                             await sftp.mkdir(current_path)
-                            # BE-017: Set permissions so SFTP user can write
+                            # Set permissions so SFTP user can write
                             await sftp.chmod(current_path, 0o775)
                             logger.debug(f"Created directory: {current_path} (mode=775)")
                         except asyncssh.sftp.SFTPFailure as e:
@@ -973,7 +973,7 @@ class JobManager:
             job: Parent job
             node: Node to process
         """
-        # v0.3.3: Check cancellation BEFORE setting node to RUNNING
+      
         # This prevents race where cancel() is called but node still becomes RUNNING
         if job.cancelled:
             logger.info(f"[Job {job.job_id}][{node}] Cancelled before start")
@@ -981,7 +981,7 @@ class JobManager:
             return
 
         logger.info(f"[Job {job.job_id}] Processing node: {node}")
-        # BE-019: Set initial step and progress
+        # Set initial step and progress
         job.update_node_status(
             node,
             NodeStatus.RUNNING,
@@ -1005,7 +1005,7 @@ class JobManager:
             # FIX: Open transcript file for incremental writing
             transcript_file = open(transcript_path, 'w')
 
-            # v0.3.2: Check cancellation before connecting
+          
             if job.cancelled:
                 logger.info(f"[Job {job.job_id}][{node}] Cancelled before connect")
                 transcript_file.write("\n[CANCELLED]\n")
@@ -1013,7 +1013,7 @@ class JobManager:
                 job.update_node_status(node, NodeStatus.CANCELLED)
                 return
 
-            # BE-019: Update progress
+            # Update progress
             job.update_node_status(
                 node,
                 NodeStatus.RUNNING,
@@ -1022,13 +1022,13 @@ class JobManager:
                 percent=10
             )
 
-            # BE-030: Use attempt-specific directory for artifacts
+            # Use attempt-specific directory for artifacts
             # Format: {job_id}/{node}/attempt_{N}
             node_status = job.node_statuses[node]
             attempt_num = node_status.current_attempt
             attempt_dir = f"attempt_{attempt_num}"
 
-            # BE-017: Prepare SFTP directory for this node
+            # Prepare SFTP directory for this node
             # If base_dir is empty, SFTP chroots directly to storage/received
             if self.settings.sftp_remote_base_dir:
                 sftp_directory = f"{self.settings.sftp_remote_base_dir}/{job.job_id}/{node}/{attempt_dir}"
@@ -1037,7 +1037,7 @@ class JobManager:
 
             # FIX: Pre-create directory for CUCM to upload to
             # CUCM's file get activelog does NOT create directories
-            # BE-017: With bind mount, create directories locally - they appear on SFTP automatically
+            # With bind mount, create directories locally - they appear on SFTP automatically
             try:
                 local_dir = self.settings.artifacts_dir / job.job_id / node / attempt_dir
                 local_dir.mkdir(parents=True, exist_ok=True)
@@ -1054,7 +1054,7 @@ class JobManager:
                 job.update_node_status(node, NodeStatus.FAILED, error=error_msg)
                 return
 
-            # BE-019: Update progress - connecting
+            # Update progress - connecting
             job.update_node_status(
                 node,
                 NodeStatus.RUNNING,
@@ -1076,7 +1076,7 @@ class JobManager:
                 transcript_file.flush()
                 transcript_lines.append(f"Connected to {node}\n")
 
-                # v0.3.2: Check cancellation after connect
+              
                 if job.cancelled:
                     logger.info(f"[Job {job.job_id}][{node}] Cancelled after connect")
                     transcript_file.write("\n[CANCELLED]\n")
@@ -1085,7 +1085,7 @@ class JobManager:
                     job.update_node_status(node, NodeStatus.CANCELLED)
                     return
 
-                # BE-019: Update progress - collecting
+                # Update progress - collecting
                 job.update_node_status(
                     node,
                     NodeStatus.RUNNING,
@@ -1096,7 +1096,7 @@ class JobManager:
 
                 # Process each path in the profile
                 for path in job.profile.paths:
-                    # v0.3.2: Check cancellation before each path
+                  
                     if job.cancelled:
                         logger.info(f"[Job {job.job_id}][{node}] Cancelled during path processing")
                         msg = f"\n[CANCELLED before processing {path}]\n"
@@ -1106,7 +1106,7 @@ class JobManager:
                         job.update_node_status(node, NodeStatus.CANCELLED)
                         return
 
-                    # BE-024/BE-026: Use pre-computed time window from job
+                    #  Use pre-computed time window from job
                     # (computed once per job in execute_job for consistency)
                     reltime_unit = job.computed_reltime_unit
                     reltime_value = job.computed_reltime_value
@@ -1173,7 +1173,7 @@ class JobManager:
                     transcript_file.write("\n")
                     transcript_file.flush()
 
-            # BE-017/BE-032: Check if CUCM reported "No files matched filter criteria"
+            #  Check if CUCM reported "No files matched filter criteria"
             full_transcript = ''.join(transcript_lines)
             if "No files matched filter criteria" in full_transcript:
                 error_msg = "No files matched filter criteria. Check path pattern, reltime window, and verify logs exist for the time range."
@@ -1186,7 +1186,7 @@ class JobManager:
                 )
                 return
 
-            # BE-019: Update progress - discovering artifacts
+            # Update progress - discovering artifacts
             job.update_node_status(
                 node,
                 NodeStatus.RUNNING,
@@ -1195,7 +1195,7 @@ class JobManager:
                 percent=80
             )
 
-            # BE-024: Discover artifacts with time range metadata
+            # Discover artifacts with time range metadata
             artifacts = self._discover_artifacts(
                 job.job_id,
                 node,
@@ -1205,7 +1205,7 @@ class JobManager:
             )
             job.node_statuses[node].artifacts = artifacts
 
-            # BE-017/BE-032: If no artifacts collected, also consider it a failure
+            #  If no artifacts collected, also consider it a failure
             if len(artifacts) == 0:
                 error_msg = "No artifacts collected (0 files transferred). Check SFTP server connectivity and permissions."
                 logger.warning(f"[Job {job.job_id}][{node}] {error_msg}")
@@ -1227,7 +1227,7 @@ class JobManager:
             logger.info(f"[Job {job.job_id}][{node}] Completed successfully - {len(artifacts)} artifacts collected")
 
         except asyncio.CancelledError:
-            # v0.3.2: Handle task cancellation gracefully
+          
             logger.info(f"[Job {job.job_id}][{node}] Task cancelled")
             msg = "\n[TASK CANCELLED]\n"
             transcript_lines.append(msg)
@@ -1243,7 +1243,7 @@ class JobManager:
         except Exception as e:
             logger.error(f"[Job {job.job_id}][{node}] Failed: {e}")
 
-            # BE-032: Classify the failure and generate actionable error message
+            # Classify the failure and generate actionable error message
             full_transcript = ''.join(transcript_lines)
             classification, error_msg = _classify_failure(e, error_context=full_transcript)
 
@@ -1277,15 +1277,15 @@ class JobManager:
         """
         Discover artifacts that were collected for a node.
 
-        Uses artifact_manager to generate stable artifact IDs (v0.3).
-        BE-024: Enriches artifacts with time range collection metadata.
+        Uses artifact_manager to generate stable artifact IDs.
+        Enriches artifacts with time range collection metadata.
 
         Args:
             job_id: Job identifier
             node: Node name
-            collection_start_time: Start time of the collection range (BE-024)
-            collection_end_time: End time of the collection range (BE-024)
-            reltime_used: The reltime value used in CUCM command (BE-024)
+            collection_start_time: Start time of the collection range
+            collection_end_time: End time of the collection range
+            reltime_used: The reltime value used in CUCM command
 
         Returns:
             List of discovered artifacts with artifact_id and time metadata populated
@@ -1296,7 +1296,7 @@ class JobManager:
         # Filter to this specific node
         node_artifacts = [a for a in artifacts if a.node == node]
 
-        # BE-024: Enrich artifacts with time range metadata
+        # Enrich artifacts with time range metadata
         for artifact in node_artifacts:
             artifact.collection_start_time = collection_start_time
             artifact.collection_end_time = collection_end_time
