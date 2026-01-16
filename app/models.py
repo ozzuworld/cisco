@@ -118,6 +118,20 @@ class JobStatus(str, Enum):
     CANCELLED = "cancelled"  # Job was cancelled
 
 
+class DebugLevel(str, Enum):
+    """
+    Debug/trace verbosity level for CUCM log collection.
+
+    TAC typically requests specific debug levels:
+    - BASIC: Default trace levels, minimal performance impact
+    - DETAILED: Increased trace verbosity for troubleshooting
+    - VERBOSE: Maximum trace detail for deep debugging (performance impact)
+    """
+    BASIC = "basic"
+    DETAILED = "detailed"
+    VERBOSE = "verbose"
+
+
 class NodeStatus(str, Enum):
     """Individual node processing status"""
     PENDING = "pending"
@@ -162,6 +176,14 @@ class CollectionOptions(BaseModel):
     end_time: Optional[datetime] = Field(
         default=None,
         description="End of time range (ISO-8601 datetime, used when time_mode='range')"
+    )
+
+    # Debug/trace verbosity level
+    debug_level: Optional[DebugLevel] = Field(
+        default=None,
+        description="Debug/trace verbosity level for CUCM log collection. "
+                    "BASIC=default traces, DETAILED=more verbose, VERBOSE=full debug (performance impact). "
+                    "TAC typically requests 'detailed' or 'verbose' for troubleshooting."
     )
 
     compress: Optional[bool] = Field(
@@ -404,6 +426,12 @@ class JobStatusResponse(BaseModel):
     computation_timestamp: Optional[datetime] = Field(
         default=None,
         description="Server 'now' timestamp used for reltime computation"
+    )
+
+    # Debug level configuration
+    debug_level: Optional[DebugLevel] = Field(
+        default=None,
+        description="Debug/trace verbosity level used for this job (basic/detailed/verbose)"
     )
 
 
