@@ -2300,6 +2300,55 @@ async def list_log_collections(
 
 
 @app.get(
+    "/logs/profiles",
+    response_model=LogProfilesResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "List of available profiles for CUBE and Expressway"}
+    }
+)
+async def list_log_profiles():
+    """
+    List available log collection profiles for CUBE and Expressway devices.
+
+    Returns all configured profiles with their settings.
+    Use these profile names when starting log collection.
+    """
+    catalog = get_profile_catalog()
+
+    # Get CUBE profiles
+    cube_profiles = [
+        CubeProfileResponse(
+            name=p.name,
+            description=p.description,
+            device_type=p.device_type,
+            method=p.method,
+            commands=p.commands,
+            include_debug=p.include_debug,
+            duration_sec=p.duration_sec
+        )
+        for p in catalog.list_cube_profiles()
+    ]
+
+    # Get Expressway profiles
+    expressway_profiles = [
+        ExpresswayProfileResponse(
+            name=p.name,
+            description=p.description,
+            device_type=p.device_type,
+            method=p.method,
+            tcpdump=p.tcpdump
+        )
+        for p in catalog.list_expressway_profiles()
+    ]
+
+    return LogProfilesResponse(
+        cube_profiles=cube_profiles,
+        expressway_profiles=expressway_profiles
+    )
+
+
+@app.get(
     "/logs/{collection_id}",
     response_model=LogCollectionStatusResponse,
     responses={
@@ -2445,55 +2494,6 @@ async def delete_log_collection(collection_id: str, request: Request):
         )
 
     return {"message": f"Log collection {collection_id} deleted"}
-
-
-@app.get(
-    "/logs/profiles",
-    response_model=LogProfilesResponse,
-    status_code=status.HTTP_200_OK,
-    responses={
-        200: {"description": "List of available profiles for CUBE and Expressway"}
-    }
-)
-async def list_log_profiles():
-    """
-    List available log collection profiles for CUBE and Expressway devices.
-
-    Returns all configured profiles with their settings.
-    Use these profile names when starting log collection.
-    """
-    catalog = get_profile_catalog()
-
-    # Get CUBE profiles
-    cube_profiles = [
-        CubeProfileResponse(
-            name=p.name,
-            description=p.description,
-            device_type=p.device_type,
-            method=p.method,
-            commands=p.commands,
-            include_debug=p.include_debug,
-            duration_sec=p.duration_sec
-        )
-        for p in catalog.list_cube_profiles()
-    ]
-
-    # Get Expressway profiles
-    expressway_profiles = [
-        ExpresswayProfileResponse(
-            name=p.name,
-            description=p.description,
-            device_type=p.device_type,
-            method=p.method,
-            tcpdump=p.tcpdump
-        )
-        for p in catalog.list_expressway_profiles()
-    ]
-
-    return LogProfilesResponse(
-        cube_profiles=cube_profiles,
-        expressway_profiles=expressway_profiles
-    )
 
 
 # ============================================================================
