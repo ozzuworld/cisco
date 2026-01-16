@@ -891,7 +891,9 @@ async def get_job_status(job_id: str, request: Request):
         requested_reltime_minutes=job.requested_reltime_minutes,
         computed_reltime_unit=job.computed_reltime_unit,
         computed_reltime_value=job.computed_reltime_value,
-        computation_timestamp=job.computation_timestamp
+        computation_timestamp=job.computation_timestamp,
+        # Include debug level
+        debug_level=job.debug_level
     )
 
 

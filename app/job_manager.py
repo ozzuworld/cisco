@@ -166,6 +166,9 @@ class Job:
         self.computed_reltime_value: Optional[int] = None
         self.computation_timestamp: Optional[datetime] = None  # Server "now" used for calculation
 
+        # Debug level configuration
+        self.debug_level: Optional[str] = None  # basic, detailed, verbose
+
         # Node states
         self.node_statuses: Dict[str, NodeJobStatus] = {}
         for node in nodes:
@@ -205,6 +208,7 @@ class Job:
             "computed_reltime_unit": self.computed_reltime_unit,
             "computed_reltime_value": self.computed_reltime_value,
             "computation_timestamp": self.computation_timestamp.isoformat() if self.computation_timestamp else None,
+            "debug_level": self.debug_level,
             "node_statuses": {
                 node: status.model_dump(mode='json')  # mode='json' serializes datetime properly
                 for node, status in self.node_statuses.items()
@@ -258,6 +262,9 @@ class Job:
         job.computed_reltime_unit = data.get("computed_reltime_unit")
         job.computed_reltime_value = data.get("computed_reltime_value")
         job.computation_timestamp = datetime.fromisoformat(data["computation_timestamp"]) if data.get("computation_timestamp") else None
+
+        # Restore debug level
+        job.debug_level = data.get("debug_level")
 
         # Restore node statuses
         job.node_statuses = {}
@@ -796,6 +803,14 @@ class JobManager:
                 f"[Job {job_id}] Relative time mode - "
                 f"{job.requested_reltime_minutes} minutes at {computation_now}"
             )
+
+        # Set debug level from options (default to 'basic' if not specified)
+        if job.options and job.options.debug_level:
+            job.debug_level = job.options.debug_level.value
+        else:
+            job.debug_level = "basic"  # Default debug level
+
+        logger.info(f"[Job {job_id}] Debug level: {job.debug_level}")
 
         # Save job with time window configuration
         job.save()
