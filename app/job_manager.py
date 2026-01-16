@@ -29,6 +29,62 @@ from app.artifact_manager import list_artifacts_for_job
 
 logger = logging.getLogger(__name__)
 
+# =============================================================================
+# CUCM Trace Level Control
+# =============================================================================
+
+# CUCM trace level mapping
+# Maps our debug_level to CUCM trace level names
+CUCM_TRACE_LEVELS = {
+    "basic": "Informational",      # Default - minimal logging
+    "detailed": "Detailed",        # More verbose - good for TAC
+    "verbose": "Debug",            # Maximum detail - performance impact
+}
+
+# CUCM services to set trace levels on
+# These are the main services TAC typically requests traces for
+CUCM_TRACE_SERVICES = [
+    "Cisco CallManager",           # Main CallManager service
+    "Cisco CTIManager",            # CTI related
+]
+
+
+def build_trace_set_commands(debug_level: str) -> List[str]:
+    """
+    Build CUCM CLI commands to set trace level for key services.
+
+    Args:
+        debug_level: One of "basic", "detailed", "verbose"
+
+    Returns:
+        List of CLI commands to execute
+    """
+    cucm_level = CUCM_TRACE_LEVELS.get(debug_level, "Informational")
+    commands = []
+
+    for service in CUCM_TRACE_SERVICES:
+        # CUCM trace command format
+        commands.append(f'set trace enable "{service}" {cucm_level}')
+
+    return commands
+
+
+def build_trace_reset_commands() -> List[str]:
+    """
+    Build CUCM CLI commands to reset trace level to basic/default.
+
+    Returns:
+        List of CLI commands to reset traces
+    """
+    commands = []
+
+    for service in CUCM_TRACE_SERVICES:
+        # Reset to Informational (basic/default level)
+        commands.append(f'set trace enable "{service}" Informational')
+
+    return commands
+
+
 # Per-job write locks to prevent concurrent modifications
 _job_write_locks: Dict[str, threading.Lock] = {}
 _job_write_locks_lock = threading.Lock()  # Lock for the locks dict itself
@@ -1091,102 +1147,156 @@ class JobManager:
                 transcript_file.flush()
                 transcript_lines.append(f"Connected to {node}\n")
 
-              
-                if job.cancelled:
-                    logger.info(f"[Job {job.job_id}][{node}] Cancelled after connect")
-                    transcript_file.write("\n[CANCELLED]\n")
-                    transcript_file.flush()
-                    transcript_lines.append("\n[CANCELLED]\n")
-                    job.update_node_status(node, NodeStatus.CANCELLED)
-                    return
+                # Track if we changed trace levels (to know if we need to reset)
+                trace_level_changed = False
 
-                # Update progress - collecting
-                job.update_node_status(
-                    node,
-                    NodeStatus.RUNNING,
-                    step="collecting",
-                    message="Collecting log files",
-                    percent=40
-                )
-
-                # Process each path in the profile
-                for path in job.profile.paths:
-                  
-                    if job.cancelled:
-                        logger.info(f"[Job {job.job_id}][{node}] Cancelled during path processing")
-                        msg = f"\n[CANCELLED before processing {path}]\n"
-                        transcript_file.write(msg)
+                try:
+                    # Set trace level if not "basic" (basic is default, no change needed)
+                    if job.debug_level and job.debug_level != "basic":
+                        logger.info(f"[Job {job.job_id}][{node}] Setting trace level to: {job.debug_level}")
+                        transcript_file.write(f"\n{'='*60}\nSetting trace level: {job.debug_level}\n{'='*60}\n")
                         transcript_file.flush()
-                        transcript_lines.append(msg)
+
+                        trace_commands = build_trace_set_commands(job.debug_level)
+                        for trace_cmd in trace_commands:
+                            transcript_file.write(f"Executing: {trace_cmd}\n")
+                            transcript_file.flush()
+                            try:
+                                # Execute trace command
+                                output = await client.execute_command(trace_cmd, timeout=30.0)
+                                transcript_file.write(f"{output}\n")
+                                transcript_file.flush()
+                                trace_level_changed = True
+                            except Exception as trace_err:
+                                # Log error but continue - trace setting is not critical
+                                logger.warning(f"[Job {job.job_id}][{node}] Failed to set trace: {trace_err}")
+                                transcript_file.write(f"WARNING: Failed to set trace: {trace_err}\n")
+                                transcript_file.flush()
+
+                        if trace_level_changed:
+                            transcript_file.write(f"Trace level set to {job.debug_level}. Will reset to basic after collection.\n\n")
+                            transcript_file.flush()
+
+                    if job.cancelled:
+                        logger.info(f"[Job {job.job_id}][{node}] Cancelled after connect")
+                        transcript_file.write("\n[CANCELLED]\n")
+                        transcript_file.flush()
+                        transcript_lines.append("\n[CANCELLED]\n")
                         job.update_node_status(node, NodeStatus.CANCELLED)
                         return
 
-                    #  Use pre-computed time window from job
-                    # (computed once per job in execute_job for consistency)
-                    reltime_unit = job.computed_reltime_unit
-                    reltime_value = job.computed_reltime_value
-
-                    # Variables to store time range metadata for artifacts
-                    collection_start_time = job.requested_start_time
-                    collection_end_time = job.requested_end_time
-                    reltime_used_str = f"{reltime_unit} {reltime_value}"
-
-                    logger.info(
-                        f"[Job {job.job_id}][{node}] Using computed reltime: {reltime_used_str}"
+                    # Update progress - collecting
+                    job.update_node_status(
+                        node,
+                        NodeStatus.RUNNING,
+                        step="collecting",
+                        message="Collecting log files",
+                        percent=40
                     )
 
-                    # Determine other options (use overrides if provided)
-                    compress = job.options.compress if job.options.compress is not None else job.profile.compress
-                    recurs = job.options.recurs if job.options.recurs is not None else job.profile.recurs
-                    match = job.options.match or job.profile.match
+                    # Process each path in the profile
+                    for path in job.profile.paths:
 
-                    # Build command with dynamic time unit
-                    command = build_file_get_command(
-                        path=path,
-                        reltime_value=reltime_value,
-                        reltime_unit=reltime_unit,
-                        compress=compress,
-                        recurs=recurs,
-                        match=match
-                    )
+                        if job.cancelled:
+                            logger.info(f"[Job {job.job_id}][{node}] Cancelled during path processing")
+                            msg = f"\n[CANCELLED before processing {path}]\n"
+                            transcript_file.write(msg)
+                            transcript_file.flush()
+                            transcript_lines.append(msg)
+                            job.update_node_status(node, NodeStatus.CANCELLED)
+                            return
 
-                    # Write command info to transcript
-                    header = f"\n{'='*60}\nCollecting: {path}\nCommand: {command}\n{'='*60}\n\n"
-                    transcript_file.write(header)
-                    transcript_file.flush()
-                    transcript_lines.append(header)
+                        #  Use pre-computed time window from job
+                        # (computed once per job in execute_job for consistency)
+                        reltime_unit = job.computed_reltime_unit
+                        reltime_value = job.computed_reltime_value
 
-                    logger.info(f"[Job {job.job_id}][{node}] Executing: {command}")
+                        # Variables to store time range metadata for artifacts
+                        collection_start_time = job.requested_start_time
+                        collection_end_time = job.requested_end_time
+                        reltime_used_str = f"{reltime_unit} {reltime_value}"
 
-                    # Get stdin/stdout from the session
-                    if not client._session:
-                        raise CUCMSSHClientError("No active session")
+                        logger.info(
+                            f"[Job {job.job_id}][{node}] Using computed reltime: {reltime_used_str}"
+                        )
 
-                    # Send command
-                    client._session.stdin.write(command + '\n')
-                    await client._session.stdin.drain()
+                        # Determine other options (use overrides if provided)
+                        compress = job.options.compress if job.options.compress is not None else job.profile.compress
+                        recurs = job.options.recurs if job.options.recurs is not None else job.profile.recurs
+                        match = job.options.match or job.profile.match
 
-                    # Create prompt responder
-                    responder = PromptResponder(
-                        sftp_host=self.settings.effective_sftp_host,
-                        sftp_port=self.settings.sftp_port,
-                        sftp_username=self.settings.sftp_username,
-                        sftp_password=self.settings.sftp_password,
-                        sftp_directory=sftp_directory
-                    )
+                        # Build command with dynamic time unit
+                        command = build_file_get_command(
+                            path=path,
+                            reltime_value=reltime_value,
+                            reltime_unit=reltime_unit,
+                            compress=compress,
+                            recurs=recurs,
+                            match=match
+                        )
 
-                    # FIX: Respond to prompts with incremental transcript writing
-                    output = await responder.respond_to_prompts(
-                        stdin=client._session.stdin,
-                        stdout=client._session.stdout,
-                        timeout=float(self.settings.job_command_timeout_sec),
-                        prompt=client.prompt,
-                        transcript_file=transcript_file
-                    )
+                        # Write command info to transcript
+                        header = f"\n{'='*60}\nCollecting: {path}\nCommand: {command}\n{'='*60}\n\n"
+                        transcript_file.write(header)
+                        transcript_file.flush()
+                        transcript_lines.append(header)
 
-                    transcript_lines.append(output)
-                    transcript_file.write("\n")
-                    transcript_file.flush()
+                        logger.info(f"[Job {job.job_id}][{node}] Executing: {command}")
+
+                        # Get stdin/stdout from the session
+                        if not client._session:
+                            raise CUCMSSHClientError("No active session")
+
+                        # Send command
+                        client._session.stdin.write(command + '\n')
+                        await client._session.stdin.drain()
+
+                        # Create prompt responder
+                        responder = PromptResponder(
+                            sftp_host=self.settings.effective_sftp_host,
+                            sftp_port=self.settings.sftp_port,
+                            sftp_username=self.settings.sftp_username,
+                            sftp_password=self.settings.sftp_password,
+                            sftp_directory=sftp_directory
+                        )
+
+                        # FIX: Respond to prompts with incremental transcript writing
+                        output = await responder.respond_to_prompts(
+                            stdin=client._session.stdin,
+                            stdout=client._session.stdout,
+                            timeout=float(self.settings.job_command_timeout_sec),
+                            prompt=client.prompt,
+                            transcript_file=transcript_file
+                        )
+
+                        transcript_lines.append(output)
+                        transcript_file.write("\n")
+                        transcript_file.flush()
+
+                finally:
+                    # CRITICAL: Always reset trace level to basic after collection
+                    # This ensures we don't leave CUCM in verbose/debug mode
+                    if trace_level_changed:
+                        logger.info(f"[Job {job.job_id}][{node}] Resetting trace level to basic")
+                        transcript_file.write(f"\n{'='*60}\nResetting trace level to basic\n{'='*60}\n")
+                        transcript_file.flush()
+
+                        reset_commands = build_trace_reset_commands()
+                        for reset_cmd in reset_commands:
+                            transcript_file.write(f"Executing: {reset_cmd}\n")
+                            transcript_file.flush()
+                            try:
+                                output = await client.execute_command(reset_cmd, timeout=30.0)
+                                transcript_file.write(f"{output}\n")
+                                transcript_file.flush()
+                            except Exception as reset_err:
+                                # Log error but don't fail - trace reset is best-effort
+                                logger.warning(f"[Job {job.job_id}][{node}] Failed to reset trace: {reset_err}")
+                                transcript_file.write(f"WARNING: Failed to reset trace: {reset_err}\n")
+                                transcript_file.flush()
+
+                        transcript_file.write("Trace level reset to basic.\n\n")
+                        transcript_file.flush()
 
             #  Check if CUCM reported "No files matched filter criteria"
             full_transcript = ''.join(transcript_lines)
