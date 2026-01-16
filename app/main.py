@@ -361,6 +361,20 @@ async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
 
         logger.info(f"Discovered {len(nodes)} nodes")
 
+        # IMPORTANT: Replace Publisher node's IP with user-provided publisher_host
+        # This ensures we use the IP the user knows works (e.g., private IP) rather than
+        # CUCM's internally configured IP (which might be a public IP unreachable from Docker)
+        for node in nodes:
+            if node.role == "Publisher":
+                original_ip = node.ip
+                if original_ip != req_body.publisher_host:
+                    logger.info(
+                        f"Replacing Publisher IP {original_ip} with user-provided IP {req_body.publisher_host} "
+                        f"(ensures connectivity from Docker/private network)"
+                    )
+                    node.ip = req_body.publisher_host
+                break
+
         # Prepare response
         response = DiscoverNodesResponse(nodes=nodes)
 
