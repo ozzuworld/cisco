@@ -644,9 +644,9 @@ from app.job_manager import CUCM_TRACE_LEVELS, CUCM_TRACE_SERVICES
 )
 async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
     """
-    Get current trace levels from a CUCM node.
+    Get current trace levels from CUCM node(s).
 
-    Connects to the node and queries the current trace level for each service.
+    Connects to each node and queries the current trace level for each service.
     Use this to check the current state before/after setting trace levels.
 
     Args:
@@ -654,114 +654,118 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
         request: FastAPI request object
 
     Returns:
-        GetTraceLevelResponse with current trace levels for each service
+        GetTraceLevelResponse with current trace levels for each node/service
     """
+    from app.models import NodeTraceLevelStatus
+
     request_id = get_request_id(request)
     logger.info(
-        f"Get trace level request for {req_body.host}:{req_body.port} "
+        f"Get trace level request for {len(req_body.hosts)} nodes "
         f"(request_id={request_id})"
     )
 
     # Use provided services or defaults
     services = req_body.services or CUCM_TRACE_SERVICES
 
-    try:
-        async with CUCMSSHClient(
-            host=req_body.host,
-            port=req_body.port,
-            username=req_body.username,
-            password=req_body.password,
-            connect_timeout=float(req_body.connect_timeout_sec)
-        ) as client:
+    results = []
+    successful = 0
+    failed = 0
 
-            service_levels = []
-            for service in services:
-                try:
-                    # Query current trace level
-                    # CUCM command: show trace level "Service Name"
-                    cmd = f'show trace level "{service}"'
-                    output = await client.execute_command(cmd, timeout=30.0)
+    for host in req_body.hosts:
+        try:
+            async with CUCMSSHClient(
+                host=host,
+                port=req_body.port,
+                username=req_body.username,
+                password=req_body.password,
+                connect_timeout=float(req_body.connect_timeout_sec)
+            ) as client:
 
-                    # Parse output to extract current level
-                    current_level = "Unknown"
-                    for line in output.split('\n'):
-                        line = line.strip()
-                        # Look for trace level in output
-                        if 'trace level' in line.lower() or 'Trace Level' in line:
-                            # Extract level name
+                service_levels = []
+                for service in services:
+                    try:
+                        # Query current trace level
+                        # CUCM command: show trace level "Service Name"
+                        cmd = f'show trace level "{service}"'
+                        output = await client.execute_command(cmd, timeout=30.0)
+
+                        # Parse output to extract current level
+                        current_level = "Unknown"
+                        for line in output.split('\n'):
+                            line = line.strip()
+                            # Look for trace level in output
+                            if 'trace level' in line.lower() or 'Trace Level' in line:
+                                # Extract level name
+                                for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
+                                    if level_name.lower() in line.lower():
+                                        current_level = level_name
+                                        break
+                            # Also check for direct level indicators
                             for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
-                                if level_name.lower() in line.lower():
+                                if level_name in line:
                                     current_level = level_name
                                     break
-                        # Also check for direct level indicators
-                        for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
-                            if level_name in line:
-                                current_level = level_name
-                                break
 
-                    service_levels.append(ServiceTraceLevel(
-                        service_name=service,
-                        current_level=current_level,
-                        raw_output=output.strip()[:500] if output else None
-                    ))
+                        service_levels.append(ServiceTraceLevel(
+                            service_name=service,
+                            current_level=current_level,
+                            raw_output=output.strip()[:500] if output else None
+                        ))
 
-                except Exception as e:
-                    logger.warning(f"Failed to get trace level for {service}: {e}")
-                    service_levels.append(ServiceTraceLevel(
-                        service_name=service,
-                        current_level="Error",
-                        raw_output=str(e)
-                    ))
+                    except Exception as e:
+                        logger.warning(f"Failed to get trace level for {service} on {host}: {e}")
+                        service_levels.append(ServiceTraceLevel(
+                            service_name=service,
+                            current_level="Error",
+                            raw_output=str(e)
+                        ))
 
-            return GetTraceLevelResponse(
-                host=req_body.host,
-                services=service_levels,
-                checked_at=datetime.now(timezone.utc),
-                message=f"Retrieved trace levels for {len(service_levels)} services"
-            )
+                results.append(NodeTraceLevelStatus(
+                    host=host,
+                    success=True,
+                    services=service_levels,
+                    error=None
+                ))
+                successful += 1
 
-    except CUCMAuthError as e:
-        logger.error(f"Authentication failed: {str(e)} (request_id={request_id})")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "error": "AUTH_FAILED",
-                "message": "Authentication failed. Please check username and password.",
-                "request_id": request_id
-            }
-        )
+        except CUCMAuthError as e:
+            logger.error(f"Authentication failed for {host}: {e}")
+            results.append(NodeTraceLevelStatus(
+                host=host,
+                success=False,
+                services=[],
+                error="Authentication failed"
+            ))
+            failed += 1
 
-    except CUCMConnectionError as e:
-        error_msg = str(e).lower()
-        if "timeout" in error_msg:
-            raise HTTPException(
-                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail={
-                    "error": "CONNECT_TIMEOUT",
-                    "message": f"Connection timeout to {req_body.host}:{req_body.port}",
-                    "request_id": request_id
-                }
-            )
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={
-                    "error": "NETWORK_ERROR",
-                    "message": f"Cannot connect to {req_body.host}:{req_body.port}",
-                    "request_id": request_id
-                }
-            )
+        except CUCMConnectionError as e:
+            logger.error(f"Connection error for {host}: {e}")
+            results.append(NodeTraceLevelStatus(
+                host=host,
+                success=False,
+                services=[],
+                error=f"Connection error: {str(e)}"
+            ))
+            failed += 1
 
-    except Exception as e:
-        logger.exception(f"Error getting trace levels: {e} (request_id={request_id})")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error": "INTERNAL_ERROR",
-                "message": "Failed to get trace levels",
-                "request_id": request_id
-            }
-        )
+        except Exception as e:
+            logger.exception(f"Error getting trace levels from {host}: {e}")
+            results.append(NodeTraceLevelStatus(
+                host=host,
+                success=False,
+                services=[],
+                error=str(e)
+            ))
+            failed += 1
+
+    return GetTraceLevelResponse(
+        results=results,
+        total_nodes=len(req_body.hosts),
+        successful_nodes=successful,
+        failed_nodes=failed,
+        checked_at=datetime.now(timezone.utc),
+        message=f"Checked trace levels on {successful}/{len(req_body.hosts)} nodes"
+    )
 
 
 @app.post(
