@@ -54,7 +54,8 @@ from app.ssh_client import (
     CUCMAuthError,
     CUCMConnectionError,
     CUCMCommandTimeoutError,
-    CUCMSSHClientError
+    CUCMSSHClientError,
+    CUCMSSHClient
 )
 from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
