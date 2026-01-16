@@ -361,6 +361,20 @@ async def discover_nodes(req_body: DiscoverNodesRequest, request: Request):
 
         logger.info(f"Discovered {len(nodes)} nodes")
 
+        # IMPORTANT: Replace Publisher node's IP with user-provided publisher_host
+        # This ensures we use the IP the user knows works (e.g., private IP) rather than
+        # CUCM's internally configured IP (which might be a public IP unreachable from Docker)
+        for node in nodes:
+            if node.role == "Publisher":
+                original_ip = node.ip
+                if original_ip != req_body.publisher_host:
+                    logger.info(
+                        f"Replacing Publisher IP {original_ip} with user-provided IP {req_body.publisher_host} "
+                        f"(ensures connectivity from Docker/private network)"
+                    )
+                    node.ip = req_body.publisher_host
+                break
+
         # Prepare response
         response = DiscoverNodesResponse(nodes=nodes)
 
@@ -585,6 +599,317 @@ async def get_cluster_health(req_body: ClusterHealthRequest, request: Request):
                 "request_id": request_id
             }
         )
+
+
+# ============================================================================
+# Trace Level Management Endpoints
+# ============================================================================
+
+
+# Import trace level models
+from app.models import (
+    GetTraceLevelRequest,
+    GetTraceLevelResponse,
+    SetTraceLevelRequest,
+    SetTraceLevelResponse,
+    ServiceTraceLevel,
+    NodeTraceLevelResult,
+    DebugLevel,
+)
+from app.job_manager import CUCM_TRACE_LEVELS, CUCM_TRACE_SERVICES
+
+
+@app.post(
+    "/trace-level/get",
+    response_model=GetTraceLevelResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Current trace levels retrieved",
+            "model": GetTraceLevelResponse
+        },
+        401: {
+            "description": "Authentication failed",
+            "model": ErrorResponse
+        },
+        502: {
+            "description": "Network error",
+            "model": ErrorResponse
+        },
+        504: {
+            "description": "Connection timeout",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
+    """
+    Get current trace levels from a CUCM node.
+
+    Connects to the node and queries the current trace level for each service.
+    Use this to check the current state before/after setting trace levels.
+
+    Args:
+        req_body: GetTraceLevelRequest with connection parameters
+        request: FastAPI request object
+
+    Returns:
+        GetTraceLevelResponse with current trace levels for each service
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Get trace level request for {req_body.host}:{req_body.port} "
+        f"(request_id={request_id})"
+    )
+
+    # Use provided services or defaults
+    services = req_body.services or CUCM_TRACE_SERVICES
+
+    try:
+        async with CUCMSSHClient(
+            host=req_body.host,
+            port=req_body.port,
+            username=req_body.username,
+            password=req_body.password,
+            connect_timeout=float(req_body.connect_timeout_sec)
+        ) as client:
+
+            service_levels = []
+            for service in services:
+                try:
+                    # Query current trace level
+                    # CUCM command: show trace level "Service Name"
+                    cmd = f'show trace level "{service}"'
+                    output = await client.execute_command(cmd, timeout=30.0)
+
+                    # Parse output to extract current level
+                    current_level = "Unknown"
+                    for line in output.split('\n'):
+                        line = line.strip()
+                        # Look for trace level in output
+                        if 'trace level' in line.lower() or 'Trace Level' in line:
+                            # Extract level name
+                            for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
+                                if level_name.lower() in line.lower():
+                                    current_level = level_name
+                                    break
+                        # Also check for direct level indicators
+                        for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
+                            if level_name in line:
+                                current_level = level_name
+                                break
+
+                    service_levels.append(ServiceTraceLevel(
+                        service_name=service,
+                        current_level=current_level,
+                        raw_output=output.strip()[:500] if output else None
+                    ))
+
+                except Exception as e:
+                    logger.warning(f"Failed to get trace level for {service}: {e}")
+                    service_levels.append(ServiceTraceLevel(
+                        service_name=service,
+                        current_level="Error",
+                        raw_output=str(e)
+                    ))
+
+            return GetTraceLevelResponse(
+                host=req_body.host,
+                services=service_levels,
+                checked_at=datetime.now(timezone.utc),
+                message=f"Retrieved trace levels for {len(service_levels)} services"
+            )
+
+    except CUCMAuthError as e:
+        logger.error(f"Authentication failed: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "AUTH_FAILED",
+                "message": "Authentication failed. Please check username and password.",
+                "request_id": request_id
+            }
+        )
+
+    except CUCMConnectionError as e:
+        error_msg = str(e).lower()
+        if "timeout" in error_msg:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail={
+                    "error": "CONNECT_TIMEOUT",
+                    "message": f"Connection timeout to {req_body.host}:{req_body.port}",
+                    "request_id": request_id
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={
+                    "error": "NETWORK_ERROR",
+                    "message": f"Cannot connect to {req_body.host}:{req_body.port}",
+                    "request_id": request_id
+                }
+            )
+
+    except Exception as e:
+        logger.exception(f"Error getting trace levels: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "Failed to get trace levels",
+                "request_id": request_id
+            }
+        )
+
+
+@app.post(
+    "/trace-level/set",
+    response_model=SetTraceLevelResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Trace levels set successfully",
+            "model": SetTraceLevelResponse
+        },
+        401: {
+            "description": "Authentication failed",
+            "model": ErrorResponse
+        },
+        502: {
+            "description": "Network error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
+    """
+    Set trace level on one or more CUCM nodes.
+
+    This allows you to set trace levels BEFORE an issue occurs, so when
+    you collect logs later, they will contain the detailed information.
+
+    Use 'detailed' or 'verbose' when troubleshooting, then set back to
+    'basic' when done to avoid performance impact.
+
+    Args:
+        req_body: SetTraceLevelRequest with hosts and level
+        request: FastAPI request object
+
+    Returns:
+        SetTraceLevelResponse with results for each node
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Set trace level request: level={req_body.level.value} "
+        f"hosts={req_body.hosts} (request_id={request_id})"
+    )
+
+    # Use provided services or defaults
+    services = req_body.services or CUCM_TRACE_SERVICES
+    cucm_level = CUCM_TRACE_LEVELS.get(req_body.level.value, "Informational")
+
+    results = []
+    successful = 0
+    failed = 0
+
+    for host in req_body.hosts:
+        try:
+            async with CUCMSSHClient(
+                host=host,
+                port=req_body.port,
+                username=req_body.username,
+                password=req_body.password,
+                connect_timeout=float(req_body.connect_timeout_sec)
+            ) as client:
+
+                services_updated = []
+                node_errors = []
+
+                for service in services:
+                    try:
+                        # Set trace level command
+                        cmd = f'set trace enable "{service}" {cucm_level}'
+                        logger.info(f"[{host}] Executing: {cmd}")
+
+                        # Use confirmation method since this command prompts for y/n
+                        output = await client.execute_command_with_confirmation(
+                            cmd, confirmation="y", timeout=60.0
+                        )
+                        services_updated.append(service)
+                        logger.info(f"[{host}] Successfully set trace level for {service}")
+
+                    except Exception as e:
+                        logger.warning(f"[{host}] Failed to set trace for {service}: {e}")
+                        node_errors.append(f"{service}: {str(e)}")
+
+                if services_updated:
+                    results.append(NodeTraceLevelResult(
+                        host=host,
+                        success=True,
+                        services_updated=services_updated,
+                        error="; ".join(node_errors) if node_errors else None
+                    ))
+                    successful += 1
+                else:
+                    results.append(NodeTraceLevelResult(
+                        host=host,
+                        success=False,
+                        services_updated=[],
+                        error="; ".join(node_errors) if node_errors else "No services updated"
+                    ))
+                    failed += 1
+
+        except CUCMAuthError as e:
+            logger.error(f"[{host}] Authentication failed: {e}")
+            results.append(NodeTraceLevelResult(
+                host=host,
+                success=False,
+                services_updated=[],
+                error=f"Authentication failed: {str(e)}"
+            ))
+            failed += 1
+
+        except CUCMConnectionError as e:
+            logger.error(f"[{host}] Connection failed: {e}")
+            results.append(NodeTraceLevelResult(
+                host=host,
+                success=False,
+                services_updated=[],
+                error=f"Connection failed: {str(e)}"
+            ))
+            failed += 1
+
+        except Exception as e:
+            logger.exception(f"[{host}] Error setting trace level: {e}")
+            results.append(NodeTraceLevelResult(
+                host=host,
+                success=False,
+                services_updated=[],
+                error=str(e)
+            ))
+            failed += 1
+
+    # Summary message
+    if failed == 0:
+        message = f"Successfully set trace level to {req_body.level.value} on all {successful} node(s)"
+    elif successful == 0:
+        message = f"Failed to set trace level on all {failed} node(s)"
+    else:
+        message = f"Trace level set on {successful} node(s), {failed} failed"
+
+    logger.info(f"Set trace level complete: {message} (request_id={request_id})")
+
+    return SetTraceLevelResponse(
+        level=req_body.level,
+        results=results,
+        total_nodes=len(req_body.hosts),
+        successful_nodes=successful,
+        failed_nodes=failed,
+        completed_at=datetime.now(timezone.utc),
+        message=message
+    )
 
 
 # ============================================================================

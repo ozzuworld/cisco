@@ -106,6 +106,49 @@ Response includes built-in profiles:
 - `emergency_debug` - All logs, last 30 min
 - And more...
 
+### Trace Level Management
+
+**POST /trace-level/get** - Get current trace levels from a CUCM node
+
+Request:
+```json
+{
+  "host": "10.10.10.10",
+  "port": 22,
+  "username": "admin",
+  "password": "your-password",
+  "services": ["Cisco CallManager", "Cisco CTIManager"]  // optional
+}
+```
+
+Response:
+```json
+{
+  "host": "10.10.10.10",
+  "services": [
+    {"service_name": "Cisco CallManager", "current_level": "Debug"},
+    {"service_name": "Cisco CTIManager", "current_level": "Informational"}
+  ],
+  "checked_at": "2025-12-26T10:00:00Z"
+}
+```
+
+**POST /trace-level/set** - Set trace level on one or more CUCM nodes
+
+Request:
+```json
+{
+  "hosts": ["10.10.10.10", "10.10.10.11"],
+  "port": 22,
+  "username": "admin",
+  "password": "your-password",
+  "level": "detailed",  // basic, detailed, verbose
+  "services": ["Cisco CallManager"]  // optional
+}
+```
+
+**Important:** Set trace levels to "detailed" or "verbose" BEFORE the issue occurs, then collect logs. Setting debug level only during collection won't capture the detailed information.
+
 ### Jobs
 
 **POST /jobs** - Create log collection job
@@ -287,6 +330,22 @@ pytest tests/test_prompt_responder.py -v
 2. Verify SFTP credentials in `.env`
 3. Review transcript: `cat storage/transcripts/{job-id}/{node}.log`
 4. Check for SFTP errors in transcript
+
+### SFTP Upload Timeout (Docker Deployments)
+
+If you see `SFTP upload timed out: No data received for 120.0s` when running in Docker, the issue is that CUCM cannot reach the SFTP server's internal Docker IP (e.g., `172.17.0.3`).
+
+**Solution:** Set `SFTP_HOST` to an IP address that CUCM can reach:
+
+```bash
+# docker-compose.yml or .env
+SFTP_HOST=192.168.1.100  # Your host machine's IP that CUCM can reach
+SFTP_PORT=2222           # Port mapped from Docker to host
+```
+
+The SFTP server runs inside Docker, but CUCM (external) needs to connect to it. Configure:
+- `SFTP_HOST` = Your server's external/private IP (not Docker internal IP)
+- `SFTP_PORT` = The port exposed to the host (e.g., 2222 if you mapped `2222:22`)
 
 ### Job Timeout
 

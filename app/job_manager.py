@@ -1162,8 +1162,10 @@ class JobManager:
                             transcript_file.write(f"Executing: {trace_cmd}\n")
                             transcript_file.flush()
                             try:
-                                # Execute trace command
-                                output = await client.execute_command(trace_cmd, timeout=30.0)
+                                # Execute trace command with confirmation (y/n prompt)
+                                output = await client.execute_command_with_confirmation(
+                                    trace_cmd, confirmation="y", timeout=60.0
+                                )
                                 transcript_file.write(f"{output}\n")
                                 transcript_file.flush()
                                 trace_level_changed = True
@@ -1286,7 +1288,10 @@ class JobManager:
                             transcript_file.write(f"Executing: {reset_cmd}\n")
                             transcript_file.flush()
                             try:
-                                output = await client.execute_command(reset_cmd, timeout=30.0)
+                                # Use confirmation method for trace commands (y/n prompt)
+                                output = await client.execute_command_with_confirmation(
+                                    reset_cmd, confirmation="y", timeout=60.0
+                                )
                                 transcript_file.write(f"{output}\n")
                                 transcript_file.flush()
                             except Exception as reset_err:

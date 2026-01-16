@@ -227,6 +227,82 @@ class InteractiveShellSession:
 
         return output
 
+    async def send_command_with_confirmation(
+        self,
+        command: str,
+        confirmation: str = "y",
+        timeout: float = 60.0
+    ) -> str:
+        """
+        Send a command that requires y/n confirmation and handle the confirmation.
+
+        Used for commands like 'set trace enable' that ask:
+        "Please answer 'y' for <yes> or 'n' for <no>:"
+
+        Args:
+            command: Command to execute
+            confirmation: Response to send for confirmation (default: "y")
+            timeout: Timeout in seconds
+
+        Returns:
+            Full command output including confirmation
+
+        Raises:
+            CUCMCommandTimeoutError: If timeout is exceeded
+        """
+        logger.debug(f"Sending command with confirmation: {command[:50]}...")
+
+        # Send command with newline
+        self.stdin.write(command + '\n')
+        await self.stdin.drain()
+
+        full_output = ""
+        start_time = time.time()
+
+        try:
+            async with asyncio.timeout(timeout):
+                # Read until we see either the confirmation prompt or the admin prompt
+                while True:
+                    chunk = await self.stdout.read(1024)
+                    if chunk:
+                        self._buffer += chunk
+                        full_output += chunk
+
+                    # Check for confirmation prompt (y/n question)
+                    if "'y'" in self._buffer and "'n'" in self._buffer and ":" in self._buffer:
+                        # Found confirmation prompt - send confirmation
+                        logger.debug(f"Confirmation prompt detected, sending '{confirmation}'")
+                        self.stdin.write(confirmation + '\n')
+                        await self.stdin.drain()
+
+                        # Clear buffer and continue reading for admin prompt
+                        full_output += self._buffer
+                        self._buffer = ""
+
+                        # Now read until admin: prompt
+                        remaining_output = await self.read_until_prompt(
+                            timeout=timeout - (time.time() - start_time)
+                        )
+                        return full_output + remaining_output
+
+                    # Check if we already hit the admin prompt (no confirmation needed)
+                    prompt_pattern = re.compile(r'(?m)(^|\r)\s*' + re.escape(self.prompt) + r'\s*$')
+                    match = prompt_pattern.search(self._buffer)
+                    if match:
+                        output_text = self._buffer[:match.start()]
+                        self._buffer = self._buffer[match.end():]
+                        return output_text
+
+                    # No data received - short wait before retry
+                    if not chunk:
+                        await asyncio.sleep(0.1)
+
+        except TimeoutError:
+            logger.error(f"Timeout waiting for confirmation or prompt after {timeout}s")
+            raise CUCMCommandTimeoutError(
+                f"Timeout waiting for confirmation or prompt after {timeout}s"
+            )
+
     async def send_command_no_wait(self, command: str) -> None:
         """
         Send a command without waiting for response.
@@ -405,6 +481,41 @@ class CUCMSSHClient:
 
         logger.info(f"Executing command: {command}")
         output = await self._session.send_command(command, timeout=timeout)
+        logger.debug(f"Command output length: {len(output)} bytes")
+
+        return output
+
+    async def execute_command_with_confirmation(
+        self,
+        command: str,
+        confirmation: str = "y",
+        timeout: float = 60.0
+    ) -> str:
+        """
+        Execute a command that requires y/n confirmation.
+
+        Used for commands like 'set trace enable' that ask:
+        "Please answer 'y' for <yes> or 'n' for <no>:"
+
+        Args:
+            command: Command to execute
+            confirmation: Response to send for confirmation (default: "y")
+            timeout: Command timeout in seconds
+
+        Returns:
+            Command output
+
+        Raises:
+            CUCMSSHClientError: If not connected
+            CUCMCommandTimeoutError: If command times out
+        """
+        if not self._session:
+            raise CUCMSSHClientError("Not connected. Call connect() first.")
+
+        logger.info(f"Executing command with confirmation: {command}")
+        output = await self._session.send_command_with_confirmation(
+            command, confirmation=confirmation, timeout=timeout
+        )
         logger.debug(f"Command output length: {len(output)} bytes")
 
         return output

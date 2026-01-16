@@ -132,6 +132,143 @@ class DebugLevel(str, Enum):
     VERBOSE = "verbose"
 
 
+# ============================================================================
+# Trace Level Management Models
+# ============================================================================
+
+
+class ServiceTraceLevel(BaseModel):
+    """Trace level for a single CUCM service"""
+    service_name: str = Field(..., description="CUCM service name (e.g., 'Cisco CallManager')")
+    current_level: str = Field(..., description="Current trace level")
+    raw_output: Optional[str] = Field(None, description="Raw command output")
+
+
+class GetTraceLevelRequest(BaseModel):
+    """Request to get current trace levels from a CUCM node"""
+
+    host: str = Field(
+        ...,
+        description="IP address or FQDN of the CUCM node",
+        examples=["10.10.10.10"]
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username"
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    services: Optional[List[str]] = Field(
+        default=None,
+        description="List of services to check. If not provided, checks default services (CallManager, CTIManager)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds",
+        ge=5,
+        le=120
+    )
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("host cannot be empty")
+        return v.strip()
+
+
+class GetTraceLevelResponse(BaseModel):
+    """Response with current trace levels"""
+
+    host: str = Field(..., description="Node IP/hostname checked")
+    services: List[ServiceTraceLevel] = Field(
+        default_factory=list,
+        description="Trace levels for each service"
+    )
+    checked_at: datetime = Field(..., description="When the check was performed")
+    message: Optional[str] = Field(None, description="Status message")
+
+
+class SetTraceLevelRequest(BaseModel):
+    """Request to set trace level on CUCM node(s)"""
+
+    hosts: List[str] = Field(
+        ...,
+        description="List of CUCM node IPs or hostnames to configure",
+        min_length=1
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username"
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    level: DebugLevel = Field(
+        ...,
+        description="Trace level to set (basic, detailed, verbose)"
+    )
+    services: Optional[List[str]] = Field(
+        default=None,
+        description="List of services to configure. If not provided, configures default services (CallManager, CTIManager)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds",
+        ge=5,
+        le=120
+    )
+
+    @field_validator("hosts")
+    @classmethod
+    def validate_hosts(cls, v: List[str]) -> List[str]:
+        if not v:
+            raise ValueError("At least one host must be specified")
+        return [h.strip() for h in v if h.strip()]
+
+
+class NodeTraceLevelResult(BaseModel):
+    """Result of setting trace level on a single node"""
+
+    host: str = Field(..., description="Node IP/hostname")
+    success: bool = Field(..., description="Whether the operation succeeded")
+    services_updated: List[str] = Field(
+        default_factory=list,
+        description="Services that were successfully updated"
+    )
+    error: Optional[str] = Field(None, description="Error message if failed")
+
+
+class SetTraceLevelResponse(BaseModel):
+    """Response after setting trace levels"""
+
+    level: DebugLevel = Field(..., description="Trace level that was set")
+    results: List[NodeTraceLevelResult] = Field(
+        default_factory=list,
+        description="Results for each node"
+    )
+    total_nodes: int = Field(..., description="Total nodes attempted")
+    successful_nodes: int = Field(..., description="Nodes successfully configured")
+    failed_nodes: int = Field(..., description="Nodes that failed")
+    completed_at: datetime = Field(..., description="When the operation completed")
+    message: str = Field(..., description="Summary message")
+
+
 class NodeStatus(str, Enum):
     """Individual node processing status"""
     PENDING = "pending"
