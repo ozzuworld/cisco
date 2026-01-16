@@ -354,7 +354,7 @@ async def generate_host_key(key_path: Path) -> asyncssh.SSHKey:
     key_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Generate RSA key (widely compatible with CUCM)
-    key = asyncssh.generate_private_key('ssh-rsa', 2048)
+    key = asyncssh.generate_private_key('ssh-rsa', key_size=2048)
 
     # Save the key
     key_path.write_bytes(key.export_private_key())
