@@ -145,12 +145,13 @@ class ServiceTraceLevel(BaseModel):
 
 
 class GetTraceLevelRequest(BaseModel):
-    """Request to get current trace levels from a CUCM node"""
+    """Request to get current trace levels from CUCM node(s)"""
 
-    host: str = Field(
+    hosts: List[str] = Field(
         ...,
-        description="IP address or FQDN of the CUCM node",
-        examples=["10.10.10.10"]
+        description="List of CUCM node IPs or hostnames to check",
+        min_length=1,
+        examples=[["10.10.10.10", "10.10.10.11"]]
     )
     port: int = Field(
         default=22,
@@ -177,22 +178,37 @@ class GetTraceLevelRequest(BaseModel):
         le=120
     )
 
-    @field_validator("host")
+    @field_validator("hosts")
     @classmethod
-    def validate_host(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("host cannot be empty")
-        return v.strip()
+    def validate_hosts(cls, v: List[str]) -> List[str]:
+        cleaned = [h.strip() for h in v if h and h.strip()]
+        if not cleaned:
+            raise ValueError("hosts cannot be empty")
+        return cleaned
 
 
-class GetTraceLevelResponse(BaseModel):
-    """Response with current trace levels"""
+class NodeTraceLevelStatus(BaseModel):
+    """Trace level status for a single node"""
 
     host: str = Field(..., description="Node IP/hostname checked")
+    success: bool = Field(..., description="Whether the check succeeded")
     services: List[ServiceTraceLevel] = Field(
         default_factory=list,
         description="Trace levels for each service"
     )
+    error: Optional[str] = Field(None, description="Error message if check failed")
+
+
+class GetTraceLevelResponse(BaseModel):
+    """Response with current trace levels for multiple nodes"""
+
+    results: List[NodeTraceLevelStatus] = Field(
+        default_factory=list,
+        description="Trace level status for each node"
+    )
+    total_nodes: int = Field(..., description="Total nodes checked")
+    successful_nodes: int = Field(..., description="Number of nodes successfully checked")
+    failed_nodes: int = Field(..., description="Number of nodes that failed")
     checked_at: datetime = Field(..., description="When the check was performed")
     message: Optional[str] = Field(None, description="Status message")
 

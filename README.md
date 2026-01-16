@@ -108,28 +108,38 @@ Response includes built-in profiles:
 
 ### Trace Level Management
 
-**POST /trace-level/get** - Get current trace levels from a CUCM node
+**POST /trace-level/get** - Get current trace levels from CUCM node(s)
 
 Request:
 ```json
 {
-  "host": "10.10.10.10",
+  "hosts": ["10.10.10.10", "10.10.10.11"],
   "port": 22,
   "username": "admin",
   "password": "your-password",
-  "services": ["Cisco CallManager", "Cisco CTIManager"]  // optional
+  "services": ["Cisco CallManager", "Cisco CTIManager"]
 }
 ```
 
 Response:
 ```json
 {
-  "host": "10.10.10.10",
-  "services": [
-    {"service_name": "Cisco CallManager", "current_level": "Debug"},
-    {"service_name": "Cisco CTIManager", "current_level": "Informational"}
+  "results": [
+    {
+      "host": "10.10.10.10",
+      "success": true,
+      "services": [
+        {"service_name": "Cisco CallManager", "current_level": "Debug"},
+        {"service_name": "Cisco CTIManager", "current_level": "Informational"}
+      ],
+      "error": null
+    }
   ],
-  "checked_at": "2025-12-26T10:00:00Z"
+  "total_nodes": 1,
+  "successful_nodes": 1,
+  "failed_nodes": 0,
+  "checked_at": "2025-12-26T10:00:00Z",
+  "message": "Checked trace levels on 1/1 nodes"
 }
 ```
 
