@@ -257,10 +257,11 @@ MAX_RAW_OUTPUT_SIZE = 40 * 1024
 
 
 # ============================================================================
-# Frontend Static Files (if available)
+# Frontend Static Files - Mount Assets Only
 # ============================================================================
+# Note: Catch-all SPA routes are defined at the END of this file after all API routes
 
-# Check if frontend build exists and mount static files
+# Check if frontend build exists and mount static assets
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
     logger.info(f"Mounting frontend static files from {FRONTEND_DIR}")
@@ -271,41 +272,23 @@ if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
         StaticFiles(directory=str(FRONTEND_DIR / "assets")),
         name="static"
     )
-
-    # Serve index.html for root and all SPA routes
-    @app.get("/", include_in_schema=False)
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(full_path: str = ""):
-        """
-        Serve the React SPA.
-
-        - API routes (starting with /api/, /discover-nodes, /jobs, etc.) are handled by their respective endpoints
-        - All other routes serve index.html for client-side routing
-        """
-        # Don't intercept API routes - let FastAPI handle them
-        if full_path.startswith(("health", "discover-nodes", "jobs", "captures", "capture-sessions",
-                                 "logs", "profiles", "trace-level", "cluster", "artifacts")):
-            # This shouldn't be reached, but just in case
-            raise HTTPException(status_code=404, detail="Not found")
-
-        index_file = FRONTEND_DIR / "index.html"
-        if not index_file.exists():
-            raise HTTPException(status_code=404, detail="Frontend not found")
-
-        return FileResponse(index_file)
 else:
     logger.warning(f"Frontend build not found at {FRONTEND_DIR}, serving API only")
 
-    @app.get("/")
-    async def root():
-        """API-only health check endpoint"""
-        return {
-            "service": "CUCM Log Collector",
-            "version": "0.5.0",
-            "status": "running",
-            "mode": "api-only",
-            "message": "Frontend not available. Build frontend and restart to enable UI."
-        }
+
+# ============================================================================
+# API Endpoints Start Here
+# ============================================================================
+
+
+@app.get("/")
+async def root():
+    """Root endpoint - returns service info"""
+    return {
+        "service": "CUCM Log Collector",
+        "version": "0.5.0",
+        "status": "running"
+    }
 
 
 @app.get("/health")
@@ -2989,6 +2972,27 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
             "details": exc.errors()
         }
     )
+
+
+# ============================================================================
+# Frontend SPA Routing (Catch-all - must be LAST)
+# ============================================================================
+# These routes are defined last so API routes take precedence
+
+if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str):
+        """
+        Serve the React SPA for all non-API routes.
+
+        This catch-all route serves index.html for client-side routing.
+        All API routes defined above will take precedence.
+        """
+        index_file = FRONTEND_DIR / "index.html"
+        if not index_file.exists():
+            raise HTTPException(status_code=404, detail="Frontend not found")
+
+        return FileResponse(index_file)
 
 
 if __name__ == "__main__":

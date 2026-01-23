@@ -237,10 +237,19 @@ class CaptureSessionManager:
             )
 
             # Determine credentials
-            username = target_req.username or session.name  # Fallback to session name as placeholder
-            password = target_req.password or ""
+            username = target_req.username
+            password = target_req.password
+
+            if not username or not password:
+                raise ValueError(f"Missing credentials for {target_info.host}")
 
             # Build capture request
+            from app.models import CaptureFilter as ModelCaptureFilter
+
+            capture_filter = None
+            if session.filter_config:
+                capture_filter = ModelCaptureFilter(**session.filter_config)
+
             capture_req = StartCaptureRequest(
                 device_type=target_info.device_type,
                 host=target_info.host,
@@ -249,27 +258,30 @@ class CaptureSessionManager:
                 password=password,
                 duration_sec=session.duration_sec,
                 interface=target_info.interface,
-                filter=session.filter_config,
+                filter=capture_filter,
                 packet_count=100000,
                 connect_timeout_sec=30,
             )
 
-            # Start the capture using existing capture service
-            capture_response = await self.capture_manager.start_capture(capture_req)
+            # Create the capture using existing capture service
+            capture = self.capture_manager.create_capture(capture_req)
+
+            # Start execution in background
+            asyncio.create_task(self.capture_manager.execute_capture(capture.capture_id))
 
             # Update target with capture info
-            session.capture_ids[target_info.host] = capture_response.capture_id
+            session.capture_ids[target_info.host] = capture.capture_id
             session.update_target_status(
                 target_info.host,
                 CaptureTargetStatus.CAPTURING,
                 message="Capture running",
-                capture_id=capture_response.capture_id,
+                capture_id=capture.capture_id,
                 capture_started_at=datetime.now(timezone.utc),
-                filename=capture_response.filename,
+                filename=capture.filename,
             )
 
             logger.info(
-                f"Started capture {capture_response.capture_id} for target {target_info.host} "
+                f"Started capture {capture.capture_id} for target {target_info.host} "
                 f"in session {session.session_id}"
             )
 
