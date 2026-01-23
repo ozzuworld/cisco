@@ -3,8 +3,10 @@
 import asyncio
 import logging
 import os
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
@@ -40,6 +42,12 @@ from app.models import (
     CaptureListResponse,  # Packet Capture
     StopCaptureResponse,  # Packet Capture
     CaptureStatus as CaptureStatusEnum,  # Packet Capture
+    StartCaptureSessionRequest,  # Capture Sessions
+    StartCaptureSessionResponse,  # Capture Sessions
+    CaptureSessionStatusResponse,  # Capture Sessions
+    CaptureSessionListResponse,  # Capture Sessions
+    StopCaptureSessionResponse,  # Capture Sessions
+    CaptureSessionStatus as CaptureSessionStatusEnum,  # Capture Sessions
     StartLogCollectionRequest,  # Log Collection
     StartLogCollectionResponse,  # Log Collection
     LogCollectionStatusResponse,  # Log Collection
@@ -72,6 +80,7 @@ from app.config import get_settings
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command
 from app.health_service import check_cluster_health  # Health Status
 from app.capture_service import get_capture_manager  # Packet Capture
+from app.capture_session_service import get_session_manager  # Capture Sessions
 from app.log_service import get_log_collection_manager  # Log Collection
 from app.sftp_server import start_sftp_server, stop_sftp_server, get_sftp_server  # Embedded SFTP
 
@@ -2194,6 +2203,411 @@ async def delete_capture(capture_id: str, request: Request):
         )
 
     return {"message": f"Capture {capture_id} deleted"}
+
+
+# ============================================================================
+# Capture Session Endpoints (Multi-Device Orchestration)
+# ============================================================================
+
+
+@app.post(
+    "/capture-sessions",
+    response_model=StartCaptureSessionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {"description": "Capture session created and starting"},
+        400: {
+            "description": "Invalid request",
+            "model": ErrorResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def start_capture_session(
+    request: StartCaptureSessionRequest,
+    req: Request,
+    background_tasks: BackgroundTasks
+):
+    """
+    Start a multi-device capture session.
+
+    Orchestrates packet captures across multiple devices (CUCM, CUBE, CSR, Expressway)
+    simultaneously. All captures use the same duration and optional filter settings.
+
+    Args:
+        request: Capture session request with targets and settings
+        req: FastAPI request object
+        background_tasks: Background tasks for async execution
+
+    Returns:
+        StartCaptureSessionResponse with session ID and initial status
+
+    Raises:
+        HTTPException: If validation fails or session cannot be created
+    """
+    request_id = get_request_id(req)
+    logger.info(
+        f"Starting capture session with {len(request.targets)} targets "
+        f"(request_id={request_id})"
+    )
+
+    try:
+        session_manager = get_session_manager()
+
+        # Create the session
+        session = session_manager.create_session(request)
+
+        # Start captures in background
+        background_tasks.add_task(session_manager.start_session, session, request)
+
+        return StartCaptureSessionResponse(
+            session_id=session.session_id,
+            status=session.status,
+            message=f"Capture session created with {len(request.targets)} targets",
+            created_at=session.created_at,
+            targets=session.targets,
+        )
+
+    except ValueError as e:
+        logger.error(f"Invalid capture session request: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error": "INVALID_REQUEST",
+                "message": str(e),
+                "request_id": request_id
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to create capture session: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "SESSION_START_FAILED",
+                "message": f"Failed to start capture session: {str(e)}",
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/capture-sessions",
+    response_model=CaptureSessionListResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "List of capture sessions"}
+    }
+)
+async def list_capture_sessions(
+    limit: int = 50,
+    req: Request = None
+):
+    """
+    List recent capture sessions.
+
+    Args:
+        limit: Maximum number of sessions to return (default: 50)
+        req: FastAPI request object
+
+    Returns:
+        CaptureSessionListResponse with list of sessions
+    """
+    request_id = get_request_id(req)
+    logger.info(f"Listing capture sessions (limit={limit}, request_id={request_id})")
+
+    session_manager = get_session_manager()
+    sessions = session_manager.list_sessions(limit=limit)
+
+    return CaptureSessionListResponse(
+        sessions=[s.to_info() for s in sessions],
+        total=len(sessions)
+    )
+
+
+@app.get(
+    "/capture-sessions/{session_id}",
+    response_model=CaptureSessionStatusResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Session status"},
+        404: {
+            "description": "Session not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_capture_session_status(session_id: str, request: Request):
+    """
+    Get status of a capture session.
+
+    Updates the session status by checking underlying capture statuses,
+    then returns the current state with timing information.
+
+    Args:
+        session_id: Session identifier
+        request: FastAPI request object
+
+    Returns:
+        CaptureSessionStatusResponse with session information
+
+    Raises:
+        HTTPException: If session not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Getting capture session status {session_id} (request_id={request_id})")
+
+    session_manager = get_session_manager()
+
+    # Update session status from underlying captures
+    await session_manager.update_session_status(session_id)
+
+    session = session_manager.get_session(session_id)
+
+    if not session:
+        logger.warning(f"Capture session {session_id} not found (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": f"Capture session {session_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    # Calculate timing information
+    download_available = session.status in [
+        CaptureSessionStatusEnum.COMPLETED,
+        CaptureSessionStatusEnum.PARTIAL
+    ]
+
+    elapsed_sec = None
+    remaining_sec = None
+    if session.status == CaptureSessionStatusEnum.CAPTURING and session.capture_started_at:
+        now = datetime.now(timezone.utc)
+        elapsed_td = now - session.capture_started_at
+        elapsed_sec = int(elapsed_td.total_seconds())
+        remaining_sec = max(0, session.duration_sec - elapsed_sec)
+
+    return CaptureSessionStatusResponse(
+        session=session.to_info(),
+        download_available=download_available,
+        elapsed_sec=elapsed_sec,
+        remaining_sec=remaining_sec
+    )
+
+
+@app.post(
+    "/capture-sessions/{session_id}/stop",
+    response_model=StopCaptureSessionResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Session stop initiated"},
+        404: {
+            "description": "Session not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def stop_capture_session(session_id: str, request: Request):
+    """
+    Stop a running capture session.
+
+    Stops all active captures in the session. Captures that have already
+    completed are not affected.
+
+    Args:
+        session_id: Session identifier
+        request: FastAPI request object
+
+    Returns:
+        StopCaptureSessionResponse with updated status
+
+    Raises:
+        HTTPException: If session not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Stopping capture session {session_id} (request_id={request_id})")
+
+    session_manager = get_session_manager()
+    session = await session_manager.stop_session(session_id)
+
+    if not session:
+        logger.warning(f"Capture session {session_id} not found (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": f"Capture session {session_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return StopCaptureSessionResponse(
+        session_id=session.session_id,
+        status=session.status,
+        message="Capture session stop initiated"
+    )
+
+
+@app.get(
+    "/capture-sessions/{session_id}/download",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Session bundle download"},
+        404: {
+            "description": "Session or bundle not found",
+            "model": ErrorResponse
+        },
+        409: {
+            "description": "Session not ready for download",
+            "model": ErrorResponse
+        }
+    }
+)
+async def download_capture_session_bundle(session_id: str, request: Request):
+    """
+    Download capture session bundle as ZIP.
+
+    Returns a ZIP file containing all completed captures from the session.
+    Only available when session status is COMPLETED or PARTIAL.
+
+    Args:
+        session_id: Session identifier
+        request: FastAPI request object
+
+    Returns:
+        FileResponse with ZIP bundle
+
+    Raises:
+        HTTPException: If session not found or not ready for download
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Downloading capture session bundle {session_id} (request_id={request_id})")
+
+    session_manager = get_session_manager()
+    session = session_manager.get_session(session_id)
+
+    if not session:
+        logger.warning(f"Capture session {session_id} not found (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": f"Capture session {session_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    # Check if session is ready for download
+    if session.status not in [CaptureSessionStatusEnum.COMPLETED, CaptureSessionStatusEnum.PARTIAL]:
+        logger.warning(
+            f"Capture session {session_id} not ready for download (status={session.status}, "
+            f"request_id={request_id})"
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "SESSION_NOT_READY",
+                "message": f"Session is not ready for download (status: {session.status})",
+                "request_id": request_id
+            }
+        )
+
+    # Create ZIP bundle with all completed captures
+    settings = get_settings()
+    capture_manager = get_capture_manager()
+
+    # Collect all completed capture files
+    capture_files = []
+    for target in session.targets:
+        if target.capture_id and target.status == "completed":
+            capture = capture_manager.get_capture(target.capture_id)
+            if capture:
+                capture_dir = Path(settings.artifacts_dir) / "captures"
+                capture_file = capture_dir / f"{capture.filename}.cap"
+                if capture_file.exists():
+                    capture_files.append((capture_file, f"{target.host}_{capture.filename}.cap"))
+
+    if not capture_files:
+        logger.warning(f"No capture files found for session {session_id} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "NO_CAPTURES_FOUND",
+                "message": "No completed capture files found in session",
+                "request_id": request_id
+            }
+        )
+
+    # Create ZIP bundle
+    bundle_filename = f"capture_session_{session_id[:8]}.zip"
+    bundle_path = Path(settings.artifacts_dir) / "sessions" / bundle_filename
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+
+    import zipfile
+    with zipfile.ZipFile(bundle_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for file_path, archive_name in capture_files:
+            zipf.write(file_path, archive_name)
+
+    # Update session with bundle filename
+    session.bundle_filename = bundle_filename
+
+    return FileResponse(
+        bundle_path,
+        filename=bundle_filename,
+        media_type="application/zip"
+    )
+
+
+@app.delete(
+    "/capture-sessions/{session_id}",
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Session deleted"},
+        404: {
+            "description": "Session not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def delete_capture_session(session_id: str, request: Request):
+    """
+    Delete a capture session.
+
+    Deletes the session metadata. Note: This does not delete the underlying
+    individual capture files. Use the individual capture delete endpoint if needed.
+
+    Args:
+        session_id: Session identifier
+        request: FastAPI request object
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException: If session not found
+    """
+    request_id = get_request_id(request)
+    logger.info(f"Deleting capture session {session_id} (request_id={request_id})")
+
+    session_manager = get_session_manager()
+    success = session_manager.delete_session(session_id)
+
+    if not success:
+        logger.warning(f"Capture session {session_id} not found for deletion (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": f"Capture session {session_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return {"message": f"Capture session {session_id} deleted"}
 
 
 # ============================================================================
