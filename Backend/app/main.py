@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Request, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -255,14 +256,56 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 MAX_RAW_OUTPUT_SIZE = 40 * 1024
 
 
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "service": "CUCM Log Collector",
-        "version": "0.3.3",
-        "status": "running"
-    }
+# ============================================================================
+# Frontend Static Files (if available)
+# ============================================================================
+
+# Check if frontend build exists and mount static files
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
+if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
+    logger.info(f"Mounting frontend static files from {FRONTEND_DIR}")
+
+    # Mount static assets (JS, CSS, images) with caching
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(FRONTEND_DIR / "assets")),
+        name="static"
+    )
+
+    # Serve index.html for root and all SPA routes
+    @app.get("/", include_in_schema=False)
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str = ""):
+        """
+        Serve the React SPA.
+
+        - API routes (starting with /api/, /discover-nodes, /jobs, etc.) are handled by their respective endpoints
+        - All other routes serve index.html for client-side routing
+        """
+        # Don't intercept API routes - let FastAPI handle them
+        if full_path.startswith(("health", "discover-nodes", "jobs", "captures", "capture-sessions",
+                                 "logs", "profiles", "trace-level", "cluster", "artifacts")):
+            # This shouldn't be reached, but just in case
+            raise HTTPException(status_code=404, detail="Not found")
+
+        index_file = FRONTEND_DIR / "index.html"
+        if not index_file.exists():
+            raise HTTPException(status_code=404, detail="Frontend not found")
+
+        return FileResponse(index_file)
+else:
+    logger.warning(f"Frontend build not found at {FRONTEND_DIR}, serving API only")
+
+    @app.get("/")
+    async def root():
+        """API-only health check endpoint"""
+        return {
+            "service": "CUCM Log Collector",
+            "version": "0.5.0",
+            "status": "running",
+            "mode": "api-only",
+            "message": "Frontend not available. Build frontend and restart to enable UI."
+        }
 
 
 @app.get("/health")

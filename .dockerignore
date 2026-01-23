@@ -1,0 +1,55 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+*.md
+!DOCKER_DEPLOYMENT.md
+docs/
+
+# Frontend development files
+frotend/node_modules/
+frotend/.env
+frotend/.env.local
+frotend/.env.development
+frotend/dist/
+
+# Backend development files
+Backend/__pycache__/
+Backend/.pytest_cache/
+Backend/**/__pycache__/
+Backend/**/*.pyc
+Backend/**/*.pyo
+Backend/**/*.pyd
+Backend/.Python
+Backend/venv/
+Backend/env/
+Backend/.env
+Backend/.env.local
+Backend/.env.development
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+Backend/tests/
+Backend/.coverage
+Backend/htmlcov/
+Backend/.pytest_cache/
+
+# Storage and runtime
+storage/
+*.log
+*.sqlite
+*.db
+
+# Docker
+docker-compose*.yml
+!docker-compose.yml
+Dockerfile.backup

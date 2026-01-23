@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cucm-log-collector:latest
+    container_name: cucm-log-collector
+    ports:
+      # Main application port (Frontend UI + API)
+      - "8000:8000"
+      # SFTP server port (for CUCM to upload files)
+      - "2222:2222"
+    volumes:
+      # Persist storage across container restarts
+      - ./storage:/app/storage
+      # Optional: Mount profiles.yaml for customization
+      - ./Backend/profiles.yaml:/app/profiles.yaml:ro
+    environment:
+      # ======================================
+      # Application Settings
+      # ======================================
+      - ARTIFACTS_DIR=/app/storage/received
+      - JOBS_DIR=/app/storage/jobs
+      - TRANSCRIPT_DIR=/app/storage/transcripts
+
+      # ======================================
+      # SFTP Server Settings
+      # ======================================
+      - SFTP_SERVER_ENABLED=true
+      - SFTP_SERVER_HOST=0.0.0.0
+      - SFTP_SERVER_PORT=2222
+      - SFTP_ROOT_PATH=/app/storage/received
+      - SFTP_USERNAME=cucm
+      - SFTP_PASSWORD=cisco123
+
+      # ======================================
+      # Security Settings
+      # ======================================
+      # Uncomment to enable API key authentication
+      # - API_KEY=your-secret-api-key-here
+
+      # CORS settings (default allows all origins)
+      - CORS_ALLOWED_ORIGINS=.*
+
+      # ======================================
+      # Logging
+      # ======================================
+      - LOG_LEVEL=INFO
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Resource limits (optional - adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  # Named volume for persistence (optional, using bind mount above)
+  storage:
+    driver: local
+
+networks:
+  default:
+    name: cucm-network
