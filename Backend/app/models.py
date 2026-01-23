@@ -1182,6 +1182,192 @@ class StopCaptureResponse(BaseModel):
 
 
 # ============================================================================
+# Capture Session Models (Multi-Device Orchestration)
+# ============================================================================
+
+
+class CaptureSessionStatus(str, Enum):
+    """Status of an orchestrated capture session"""
+    PENDING = "pending"          # Created, not started
+    CONFIGURING = "configuring"  # Connecting to devices, configuring
+    READY = "ready"              # All devices ready
+    STARTING = "starting"        # Sending start commands
+    CAPTURING = "capturing"      # Active capture in progress
+    STOPPING = "stopping"        # Stopping captures
+    COLLECTING = "collecting"    # Retrieving files from devices
+    COMPLETED = "completed"      # Done - all succeeded
+    PARTIAL = "partial"          # Some devices succeeded
+    FAILED = "failed"            # All devices failed
+    CANCELLED = "cancelled"      # User cancelled
+
+
+class CaptureTargetStatus(str, Enum):
+    """Status of a single target in a capture session"""
+    PENDING = "pending"
+    CONFIGURING = "configuring"
+    READY = "ready"
+    CAPTURING = "capturing"
+    STOPPING = "stopping"
+    COLLECTING = "collecting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CaptureTargetRequest(BaseModel):
+    """Request for a single device target in a multi-device capture session"""
+
+    device_type: CaptureDeviceType = Field(
+        ...,
+        description="Type of device (cucm, cube, csr1000v, expressway)"
+    )
+    host: str = Field(
+        ...,
+        description="IP address or FQDN of the device"
+    )
+    port: Optional[int] = Field(
+        default=None,
+        description="SSH port (defaults by device type: cucm/cube/csr=22, expressway=443)",
+        ge=1,
+        le=65535
+    )
+    interface: Optional[str] = Field(
+        default=None,
+        description="Network interface (defaults by device: cucm/expressway=eth0, cube/csr=GigabitEthernet1)"
+    )
+    username: Optional[str] = Field(
+        default=None,
+        description="Device-specific username (falls back to session global credentials)"
+    )
+    password: Optional[str] = Field(
+        default=None,
+        description="Device-specific password (falls back to session global credentials)"
+    )
+
+
+class StartCaptureSessionRequest(BaseModel):
+    """Request to start a multi-device capture session"""
+
+    name: Optional[str] = Field(
+        default=None,
+        description="Optional session name",
+        max_length=100
+    )
+    duration_sec: int = Field(
+        ...,
+        description="Capture duration in seconds",
+        ge=10,
+        le=600
+    )
+    filter: Optional[CaptureFilter] = Field(
+        default=None,
+        description="Optional capture filters (applied to all targets)"
+    )
+    targets: List[CaptureTargetRequest] = Field(
+        ...,
+        description="List of device targets to capture from",
+        min_length=1
+    )
+    username: Optional[str] = Field(
+        default=None,
+        description="Global username (fallback for targets without credentials)"
+    )
+    password: Optional[str] = Field(
+        default=None,
+        description="Global password (fallback for targets without credentials)"
+    )
+
+    @field_validator("targets")
+    @classmethod
+    def validate_targets(cls, v: List[CaptureTargetRequest]) -> List[CaptureTargetRequest]:
+        if not v or len(v) == 0:
+            raise ValueError("At least one target is required")
+        if len(v) > 10:
+            raise ValueError("Maximum 10 targets allowed per session")
+        return v
+
+
+class CaptureTargetInfo(BaseModel):
+    """Information about a single target in a capture session"""
+
+    device_type: CaptureDeviceType = Field(..., description="Device type")
+    host: str = Field(..., description="Device host")
+    port: int = Field(..., description="SSH port")
+    interface: str = Field(..., description="Network interface")
+    status: CaptureTargetStatus = Field(..., description="Target status")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    message: Optional[str] = Field(None, description="Status message")
+    config_started_at: Optional[datetime] = Field(None, description="When configuration started")
+    capture_started_at: Optional[datetime] = Field(None, description="When capture started")
+    capture_stopped_at: Optional[datetime] = Field(None, description="When capture stopped")
+    completed_at: Optional[datetime] = Field(None, description="When target completed")
+    packets_captured: Optional[int] = Field(None, description="Number of packets captured")
+    file_size_bytes: Optional[int] = Field(None, description="Capture file size")
+    filename: Optional[str] = Field(None, description="Capture filename")
+    capture_id: Optional[str] = Field(None, description="Underlying capture ID")
+
+
+class CaptureSessionInfo(BaseModel):
+    """Information about a capture session"""
+
+    session_id: str = Field(..., description="Unique session identifier")
+    name: Optional[str] = Field(None, description="Session name")
+    status: CaptureSessionStatus = Field(..., description="Current session status")
+    created_at: datetime = Field(..., description="When session was created")
+    capture_started_at: Optional[datetime] = Field(None, description="When captures started")
+    completed_at: Optional[datetime] = Field(None, description="When session completed")
+    duration_sec: int = Field(..., description="Capture duration")
+    targets: List[CaptureTargetInfo] = Field(
+        default_factory=list,
+        description="List of capture targets"
+    )
+    bundle_filename: Optional[str] = Field(None, description="ZIP bundle filename")
+
+
+class StartCaptureSessionResponse(BaseModel):
+    """Response when starting a capture session"""
+
+    session_id: str = Field(..., description="Unique session identifier")
+    status: CaptureSessionStatus = Field(..., description="Initial session status")
+    message: str = Field(..., description="Status message")
+    created_at: datetime = Field(..., description="When session was created")
+    targets: List[CaptureTargetInfo] = Field(
+        default_factory=list,
+        description="Initial target information"
+    )
+
+
+class CaptureSessionStatusResponse(BaseModel):
+    """Response for capture session status query"""
+
+    session: CaptureSessionInfo = Field(..., description="Session information")
+    download_available: bool = Field(
+        default=False,
+        description="Whether the bundle is available for download"
+    )
+    elapsed_sec: Optional[int] = Field(None, description="Elapsed time during capture")
+    remaining_sec: Optional[int] = Field(None, description="Remaining time during capture")
+
+
+class CaptureSessionListResponse(BaseModel):
+    """Response for listing capture sessions"""
+
+    sessions: List[CaptureSessionInfo] = Field(
+        default_factory=list,
+        description="List of capture sessions"
+    )
+    total: int = Field(default=0, description="Total number of sessions")
+
+
+class StopCaptureSessionResponse(BaseModel):
+    """Response when stopping a capture session"""
+
+    session_id: str = Field(..., description="Session identifier")
+    status: CaptureSessionStatus = Field(..., description="Session status after stop")
+    message: str = Field(..., description="Status message")
+
+
+# ============================================================================
 # Log Collection Models
 # ============================================================================
 
