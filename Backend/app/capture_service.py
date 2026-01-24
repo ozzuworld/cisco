@@ -655,7 +655,7 @@ class CaptureManager:
         the capture file directly. This works in VPN/NAT scenarios where
         CUCM cannot connect back to the client.
 
-        The capture file is stored at: /activelog/platform/cli/<filename>.cap
+        The capture file is stored at: activelog/platform/cli/<filename>.cap
 
         Args:
             client: Connected SSH client (used for credentials)
@@ -665,7 +665,8 @@ class CaptureManager:
 
         settings = get_settings()
         capture_file = f"{capture.filename}.cap"
-        remote_path = f"/activelog/platform/cli/{capture_file}"
+        # CUCM SFTP uses paths relative to root, try without leading slash
+        remote_path = f"activelog/platform/cli/{capture_file}"
 
         try:
             # Check if stop was requested before starting retrieval
@@ -700,10 +701,21 @@ class CaptureManager:
                         logger.info(f"Capture {capture.capture_id} stop requested during SFTP")
                         return
 
+                    # Try to stat the file first to verify it exists
+                    try:
+                        file_stat = await sftp.stat(remote_path)
+                        logger.info(f"Found capture file: {remote_path}, size: {file_stat.size} bytes")
+                    except asyncssh.SFTPNoSuchFile:
+                        # Try with leading slash
+                        remote_path = f"/{remote_path}"
+                        logger.info(f"Trying alternate path: {remote_path}")
+                        file_stat = await sftp.stat(remote_path)
+                        logger.info(f"Found capture file: {remote_path}, size: {file_stat.size} bytes")
+
                     logger.info(f"SFTP connected, downloading {remote_path} to {local_file}")
 
-                    # Download the file
-                    await sftp.get(remote_path, str(local_file))
+                    # Download the file with block_size to handle large files
+                    await sftp.get(remote_path, str(local_file), block_size=65536)
 
                     logger.info(f"SFTP download complete: {local_file}")
 
