@@ -870,7 +870,7 @@ class CaptureManager:
                             logger.info("SFTP client started, searching for file...")
 
                             # Search for the capture file
-                            # File will be directly in relay_directory (SFTP server doesn't allow subdir creation)
+                            # CUCM creates: <base>/<cucm-ip>/<timestamp>/platform/cli/<file>.cap
                             relay_file_path = None
                             search_dir = relay_directory if relay_directory else "."
 
@@ -883,29 +883,47 @@ class CaptureManager:
                             except Exception as e:
                                 logger.debug(f"File not at direct path {direct_path}: {e}")
 
-                            # If not found, list directory and search for any matching .cap file
+                            # If not found, list directory and search recursively
                             if not relay_file_path:
                                 logger.info(f"Listing relay directory: {search_dir}")
                                 try:
                                     entries = await sftp.readdir(search_dir)
                                     logger.info(f"Found {len(entries)} entries in {search_dir}")
 
-                                    # Look for our capture file or any recent .cap file
                                     for entry in entries:
                                         filename = entry.filename
+                                        if filename in ('.', '..'):
+                                            continue
                                         logger.info(f"  Entry: {filename}")
 
-                                        # Check if it's our capture file
+                                        # Check if it's our capture file directly
                                         if filename == capture_file:
                                             relay_file_path = f"{search_dir}/{filename}" if relay_directory else filename
                                             logger.info(f"Found exact match: {relay_file_path}")
                                             break
 
-                                        # Also check for .cap files that might match our capture name
-                                        if filename.endswith('.cap') and capture.filename in filename:
-                                            relay_file_path = f"{search_dir}/{filename}" if relay_directory else filename
-                                            logger.info(f"Found matching .cap file: {relay_file_path}")
-                                            break
+                                        # CUCM creates subdirs: <cucm-ip>/<timestamp>/platform/cli/<file>.cap
+                                        # Search recursively in subdirectories
+                                        subdir_path = f"{search_dir}/{filename}"
+                                        try:
+                                            # List the CUCM IP directory for timestamp subdirs
+                                            sub_entries = await sftp.readdir(subdir_path)
+                                            for sub_entry in sub_entries:
+                                                if sub_entry.filename in ('.', '..'):
+                                                    continue
+                                                # Check platform/cli path under timestamp
+                                                cli_path = f"{subdir_path}/{sub_entry.filename}/platform/cli/{capture_file}"
+                                                try:
+                                                    await sftp.stat(cli_path)
+                                                    relay_file_path = cli_path
+                                                    logger.info(f"Found file in CUCM structure: {cli_path}")
+                                                    break
+                                                except:
+                                                    pass
+                                            if relay_file_path:
+                                                break
+                                        except Exception as sub_e:
+                                            logger.debug(f"Could not search {subdir_path}: {sub_e}")
 
                                 except Exception as e:
                                     logger.warning(f"Error listing {search_dir}: {e}")
