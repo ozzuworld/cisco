@@ -827,7 +827,7 @@ class CaptureManager:
 
                     # Handle prompts
                     try:
-                        await asyncio.wait_for(
+                        cucm_transcript = await asyncio.wait_for(
                             responder.respond_to_prompts(
                                 shell.stdin,
                                 shell.stdout,
@@ -835,12 +835,19 @@ class CaptureManager:
                             ),
                             timeout=SFTP_PROMPT_TIMEOUT
                         )
+                        # Log CUCM upload transcript
+                        if cucm_transcript:
+                            transcript_tail = cucm_transcript[-500:] if len(cucm_transcript) > 500 else cucm_transcript
+                            logger.info(f"CUCM upload transcript for {cap_file}:")
+                            for line in transcript_tail.split('\n'):
+                                if line.strip():
+                                    logger.info(f"  CUCM: {line.strip()}")
                     except asyncio.TimeoutError:
                         logger.warning(f"Timeout uploading {cap_file} to relay")
                         continue
 
                 # Wait for upload to complete
-                await asyncio.sleep(2.0)
+                await asyncio.sleep(3.0)
 
                 # Download from relay
                 try:
@@ -872,12 +879,13 @@ class CaptureManager:
                                 if not relay_file_path:
                                     try:
                                         entries = await sftp.readdir(search_dir)
-                                        logger.info(f"Found {len(entries)} entries in {search_dir}")
+                                        entry_names = [e.filename for e in entries if e.filename not in ('.', '..')]
+                                        logger.info(f"Found {len(entry_names)} entries in {search_dir}: {entry_names}")
                                         for entry in entries:
                                             filename = entry.filename
                                             if filename in ('.', '..'):
                                                 continue
-                                            logger.debug(f"  Checking entry: {filename}")
+                                            logger.info(f"  Checking entry: {filename}")
 
                                             # Check if it's the file directly
                                             if filename == cap_file:
@@ -889,23 +897,58 @@ class CaptureManager:
                                             subdir_path = f"{search_dir}/{filename}"
                                             try:
                                                 sub_entries = await sftp.readdir(subdir_path)
+                                                sub_names = [e.filename for e in sub_entries if e.filename not in ('.', '..')]
+                                                logger.info(f"    Sub-entries in {subdir_path}: {sub_names}")
                                                 for sub_entry in sub_entries:
                                                     if sub_entry.filename in ('.', '..'):
                                                         continue
                                                     cli_path = f"{subdir_path}/{sub_entry.filename}/platform/cli/{cap_file}"
+                                                    logger.info(f"    Checking path: {cli_path}")
                                                     try:
                                                         await sftp.stat(cli_path)
                                                         relay_file_path = cli_path
                                                         logger.info(f"Found file in CUCM structure: {cli_path}")
                                                         break
-                                                    except:
-                                                        pass
+                                                    except Exception as path_e:
+                                                        logger.info(f"    Not found at {cli_path}")
                                                 if relay_file_path:
                                                     break
                                             except Exception as sub_e:
-                                                logger.debug(f"Could not search {subdir_path}: {sub_e}")
+                                                logger.info(f"Could not search {subdir_path}: {sub_e}")
                                     except Exception as e:
                                         logger.warning(f"Error searching for {cap_file}: {e}")
+
+                                # If still not found, do a thorough recursive search
+                                if not relay_file_path:
+                                    logger.info(f"File not found in expected locations, doing recursive search...")
+
+                                    async def recursive_search(sftp_client, directory: str, target_file: str, depth: int = 0, max_depth: int = 5) -> str | None:
+                                        """Recursively search for a file in directory tree."""
+                                        if depth > max_depth:
+                                            return None
+                                        try:
+                                            entries = await sftp_client.readdir(directory)
+                                            for entry in entries:
+                                                if entry.filename in ('.', '..'):
+                                                    continue
+                                                full_path = f"{directory}/{entry.filename}"
+                                                if entry.filename == target_file:
+                                                    logger.info(f"  Found {target_file} at {full_path}")
+                                                    return full_path
+                                                # Check if it's a directory and recurse
+                                                try:
+                                                    attrs = await sftp_client.stat(full_path)
+                                                    if attrs.permissions and (attrs.permissions & 0o040000):  # Is directory
+                                                        result = await recursive_search(sftp_client, full_path, target_file, depth + 1, max_depth)
+                                                        if result:
+                                                            return result
+                                                except:
+                                                    pass
+                                        except Exception as e:
+                                            logger.debug(f"  Could not search {directory}: {e}")
+                                        return None
+
+                                    relay_file_path = await recursive_search(sftp, search_dir, cap_file)
 
                                 if relay_file_path:
                                     logger.info(f"Downloading {cap_file} from relay: {relay_file_path}")
@@ -923,7 +966,7 @@ class CaptureManager:
                                         except:
                                             pass
                                 else:
-                                    logger.warning(f"Could not find {cap_file} on relay")
+                                    logger.warning(f"Could not find {cap_file} on relay after recursive search")
 
                 except Exception as e:
                     logger.warning(f"Failed to download {cap_file} from relay: {e}")
