@@ -236,12 +236,14 @@ class PromptResponder:
                         transcript_file.flush()
 
                     # Check for transfer completion indicators
-                    if "Transfer completed" in buffer or "done." in buffer.lower():
-                        logger.info("Transfer completion detected")
-                        # Continue reading to consume the shell prompt
-                        if prompt in buffer:
-                            logger.info("Shell prompt detected after transfer completion")
-                            break
+                    # Only check AFTER prompts are answered to avoid false positives
+                    if prompts_completed:
+                        if "Transfer completed" in buffer or "100%" in buffer:
+                            logger.info("Transfer completion detected")
+                            # Continue reading to consume the shell prompt
+                            if prompt in buffer:
+                                logger.info("Shell prompt detected after transfer completion")
+                                break
 
                     # Check if we've seen the shell prompt
                     if prompt in buffer and not saw_prompt:
