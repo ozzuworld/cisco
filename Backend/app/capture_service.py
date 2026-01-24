@@ -803,13 +803,14 @@ class CaptureManager:
 
             # Get the shell session for interactive command
             shell = client._session
+            cucm_transcript = ""
             if shell:
                 # Send the command
                 shell.stdin.write(f"{get_cmd}\n")
                 await shell.stdin.drain()
 
                 # Handle prompts with timeout
-                await asyncio.wait_for(
+                cucm_transcript = await asyncio.wait_for(
                     responder.respond_to_prompts(
                         shell.stdin,
                         shell.stdout,
@@ -819,8 +820,24 @@ class CaptureManager:
                     timeout=SFTP_PROMPT_TIMEOUT
                 )
 
-            # Wait for SFTP transfer to complete
-            logger.info("CUCM upload to relay complete, now downloading from relay...")
+                # Log CUCM output to help diagnose transfer issues
+                logger.info(f"CUCM file get transcript ({len(cucm_transcript)} bytes):")
+                # Log last 1000 chars which should contain the result
+                if cucm_transcript:
+                    transcript_tail = cucm_transcript[-1000:] if len(cucm_transcript) > 1000 else cucm_transcript
+                    for line in transcript_tail.split('\n'):
+                        if line.strip():
+                            logger.info(f"  CUCM: {line.strip()}")
+
+            # Check if CUCM reported any errors in the transcript
+            transcript_lower = cucm_transcript.lower()
+            if "error" in transcript_lower or "failed" in transcript_lower or "denied" in transcript_lower:
+                logger.warning("CUCM may have reported an error during upload - check transcript above")
+            elif "100%" in transcript_lower or "transfer completed" in transcript_lower:
+                logger.info("CUCM transfer appears successful")
+            else:
+                logger.info("CUCM upload to relay appears complete")
+
             await asyncio.sleep(2.0)
 
             # Check if stop was requested
