@@ -267,7 +267,7 @@ The implementation handles:
 
 3. **Deploy Frontend**
    ```bash
-   cd frotend
+   cd frontend
    npm install
    npm run dev
    ```

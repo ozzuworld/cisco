@@ -436,7 +436,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 # Frontend (separate terminal)
-cd frotend
+cd frontend
 npm install
 npm run dev  # Runs on port 5173
 ```
@@ -444,7 +444,7 @@ npm run dev  # Runs on port 5173
 ### Build Frontend Manually
 
 ```bash
-cd frotend
+cd frontend
 npm run build
 # Output: dist/
 ```
@@ -454,7 +454,7 @@ npm run build
 ```bash
 cd Backend
 # Copy built frontend
-cp -r ../frotend/dist ../frontend/dist
+cp -r ../frontend/dist ./frontend/dist
 # Run FastAPI
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```

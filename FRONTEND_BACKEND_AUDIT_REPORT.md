@@ -25,9 +25,9 @@ The "Voice Quality" tab (labeled as "Captures" in the hamburger menu) calls **or
 **Note:** The typo "cap-sessions" and the "1" suffix appear to be URL encoding/concatenation issues in the frontend, but the underlying issue is that `/capture-sessions` endpoints don't exist at all.
 
 ### Affected Frontend Page
-- **File:** `frotend/src/pages/CaptureSession.tsx` (1,483 lines)
+- **File:** `frontend/src/pages/CaptureSession.tsx` (1,483 lines)
 - **Route:** `/captures` (via hamburger menu: "Captures")
-- **Service:** `frotend/src/services/captureService.ts` (lines 65-134)
+- **Service:** `frontend/src/services/captureService.ts` (lines 65-134)
 
 ---
 
@@ -150,7 +150,7 @@ These endpoints may work but have different implementations or are unused:
 - `/capture-sessions` endpoints attempt to coordinate captures across **multiple devices**
 - Provides a wizard to select multiple targets
 - Aggregates results and downloads as ZIP bundles
-- File: `frotend/src/pages/CaptureSession.tsx`
+- File: `frontend/src/pages/CaptureSession.tsx`
 
 ### The Disconnect
 
@@ -204,8 +204,8 @@ The backend was built with a **single-device model** where users can:
 4. Remove session aggregation views
 
 **Implementation approach:**
-- Modify `frotend/src/pages/CaptureSession.tsx`
-- Update `frotend/src/services/captureService.ts` to remove session calls
+- Modify `frontend/src/pages/CaptureSession.tsx`
+- Update `frontend/src/services/captureService.ts` to remove session calls
 - Simplify UI to match backend capabilities
 - Estimated effort: 1-2 days of development
 
