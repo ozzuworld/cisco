@@ -782,11 +782,12 @@ class CaptureManager:
             if not relay_host:
                 raise ValueError("SFTP_HOST must be configured for relay mode")
 
-            # Build relay directory path
-            sftp_base = settings.sftp_remote_base_dir or ""
-            relay_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
+            # Use base directory only - CUCM cannot create subdirectories on most SFTP servers
+            # CUCM will create its own structure: <base>/<hostname>/<timestamp>/platform/cli/file.cap
+            relay_directory = settings.sftp_remote_base_dir or ""
 
-            logger.info(f"Relay mode: CUCM will upload to {relay_host}:{relay_port}/{relay_directory}")
+            logger.info(f"Relay mode: CUCM will upload to {relay_host}:{relay_port}/{relay_directory or '(root)'}")
+            logger.info(f"CUCM will create subdirs: {relay_directory}/<hostname>/<timestamp>/platform/cli/")
 
             # Set up prompt responder to tell CUCM to upload to relay server
             responder = PromptResponder(
