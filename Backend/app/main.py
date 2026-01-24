@@ -283,7 +283,14 @@ else:
 
 @app.get("/")
 async def root():
-    """Root endpoint - returns service info"""
+    """Root endpoint - serve frontend or return service info"""
+    # Serve frontend if available
+    if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
+        index_file = FRONTEND_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+
+    # Fallback to API info if no frontend
     return {
         "service": "CUCM Log Collector",
         "version": "0.5.0",
