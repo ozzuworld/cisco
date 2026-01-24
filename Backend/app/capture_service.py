@@ -403,15 +403,24 @@ class CaptureManager:
                     except Exception as recovery_error:
                         logger.warning(f"Session recovery failed: {recovery_error}")
 
-                # Check for cancellation before file retrieval
-                if capture._cancelled:
-                    capture.status = CaptureStatus.CANCELLED
-                    capture.message = "Capture cancelled"
+                # Check for cancellation/stop before file retrieval
+                if capture._cancelled or capture._stop_event.is_set():
+                    logger.info(f"Capture {capture_id} stopped before file retrieval")
+                    capture.status = CaptureStatus.STOPPED
+                    capture.message = "Capture stopped by user"
                     capture.completed_at = datetime.now(timezone.utc)
                     return
 
                 # Give CUCM a moment to finish writing the capture file
                 await asyncio.sleep(2.0)
+
+                # Check again after sleep
+                if capture._cancelled or capture._stop_event.is_set():
+                    logger.info(f"Capture {capture_id} stopped before file retrieval")
+                    capture.status = CaptureStatus.STOPPED
+                    capture.message = "Capture stopped by user"
+                    capture.completed_at = datetime.now(timezone.utc)
+                    return
 
                 # Retrieve the capture file
                 capture.message = "Retrieving capture file..."
@@ -483,6 +492,11 @@ class CaptureManager:
         remote_path = f"platform/cli/{capture_file}"
 
         try:
+            # Check if stop was requested before starting retrieval
+            if capture._stop_event.is_set() or capture._cancelled:
+                logger.info(f"Capture {capture.capture_id} stop requested, skipping file retrieval")
+                return
+
             # First, list the file to verify it exists and get size
             list_cmd = f"file list activelog {remote_path} detail"
             logger.info(f"Listing capture file: {list_cmd}")
@@ -519,6 +533,11 @@ class CaptureManager:
                     logger.info(f"Created nested SFTP directory: {sftp_upload_dir_nested}")
             except Exception as e:
                 logger.warning(f"Failed to create SFTP upload directory: {e}")
+
+            # Check again before starting SFTP transfer
+            if capture._stop_event.is_set() or capture._cancelled:
+                logger.info(f"Capture {capture.capture_id} stop requested, skipping SFTP transfer")
+                return
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
