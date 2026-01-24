@@ -778,10 +778,12 @@ class CaptureManager:
             logger.info(f"File list output:\n{output}")
 
             # Parse file list to find all .cap files
+            # Rotating captures use .cap0, .cap1, etc. (rotation number suffix)
             cap_files = []
             for line in output.split('\n'):
                 if '.cap' in line and base_filename in line:
-                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap)', line)
+                    # Match files like capture_YYYYMMDD_HHMMSS.cap or capture_YYYYMMDD_HHMMSS.cap0
+                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap\d*)', line)
                     if match:
                         cap_files.append(match.group(1))
 
