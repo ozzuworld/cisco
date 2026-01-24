@@ -2422,7 +2422,9 @@ async def get_capture_session_status(session_id: str, request: Request):
         now = datetime.now(timezone.utc)
         elapsed_td = now - session.capture_started_at
         elapsed_sec = int(elapsed_td.total_seconds())
-        remaining_sec = max(0, session.duration_sec - elapsed_sec)
+        # Only calculate remaining time for standard mode (when duration_sec is set)
+        if session.duration_sec is not None:
+            remaining_sec = max(0, session.duration_sec - elapsed_sec)
 
     return CaptureSessionStatusResponse(
         session=session.to_info(),
