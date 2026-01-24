@@ -839,65 +839,91 @@ class CaptureManager:
 
             logger.info(f"Connecting to relay server {relay_host}:{relay_port} to download file")
 
-            async with asyncssh.connect(
-                host=relay_host,
-                port=relay_port,
-                username=relay_username,
-                password=relay_password,
-                known_hosts=None,
-            ) as conn:
-                async with conn.start_sftp_client() as sftp:
-                    # Search for the capture file in the relay directory
-                    relay_file_path = None
+            try:
+                async with asyncio.timeout(60):  # 60 second timeout for relay download
+                    async with asyncssh.connect(
+                        host=relay_host,
+                        port=relay_port,
+                        username=relay_username,
+                        password=relay_password,
+                        known_hosts=None,
+                    ) as conn:
+                        logger.info("Connected to relay server")
+                        async with conn.start_sftp_client() as sftp:
+                            logger.info("SFTP client started, searching for file...")
 
-                    # Try to find the file - CUCM creates nested directories
-                    async def find_file(dir_path: str, filename: str) -> str:
-                        """Recursively search for file in directory"""
-                        try:
-                            entries = await sftp.readdir(dir_path)
-                            for entry in entries:
-                                entry_path = f"{dir_path}/{entry.filename}"
-                                if entry.filename == filename:
-                                    return entry_path
-                                if entry.attrs.type == asyncssh.FILEXFER_TYPE_DIRECTORY:
-                                    result = await find_file(entry_path, filename)
-                                    if result:
-                                        return result
-                        except Exception as e:
-                            logger.debug(f"Error searching {dir_path}: {e}")
-                        return None
+                            # Search for the capture file
+                            # CUCM creates: <relay_directory>/<host>/<timestamp>/platform/cli/<file>.cap
+                            relay_file_path = None
 
-                    # Search in the upload directory
-                    relay_file_path = await find_file(relay_directory, capture_file)
-
-                    if not relay_file_path:
-                        # Try root directory in case CUCM uploaded there
-                        relay_file_path = await find_file(".", capture_file)
-
-                    if relay_file_path:
-                        logger.info(f"Found file on relay: {relay_file_path}")
-                        await sftp.get(relay_file_path, str(local_file))
-                        logger.info(f"Downloaded from relay to {local_file}")
-
-                        # Verify file
-                        if local_file.exists():
-                            capture.local_file_path = local_file
-                            capture.file_size_bytes = local_file.stat().st_size
-                            capture.message = f"Capture file retrieved: {capture_file}"
-                            logger.info(f"Retrieved capture file: {local_file} ({capture.file_size_bytes} bytes)")
-
-                            # Optionally delete from relay to save space
+                            # First, try direct path in case CUCM put it there
+                            direct_path = f"{relay_directory}/{capture_file}"
                             try:
-                                await sftp.remove(relay_file_path)
-                                logger.info(f"Cleaned up relay file: {relay_file_path}")
-                            except Exception as e:
-                                logger.debug(f"Could not delete relay file: {e}")
-                        else:
-                            logger.warning(f"File not found after download: {local_file}")
-                            capture.message = "Capture complete, relay download failed"
-                    else:
-                        logger.warning(f"Capture file not found on relay server")
-                        capture.message = "Capture complete, file not found on relay"
+                                await sftp.stat(direct_path)
+                                relay_file_path = direct_path
+                                logger.info(f"Found file at direct path: {direct_path}")
+                            except:
+                                logger.debug(f"File not at direct path: {direct_path}")
+
+                            # If not found, list the directory and search
+                            if not relay_file_path:
+                                logger.info(f"Listing relay directory: {relay_directory}")
+                                try:
+                                    # List the relay directory
+                                    entries = await sftp.readdir(relay_directory)
+                                    logger.info(f"Found {len(entries)} entries in {relay_directory}")
+
+                                    for entry in entries:
+                                        logger.debug(f"  Entry: {entry.filename}")
+                                        # CUCM puts files in: <host>/<timestamp>/platform/cli/<file>.cap
+                                        # Try to find the .cap file recursively (simplified)
+                                        subdir = f"{relay_directory}/{entry.filename}"
+                                        try:
+                                            sub_entries = await sftp.readdir(subdir)
+                                            for sub in sub_entries:
+                                                # Check platform/cli path
+                                                cli_path = f"{subdir}/{sub.filename}/platform/cli/{capture_file}"
+                                                try:
+                                                    await sftp.stat(cli_path)
+                                                    relay_file_path = cli_path
+                                                    logger.info(f"Found file at: {cli_path}")
+                                                    break
+                                                except:
+                                                    pass
+                                            if relay_file_path:
+                                                break
+                                        except:
+                                            pass
+                                except Exception as e:
+                                    logger.warning(f"Error listing {relay_directory}: {e}")
+
+                            if relay_file_path:
+                                logger.info(f"Downloading from relay: {relay_file_path}")
+                                await sftp.get(relay_file_path, str(local_file))
+                                logger.info(f"Downloaded from relay to {local_file}")
+
+                                # Verify file
+                                if local_file.exists():
+                                    capture.local_file_path = local_file
+                                    capture.file_size_bytes = local_file.stat().st_size
+                                    capture.message = f"Capture file retrieved: {capture_file}"
+                                    logger.info(f"Retrieved capture file: {local_file} ({capture.file_size_bytes} bytes)")
+
+                                    # Optionally delete from relay to save space
+                                    try:
+                                        await sftp.remove(relay_file_path)
+                                        logger.info(f"Cleaned up relay file: {relay_file_path}")
+                                    except Exception as e:
+                                        logger.debug(f"Could not delete relay file: {e}")
+                                else:
+                                    logger.warning(f"File not found after download: {local_file}")
+                                    capture.message = "Capture complete, relay download failed"
+                            else:
+                                logger.warning(f"Capture file not found on relay server")
+                                capture.message = "Capture complete, file not found on relay"
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout connecting to relay server")
+                capture.message = "Capture complete, relay connection timed out"
 
         except asyncio.TimeoutError:
             logger.warning(f"Timeout during relay transfer for {capture.capture_id}")
