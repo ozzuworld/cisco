@@ -430,6 +430,7 @@ class CaptureManager:
 
                 # Retrieve the capture file
                 capture.message = "Retrieving capture file..."
+                settings = get_settings()
                 if settings.sftp_pull_mode:
                     # Pull mode: connect TO CUCM's SFTP and download (VPN-friendly)
                     logger.info("Using SFTP pull mode (downloading from CUCM)")
