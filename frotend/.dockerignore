@@ -1,0 +1,36 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Git
+.git
+.gitignore
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files (build args should be used instead)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Testing
+coverage
+
+# Documentation
+README.md
+*.md
+
+# Docker files (no need to copy into build context)
+Dockerfile
+docker-compose*.yml
+.dockerignore
