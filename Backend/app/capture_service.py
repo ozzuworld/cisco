@@ -380,6 +380,8 @@ class CaptureManager:
                 await asyncio.sleep(1.0)
 
                 # Read the output until we get the prompt back
+                # After Ctrl+C, the session might need recovery if prompt isn't seen
+                output = ""
                 try:
                     output = await client.read_until_prompt(timeout=30.0)
                     logger.debug(f"Capture output: {output[:200]}...")
@@ -393,7 +395,13 @@ class CaptureManager:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to read capture output: {e}")
-                    output = ""
+                    # Try to recover the session by sending newline and waiting for prompt
+                    logger.info(f"Attempting session recovery for {capture_id}")
+                    try:
+                        await client.recover_session()
+                        logger.info(f"Session recovered for {capture_id}")
+                    except Exception as recovery_error:
+                        logger.warning(f"Session recovery failed: {recovery_error}")
 
                 # Check for cancellation before file retrieval
                 if capture._cancelled:
