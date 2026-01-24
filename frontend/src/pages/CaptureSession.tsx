@@ -35,6 +35,8 @@ import {
   TableHead,
   TableRow,
   alpha,
+  ToggleButton,
+  ToggleButtonGroup,
 } from '@mui/material'
 import {
   Phone as CucmIcon,
@@ -65,11 +67,14 @@ import {
   Cable,
   FilterAlt,
   FiberManualRecord,
+  Loop,
+  Storage,
 } from '@mui/icons-material'
 import { useSnackbar } from 'notistack'
 import { captureService } from '@/services'
 import type {
   CaptureDeviceType,
+  CaptureMode,
   CaptureSessionStatus,
   CaptureTargetStatus,
   CaptureTargetInfo,
@@ -104,7 +109,7 @@ const deviceTypeConfig: Record<CaptureDeviceType, { label: string; icon: React.R
   expressway: { label: 'Expressway', icon: <ExpresswayIcon />, color: '#7c3aed' }, // violet-600
 }
 
-const targetStatusConfig: Record<CaptureTargetStatus, { color: string; label: string }> = {
+const targetStatusConfig: Record<CaptureTargetStatus | 'stopped', { color: string; label: string }> = {
   pending: { color: '#6b7280', label: 'Pending' },
   configuring: { color: '#3b82f6', label: 'Configuring' },
   ready: { color: '#3b82f6', label: 'Ready' },
@@ -112,6 +117,7 @@ const targetStatusConfig: Record<CaptureTargetStatus, { color: string; label: st
   stopping: { color: '#eab308', label: 'Stopping' },
   collecting: { color: '#3b82f6', label: 'Collecting' },
   completed: { color: '#22c55e', label: 'Completed' },
+  stopped: { color: '#22c55e', label: 'Stopped' },
   failed: { color: '#ef4444', label: 'Failed' },
   cancelled: { color: '#eab308', label: 'Cancelled' },
 }
@@ -135,7 +141,10 @@ export default function CaptureSession() {
 
   // Configuration
   const [sessionName, setSessionName] = useState('')
+  const [captureMode, setCaptureMode] = useState<CaptureMode>('standard')
   const [duration, setDuration] = useState(60)
+  const [sizePerFileMb, setSizePerFileMb] = useState(25)
+  const [maxFiles, setMaxFiles] = useState(10)
   const [filterHost, setFilterHost] = useState('')
   const [filterPort, setFilterPort] = useState<number | ''>('')
   const [showFilters, setShowFilters] = useState(false)
@@ -271,7 +280,12 @@ export default function CaptureSession() {
     try {
       const response = await captureService.startSession({
         name: sessionName || undefined,
-        duration_sec: duration,
+        mode: captureMode,
+        // For standard mode, pass duration. For rotating mode, pass rotation params.
+        ...(captureMode === 'standard'
+          ? { duration_sec: duration }
+          : { size_per_file_mb: sizePerFileMb, max_files: maxFiles }
+        ),
         filter: filterHost || filterPort ? {
           host: filterHost || undefined,
           port: filterPort || undefined,
@@ -338,7 +352,10 @@ export default function CaptureSession() {
   const handleNewSession = () => {
     setTargets([])
     setSessionName('')
+    setCaptureMode('standard')
     setDuration(60)
+    setSizePerFileMb(25)
+    setMaxFiles(10)
     setFilterHost('')
     setFilterPort('')
     setActiveSession(null)
@@ -370,6 +387,7 @@ export default function CaptureSession() {
       case 'partial': return 'Some devices completed'
       case 'failed': return 'Session failed'
       case 'cancelled': return 'Session cancelled'
+      case 'stopped': return 'Capture stopped - files ready'
       default: return status
     }
   }
@@ -378,9 +396,10 @@ export default function CaptureSession() {
     return targetStatusConfig[status]?.color || '#6b7280'
   }
 
-  const getStatusIcon = (status: CaptureTargetStatus, size: number = 24) => {
+  const getStatusIcon = (status: CaptureTargetStatus | 'stopped', size: number = 24) => {
     switch (status) {
       case 'completed':
+      case 'stopped':
         return <CheckCircle sx={{ fontSize: size }} color="success" />
       case 'failed':
       case 'cancelled':
@@ -620,8 +639,8 @@ export default function CaptureSession() {
               </Box>
             </Box>
 
-            {/* Animated Countdown Timer */}
-            {session.status === 'capturing' && countdown && (
+            {/* Animated Timer - Standard Mode with Countdown */}
+            {session.status === 'capturing' && countdown && session.mode !== 'rotating' && (
               <Box
                 sx={{
                   display: 'flex',
@@ -712,13 +731,86 @@ export default function CaptureSession() {
                 </Box>
               </Box>
             )}
+
+            {/* Animated Timer - Rotating Mode with Elapsed Time */}
+            {session.status === 'capturing' && session.mode === 'rotating' && (
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 2,
+                }}
+              >
+                {/* Rotating Icon */}
+                <Box
+                  sx={{
+                    width: 80,
+                    height: 80,
+                    borderRadius: '50%',
+                    bgcolor: alpha('#f59e0b', 0.1),
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Loop
+                    sx={{
+                      fontSize: 40,
+                      color: '#f59e0b',
+                      animation: 'spin 2s linear infinite',
+                      '@keyframes spin': {
+                        '0%': { transform: 'rotate(0deg)' },
+                        '100%': { transform: 'rotate(360deg)' },
+                      },
+                    }}
+                  />
+                </Box>
+
+                {/* Time display */}
+                <Box sx={{ textAlign: 'left' }}>
+                  <Typography
+                    variant="h3"
+                    sx={{
+                      fontFamily: 'monospace',
+                      fontWeight: 700,
+                      color: 'text.primary',
+                      lineHeight: 1,
+                    }}
+                  >
+                    {countdown ? formatTime(countdown.elapsed) : '0:00'}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                    <Box
+                      sx={{
+                        width: 6,
+                        height: 6,
+                        borderRadius: '50%',
+                        bgcolor: '#f59e0b',
+                        animation: 'pulse 1.5s ease-in-out infinite',
+                        '@keyframes pulse': {
+                          '0%, 100%': { opacity: 1, transform: 'scale(1)' },
+                          '50%': { opacity: 0.5, transform: 'scale(1.3)' },
+                        },
+                      }}
+                    />
+                    Running until stopped ({session.size_per_file_mb || 25}MB x {session.max_files || 10} files)
+                  </Typography>
+                </Box>
+              </Box>
+            )}
           </Box>
 
-          {session.status === 'capturing' && countdown && (
+          {session.status === 'capturing' && countdown && session.mode !== 'rotating' && (
             <LinearProgress
               variant="determinate"
               value={(countdown.elapsed / duration) * 100}
               sx={{ height: 8, borderRadius: 4 }}
+            />
+          )}
+
+          {session.status === 'capturing' && session.mode === 'rotating' && (
+            <LinearProgress
+              sx={{ height: 8, borderRadius: 4, bgcolor: alpha('#f59e0b', 0.2), '& .MuiLinearProgress-bar': { bgcolor: '#f59e0b' } }}
             />
           )}
 
@@ -983,6 +1075,74 @@ export default function CaptureSession() {
             <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5, mb: 2, ml: 3 }}>
               Configure your packet capture session
             </Typography>
+
+            {/* Capture Mode Toggle */}
+            <Box sx={{ mb: 3 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                <Typography variant="subtitle2" fontWeight={600}>Capture Mode</Typography>
+              </Box>
+              <ToggleButtonGroup
+                value={captureMode}
+                exclusive
+                onChange={(_, newMode) => newMode && setCaptureMode(newMode)}
+                sx={{ width: '100%' }}
+              >
+                <ToggleButton
+                  value="standard"
+                  sx={{
+                    flex: 1,
+                    py: 1.5,
+                    textTransform: 'none',
+                    '&.Mui-selected': {
+                      bgcolor: alpha('#10b981', 0.15),
+                      color: '#10b981',
+                      borderColor: '#10b981',
+                      '&:hover': { bgcolor: alpha('#10b981', 0.25) },
+                    },
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Timer sx={{ fontSize: 20 }} />
+                    <Box sx={{ textAlign: 'left' }}>
+                      <Typography variant="body2" fontWeight={600}>Standard</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Fixed duration capture
+                      </Typography>
+                    </Box>
+                  </Box>
+                </ToggleButton>
+                <ToggleButton
+                  value="rotating"
+                  sx={{
+                    flex: 1,
+                    py: 1.5,
+                    textTransform: 'none',
+                    '&.Mui-selected': {
+                      bgcolor: alpha('#f59e0b', 0.15),
+                      color: '#f59e0b',
+                      borderColor: '#f59e0b',
+                      '&:hover': { bgcolor: alpha('#f59e0b', 0.25) },
+                    },
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Loop sx={{ fontSize: 20 }} />
+                    <Box sx={{ textAlign: 'left' }}>
+                      <Typography variant="body2" fontWeight={600}>Rotating</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        Continuous ring buffer
+                      </Typography>
+                    </Box>
+                  </Box>
+                </ToggleButton>
+              </ToggleButtonGroup>
+              {captureMode === 'rotating' && (
+                <Alert severity="info" sx={{ mt: 1.5 }}>
+                  <strong>Rotating Capture:</strong> Runs indefinitely until you stop it. Files rotate automatically when they reach the size limit, keeping only the most recent files.
+                </Alert>
+              )}
+            </Box>
+
             <Grid container spacing={3}>
               <Grid item xs={12} md={4}>
                 <Box
@@ -1008,35 +1168,93 @@ export default function CaptureSession() {
                 </Box>
               </Grid>
               <Grid item xs={12} md={4}>
-                <Box
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    bgcolor: alpha('#10b981', 0.05),
-                    border: `1px solid ${alpha('#10b981', 0.15)}`,
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
-                    <Timer sx={{ color: '#10b981', fontSize: 20 }} />
-                    <Typography variant="subtitle2" fontWeight={600}>Duration: {formatTime(duration)}</Typography>
-                  </Box>
-                  <Slider
-                    value={duration}
-                    onChange={(_, value) => setDuration(value as number)}
-                    min={10}
-                    max={600}
-                    step={10}
-                    marks={[
-                      { value: 60, label: '1m' },
-                      { value: 300, label: '5m' },
-                      { value: 600, label: '10m' },
-                    ]}
+                {captureMode === 'standard' ? (
+                  <Box
                     sx={{
-                      color: '#10b981',
-                      '& .MuiSlider-markLabel': { fontSize: '0.7rem' },
+                      p: 2,
+                      borderRadius: 2,
+                      bgcolor: alpha('#10b981', 0.05),
+                      border: `1px solid ${alpha('#10b981', 0.15)}`,
                     }}
-                  />
-                </Box>
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                      <Timer sx={{ color: '#10b981', fontSize: 20 }} />
+                      <Typography variant="subtitle2" fontWeight={600}>Duration: {formatTime(duration)}</Typography>
+                    </Box>
+                    <Slider
+                      value={duration}
+                      onChange={(_, value) => setDuration(value as number)}
+                      min={10}
+                      max={600}
+                      step={10}
+                      marks={[
+                        { value: 60, label: '1m' },
+                        { value: 300, label: '5m' },
+                        { value: 600, label: '10m' },
+                      ]}
+                      sx={{
+                        color: '#10b981',
+                        '& .MuiSlider-markLabel': { fontSize: '0.7rem' },
+                      }}
+                    />
+                  </Box>
+                ) : (
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: 2,
+                      bgcolor: alpha('#f59e0b', 0.05),
+                      border: `1px solid ${alpha('#f59e0b', 0.15)}`,
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                      <Storage sx={{ color: '#f59e0b', fontSize: 20 }} />
+                      <Typography variant="subtitle2" fontWeight={600}>File Size: {sizePerFileMb} MB</Typography>
+                    </Box>
+                    <Slider
+                      value={sizePerFileMb}
+                      onChange={(_, value) => setSizePerFileMb(value as number)}
+                      min={1}
+                      max={100}
+                      step={1}
+                      marks={[
+                        { value: 25, label: '25MB' },
+                        { value: 50, label: '50MB' },
+                        { value: 100, label: '100MB' },
+                      ]}
+                      sx={{
+                        color: '#f59e0b',
+                        '& .MuiSlider-markLabel': { fontSize: '0.7rem' },
+                      }}
+                    />
+                    <Box sx={{ mt: 2 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                        <Loop sx={{ color: '#f59e0b', fontSize: 20 }} />
+                        <Typography variant="subtitle2" fontWeight={600}>Max Files: {maxFiles}</Typography>
+                      </Box>
+                      <Slider
+                        value={maxFiles}
+                        onChange={(_, value) => setMaxFiles(value as number)}
+                        min={2}
+                        max={50}
+                        step={1}
+                        marks={[
+                          { value: 5, label: '5' },
+                          { value: 10, label: '10' },
+                          { value: 25, label: '25' },
+                          { value: 50, label: '50' },
+                        ]}
+                        sx={{
+                          color: '#f59e0b',
+                          '& .MuiSlider-markLabel': { fontSize: '0.7rem' },
+                        }}
+                      />
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                        Total buffer: ~{sizePerFileMb * maxFiles} MB ({maxFiles} files x {sizePerFileMb} MB each)
+                      </Typography>
+                    </Box>
+                  </Box>
+                )}
               </Grid>
               <Grid item xs={12} md={4}>
                 <Box
