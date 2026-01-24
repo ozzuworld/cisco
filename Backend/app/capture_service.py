@@ -609,24 +609,21 @@ class CaptureManager:
                 capture.message = "Stopping capture..."
                 await client.send_interrupt()
 
-                # Wait for CUCM to process the interrupt
-                await asyncio.sleep(2.0)
+                # Wait briefly for CUCM to process the interrupt
+                # IMPORTANT: Don't wait too long - rotating capture files may be cleaned up quickly!
+                await asyncio.sleep(3.0)
 
-                # Read any remaining output
+                # Try to read any remaining output with a SHORT timeout
+                # Rotating capture cleanup may happen quickly, so don't block on this
                 try:
-                    output = await client.read_until_prompt(timeout=30.0)
+                    output = await client.read_until_prompt(timeout=5.0)
                     logger.debug(f"Capture output: {output[:500] if output else '(empty)'}...")
                 except Exception as e:
-                    logger.warning(f"Failed to read capture output: {e}")
-                    try:
-                        await client.recover_session()
-                    except Exception as recovery_error:
-                        logger.warning(f"Session recovery failed: {recovery_error}")
+                    logger.debug(f"Could not read capture output (expected for rotating): {e}")
+                    # Don't try to recover - just proceed to file retrieval
 
-                # Give CUCM a moment to finish writing capture files
-                await asyncio.sleep(2.0)
-
-                # Retrieve all capture files
+                # Retrieve all capture files IMMEDIATELY
+                # Rotating capture files may be cleaned up quickly after Ctrl+C
                 capture.message = "Retrieving capture files..."
                 settings = get_settings()
                 if settings.sftp_relay_mode:
