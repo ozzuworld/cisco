@@ -546,16 +546,23 @@ class CaptureManager:
                 return
 
             # Determine the best SFTP host IP to use
-            # Smart detection: find the local IP that can reach the CUCM target
-            # This is crucial for VPN scenarios where CUCM is on a VPN network
+            # Priority: 1) Explicitly configured SFTP_HOST, 2) Auto-detect for target
             target_host = capture.request.host
-            sftp_host = get_local_ip_for_target(target_host)
-            if not sftp_host:
-                # Fall back to configured/auto-detected host
-                sftp_host = settings.effective_sftp_host
-                logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
+
+            # Check if SFTP_HOST was explicitly configured (not auto-detected)
+            if settings.sftp_host:
+                # User explicitly set SFTP_HOST - use it (e.g., VPN IP)
+                sftp_host = settings.sftp_host
+                logger.info(f"Using configured SFTP host: {sftp_host}")
             else:
-                logger.info(f"Using SFTP host {sftp_host} (detected for target {target_host})")
+                # Auto-detect: find the local IP that can reach the CUCM target
+                sftp_host = get_local_ip_for_target(target_host)
+                if not sftp_host:
+                    # Fall back to general auto-detection
+                    sftp_host = settings.effective_sftp_host
+                    logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
+                else:
+                    logger.info(f"Using auto-detected SFTP host {sftp_host} (for target {target_host})")
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
