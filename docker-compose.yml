@@ -26,7 +26,17 @@ services:
       - TRANSCRIPT_DIR=/app/storage/transcripts
 
       # ======================================
-      # SFTP Server Settings
+      # SFTP Transfer Mode (IMPORTANT for VPN users)
+      # ======================================
+      # SFTP_PULL_MODE=true (default): App downloads files FROM CUCM's SFTP
+      #   - Works with VPN/NAT - no reverse connectivity needed
+      #   - App connects TO CUCM, not the other way around
+      # SFTP_PULL_MODE=false: CUCM uploads files TO our embedded SFTP server
+      #   - Requires CUCM to reach this machine (may not work over VPN)
+      - SFTP_PULL_MODE=true
+
+      # ======================================
+      # SFTP Server Settings (only needed if SFTP_PULL_MODE=false)
       # ======================================
       - SFTP_SERVER_ENABLED=true
       - SFTP_SERVER_HOST=0.0.0.0

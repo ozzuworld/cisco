@@ -430,7 +430,14 @@ class CaptureManager:
 
                 # Retrieve the capture file
                 capture.message = "Retrieving capture file..."
-                await self._retrieve_capture_file(client, capture)
+                if settings.sftp_pull_mode:
+                    # Pull mode: connect TO CUCM's SFTP and download (VPN-friendly)
+                    logger.info("Using SFTP pull mode (downloading from CUCM)")
+                    await self._retrieve_capture_file_pull(client, capture)
+                else:
+                    # Push mode: CUCM connects to our SFTP server
+                    logger.info("Using SFTP push mode (CUCM uploads to us)")
+                    await self._retrieve_capture_file(client, capture)
 
                 # Mark as completed
                 capture.status = CaptureStatus.COMPLETED
@@ -633,6 +640,96 @@ class CaptureManager:
 
         except Exception as e:
             logger.warning(f"Failed to retrieve capture file: {e}")
+            capture.message = f"Capture complete, file retrieval failed: {e}"
+
+    async def _retrieve_capture_file_pull(
+        self,
+        client: CUCMSSHClient,
+        capture: Capture
+    ) -> None:
+        """
+        Retrieve the capture file by pulling FROM CUCM's SFTP server.
+
+        This method connects to CUCM's built-in SFTP server and downloads
+        the capture file directly. This works in VPN/NAT scenarios where
+        CUCM cannot connect back to the client.
+
+        The capture file is stored at: /activelog/platform/cli/<filename>.cap
+
+        Args:
+            client: Connected SSH client (used for credentials)
+            capture: Capture object to update
+        """
+        import asyncssh
+
+        settings = get_settings()
+        capture_file = f"{capture.filename}.cap"
+        remote_path = f"/activelog/platform/cli/{capture_file}"
+
+        try:
+            # Check if stop was requested before starting retrieval
+            if capture._stop_event.is_set() or capture._cancelled:
+                logger.info(f"Capture {capture.capture_id} stop requested, skipping file retrieval")
+                return
+
+            # Create local directory for the capture file
+            local_dir = settings.artifacts_dir / capture.capture_id
+            local_dir.mkdir(parents=True, exist_ok=True)
+            local_file = local_dir / capture_file
+
+            logger.info(f"Pulling capture file via SFTP from CUCM: {remote_path}")
+
+            # Connect to CUCM's SFTP server using same credentials as SSH
+            host = capture.request.host
+            port = capture.request.port or 22
+            username = capture.request.username
+            password = capture.request.password
+
+            # Use asyncssh to connect and download the file
+            async with asyncssh.connect(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                known_hosts=None,  # Accept any host key (like SSH client)
+            ) as conn:
+                async with conn.start_sftp_client() as sftp:
+                    # Check if stop was requested
+                    if capture._stop_event.is_set() or capture._cancelled:
+                        logger.info(f"Capture {capture.capture_id} stop requested during SFTP")
+                        return
+
+                    logger.info(f"SFTP connected, downloading {remote_path} to {local_file}")
+
+                    # Download the file
+                    await sftp.get(remote_path, str(local_file))
+
+                    logger.info(f"SFTP download complete: {local_file}")
+
+            # Verify file was downloaded
+            if local_file.exists():
+                capture.local_file_path = local_file
+                capture.file_size_bytes = local_file.stat().st_size
+                capture.message = f"Capture file retrieved: {capture_file}"
+                logger.info(f"Retrieved capture file: {local_file} ({capture.file_size_bytes} bytes)")
+            else:
+                logger.warning(f"Capture file not found after download: {local_file}")
+                capture.message = "Capture complete, file download failed"
+
+        except asyncssh.SFTPError as e:
+            logger.warning(f"SFTP error retrieving capture file: {e}")
+            capture.message = f"Capture complete, SFTP error: {e}"
+
+        except asyncssh.PermissionDenied as e:
+            logger.warning(f"SFTP permission denied: {e}")
+            capture.message = "Capture complete, SFTP permission denied"
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout pulling capture file for {capture.capture_id}")
+            capture.message = "Capture complete, file download timed out"
+
+        except Exception as e:
+            logger.warning(f"Failed to pull capture file: {e}")
             capture.message = f"Capture complete, file retrieval failed: {e}"
 
     async def _execute_csr_capture(self, capture_id: str) -> None:

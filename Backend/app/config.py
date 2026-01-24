@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     sftp_server_port: int = 2222  # Different from 22 to avoid conflicts
     sftp_server_host_key_path: Optional[str] = None  # Auto-generated if not set
 
+    # SFTP Transfer Mode
+    # When True, pull files FROM CUCM's SFTP server (works with VPN/NAT)
+    # When False, CUCM pushes files TO our embedded SFTP server (requires reverse connectivity)
+    sftp_pull_mode: bool = True  # Default to pull mode for better VPN compatibility
+
     # Storage Settings
     storage_root: Path = Path("./storage")
 
