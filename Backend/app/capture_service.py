@@ -857,33 +857,58 @@ class CaptureManager:
                                 search_dir = relay_directory if relay_directory else "."
                                 relay_file_path = None
 
-                                # Search in CUCM's directory structure
+                                logger.info(f"Searching for {cap_file} in relay directory: {search_dir}")
+
+                                # First, try direct path
+                                direct_path = f"{search_dir}/{cap_file}" if relay_directory else cap_file
                                 try:
-                                    entries = await sftp.readdir(search_dir)
-                                    for entry in entries:
-                                        if entry.filename in ('.', '..'):
-                                            continue
-                                        subdir_path = f"{search_dir}/{entry.filename}"
-                                        try:
-                                            sub_entries = await sftp.readdir(subdir_path)
-                                            for sub_entry in sub_entries:
-                                                if sub_entry.filename in ('.', '..'):
-                                                    continue
-                                                cli_path = f"{subdir_path}/{sub_entry.filename}/platform/cli/{cap_file}"
-                                                try:
-                                                    await sftp.stat(cli_path)
-                                                    relay_file_path = cli_path
-                                                    break
-                                                except:
-                                                    pass
-                                            if relay_file_path:
-                                                break
-                                        except:
-                                            pass
+                                    await sftp.stat(direct_path)
+                                    relay_file_path = direct_path
+                                    logger.info(f"Found file at direct path: {direct_path}")
                                 except Exception as e:
-                                    logger.warning(f"Error searching for {cap_file}: {e}")
+                                    logger.debug(f"File not at direct path {direct_path}: {e}")
+
+                                # Search in CUCM's directory structure
+                                if not relay_file_path:
+                                    try:
+                                        entries = await sftp.readdir(search_dir)
+                                        logger.info(f"Found {len(entries)} entries in {search_dir}")
+                                        for entry in entries:
+                                            filename = entry.filename
+                                            if filename in ('.', '..'):
+                                                continue
+                                            logger.debug(f"  Checking entry: {filename}")
+
+                                            # Check if it's the file directly
+                                            if filename == cap_file:
+                                                relay_file_path = f"{search_dir}/{filename}" if relay_directory else filename
+                                                logger.info(f"Found exact match: {relay_file_path}")
+                                                break
+
+                                            # CUCM creates: <cucm-ip>/<timestamp>/platform/cli/<file>
+                                            subdir_path = f"{search_dir}/{filename}"
+                                            try:
+                                                sub_entries = await sftp.readdir(subdir_path)
+                                                for sub_entry in sub_entries:
+                                                    if sub_entry.filename in ('.', '..'):
+                                                        continue
+                                                    cli_path = f"{subdir_path}/{sub_entry.filename}/platform/cli/{cap_file}"
+                                                    try:
+                                                        await sftp.stat(cli_path)
+                                                        relay_file_path = cli_path
+                                                        logger.info(f"Found file in CUCM structure: {cli_path}")
+                                                        break
+                                                    except:
+                                                        pass
+                                                if relay_file_path:
+                                                    break
+                                            except Exception as sub_e:
+                                                logger.debug(f"Could not search {subdir_path}: {sub_e}")
+                                    except Exception as e:
+                                        logger.warning(f"Error searching for {cap_file}: {e}")
 
                                 if relay_file_path:
+                                    logger.info(f"Downloading {cap_file} from relay: {relay_file_path}")
                                     await sftp.get(relay_file_path, str(local_file))
                                     if local_file.exists():
                                         file_size = local_file.stat().st_size
@@ -894,6 +919,7 @@ class CaptureManager:
                                         # Clean up from relay
                                         try:
                                             await sftp.remove(relay_file_path)
+                                            logger.info(f"Cleaned up relay file: {relay_file_path}")
                                         except:
                                             pass
                                 else:
