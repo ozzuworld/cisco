@@ -50,7 +50,9 @@ logger = logging.getLogger(__name__)
 
 
 # SFTP prompt timeout for file retrieval
-SFTP_PROMPT_TIMEOUT = 120.0
+# Total timeout for SFTP file retrieval (prompts + transfer)
+# Set to 5 minutes to allow: ~60s for prompts + 180s transfer timeout + buffer
+SFTP_PROMPT_TIMEOUT = 300.0
 
 
 def build_cucm_capture_command(
@@ -564,8 +566,14 @@ class CaptureManager:
 
                 # Handle prompts with timeout
                 # respond_to_prompts expects (stdin, stdout) separately
+                # Pass stop_event so transfer can be interrupted by user
                 await asyncio.wait_for(
-                    responder.respond_to_prompts(shell.stdin, shell.stdout),
+                    responder.respond_to_prompts(
+                        shell.stdin,
+                        shell.stdout,
+                        stop_event=capture._stop_event,
+                        transfer_timeout=180.0  # 3 min timeout for SFTP transfer
+                    ),
                     timeout=SFTP_PROMPT_TIMEOUT
                 )
 
