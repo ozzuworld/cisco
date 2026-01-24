@@ -431,13 +431,13 @@ class CaptureManager:
                 # Retrieve the capture file
                 capture.message = "Retrieving capture file..."
                 settings = get_settings()
-                if settings.sftp_pull_mode:
-                    # Pull mode: connect TO CUCM's SFTP and download (VPN-friendly)
-                    logger.info("Using SFTP pull mode (downloading from CUCM)")
-                    await self._retrieve_capture_file_pull(client, capture)
+                if settings.sftp_relay_mode:
+                    # Relay mode: CUCM uploads to relay server, then we pull from relay
+                    logger.info("Using SFTP relay mode (CUCM -> relay -> local)")
+                    await self._retrieve_capture_file_relay(client, capture)
                 else:
-                    # Push mode: CUCM connects to our SFTP server
-                    logger.info("Using SFTP push mode (CUCM uploads to us)")
+                    # Direct mode: CUCM uploads to our embedded SFTP server
+                    logger.info("Using SFTP direct mode (CUCM uploads to embedded server)")
                     await self._retrieve_capture_file(client, capture)
 
                 # Mark as completed
@@ -744,6 +744,168 @@ class CaptureManager:
         except Exception as e:
             logger.warning(f"Failed to pull capture file: {e}")
             capture.message = f"Capture complete, file retrieval failed: {e}"
+
+    async def _retrieve_capture_file_relay(
+        self,
+        client: CUCMSSHClient,
+        capture: Capture
+    ) -> None:
+        """
+        Retrieve capture file using a relay SFTP server.
+
+        This method works for VPN scenarios where CUCM cannot reach the local machine:
+        1. CUCM uploads the file to an external relay SFTP server
+        2. App downloads the file from the relay server to local storage
+
+        Args:
+            client: Connected SSH client
+            capture: Capture object to update
+        """
+        import asyncssh
+
+        settings = get_settings()
+        capture_file = f"{capture.filename}.cap"
+        remote_path = f"platform/cli/{capture_file}"
+
+        try:
+            # Check if stop was requested
+            if capture._stop_event.is_set() or capture._cancelled:
+                logger.info(f"Capture {capture.capture_id} stop requested, skipping file retrieval")
+                return
+
+            # Relay server settings
+            relay_host = settings.sftp_host
+            relay_port = settings.sftp_port
+            relay_username = settings.sftp_username
+            relay_password = settings.sftp_password
+
+            if not relay_host:
+                raise ValueError("SFTP_HOST must be configured for relay mode")
+
+            # Build relay directory path
+            sftp_base = settings.sftp_remote_base_dir or ""
+            relay_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
+
+            logger.info(f"Relay mode: CUCM will upload to {relay_host}:{relay_port}/{relay_directory}")
+
+            # Set up prompt responder to tell CUCM to upload to relay server
+            responder = PromptResponder(
+                sftp_host=relay_host,
+                sftp_port=relay_port,
+                sftp_username=relay_username,
+                sftp_password=relay_password,
+                sftp_directory=relay_directory,
+            )
+
+            # Run file get command with prompt responding
+            get_cmd = f"file get activelog {remote_path}"
+            logger.info(f"Running: {get_cmd}")
+
+            # Get the shell session for interactive command
+            shell = client._session
+            if shell:
+                # Send the command
+                shell.stdin.write(f"{get_cmd}\n")
+                await shell.stdin.drain()
+
+                # Handle prompts with timeout
+                await asyncio.wait_for(
+                    responder.respond_to_prompts(
+                        shell.stdin,
+                        shell.stdout,
+                        stop_event=capture._stop_event,
+                        transfer_timeout=180.0
+                    ),
+                    timeout=SFTP_PROMPT_TIMEOUT
+                )
+
+            # Wait for SFTP transfer to complete
+            logger.info("CUCM upload to relay complete, now downloading from relay...")
+            await asyncio.sleep(2.0)
+
+            # Check if stop was requested
+            if capture._stop_event.is_set() or capture._cancelled:
+                logger.info(f"Capture {capture.capture_id} stop requested during relay download")
+                return
+
+            # Now download the file from the relay server
+            local_dir = settings.artifacts_dir / capture.capture_id
+            local_dir.mkdir(parents=True, exist_ok=True)
+            local_file = local_dir / capture_file
+
+            # The file on relay will be at: relay_directory/<host>/<timestamp>/platform/cli/<file>.cap
+            # Or directly at: relay_directory/<file>.cap depending on CUCM behavior
+            # We'll search for it
+
+            logger.info(f"Connecting to relay server {relay_host}:{relay_port} to download file")
+
+            async with asyncssh.connect(
+                host=relay_host,
+                port=relay_port,
+                username=relay_username,
+                password=relay_password,
+                known_hosts=None,
+            ) as conn:
+                async with conn.start_sftp_client() as sftp:
+                    # Search for the capture file in the relay directory
+                    relay_file_path = None
+
+                    # Try to find the file - CUCM creates nested directories
+                    async def find_file(dir_path: str, filename: str) -> str:
+                        """Recursively search for file in directory"""
+                        try:
+                            entries = await sftp.readdir(dir_path)
+                            for entry in entries:
+                                entry_path = f"{dir_path}/{entry.filename}"
+                                if entry.filename == filename:
+                                    return entry_path
+                                if entry.attrs.type == asyncssh.FILEXFER_TYPE_DIRECTORY:
+                                    result = await find_file(entry_path, filename)
+                                    if result:
+                                        return result
+                        except Exception as e:
+                            logger.debug(f"Error searching {dir_path}: {e}")
+                        return None
+
+                    # Search in the upload directory
+                    relay_file_path = await find_file(relay_directory, capture_file)
+
+                    if not relay_file_path:
+                        # Try root directory in case CUCM uploaded there
+                        relay_file_path = await find_file(".", capture_file)
+
+                    if relay_file_path:
+                        logger.info(f"Found file on relay: {relay_file_path}")
+                        await sftp.get(relay_file_path, str(local_file))
+                        logger.info(f"Downloaded from relay to {local_file}")
+
+                        # Verify file
+                        if local_file.exists():
+                            capture.local_file_path = local_file
+                            capture.file_size_bytes = local_file.stat().st_size
+                            capture.message = f"Capture file retrieved: {capture_file}"
+                            logger.info(f"Retrieved capture file: {local_file} ({capture.file_size_bytes} bytes)")
+
+                            # Optionally delete from relay to save space
+                            try:
+                                await sftp.remove(relay_file_path)
+                                logger.info(f"Cleaned up relay file: {relay_file_path}")
+                            except Exception as e:
+                                logger.debug(f"Could not delete relay file: {e}")
+                        else:
+                            logger.warning(f"File not found after download: {local_file}")
+                            capture.message = "Capture complete, relay download failed"
+                    else:
+                        logger.warning(f"Capture file not found on relay server")
+                        capture.message = "Capture complete, file not found on relay"
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout during relay transfer for {capture.capture_id}")
+            capture.message = "Capture complete, relay transfer timed out"
+
+        except Exception as e:
+            logger.warning(f"Failed to retrieve capture file via relay: {e}")
+            capture.message = f"Capture complete, relay transfer failed: {e}"
 
     async def _execute_csr_capture(self, capture_id: str) -> None:
         """

@@ -44,9 +44,13 @@ class Settings(BaseSettings):
     sftp_server_host_key_path: Optional[str] = None  # Auto-generated if not set
 
     # SFTP Transfer Mode
-    # When True, pull files FROM CUCM's SFTP server (works with VPN/NAT)
-    # When False, CUCM pushes files TO our embedded SFTP server (requires reverse connectivity)
-    sftp_pull_mode: bool = True  # Default to pull mode for better VPN compatibility
+    # sftp_pull_mode is deprecated - CUCM doesn't support direct SFTP downloads
+    sftp_pull_mode: bool = False  # Deprecated, kept for compatibility
+
+    # SFTP Relay Mode (for VPN users)
+    # When True: CUCM uploads to external relay server, then app downloads from relay
+    # Requires: SFTP_HOST, SFTP_USERNAME, SFTP_PASSWORD pointing to relay server
+    sftp_relay_mode: bool = False
 
     # Storage Settings
     storage_root: Path = Path("./storage")
