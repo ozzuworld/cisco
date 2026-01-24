@@ -372,6 +372,9 @@ class CaptureManager:
                     # Duration elapsed - normal completion
                     logger.info(f"Capture {capture_id} duration reached")
 
+                # Update status to STOPPING so frontend knows capture phase is done
+                capture.status = CaptureStatus.STOPPING
+
                 # Send Ctrl+C to stop the capture
                 capture.message = "Stopping capture..."
                 await client.send_interrupt()
