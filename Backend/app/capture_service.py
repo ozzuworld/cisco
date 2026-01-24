@@ -765,10 +765,17 @@ class CaptureManager:
 
         try:
             # List all capture files matching the pattern
+            # First, list all files in platform/cli to see what's there
+            dir_list_cmd = "file list activelog platform/cli/ detail"
+            logger.info(f"Listing platform/cli directory: {dir_list_cmd}")
+            dir_output = await client.execute_command(dir_list_cmd, timeout=30.0)
+            logger.info(f"Directory listing:\n{dir_output}")
+
+            # Now list specifically for our capture files
             list_cmd = f"file list activelog platform/cli/{base_filename}* detail"
             logger.info(f"Listing rotation files: {list_cmd}")
             output = await client.execute_command(list_cmd, timeout=30.0)
-            logger.debug(f"File list output: {output[:500] if output else 'empty'}")
+            logger.info(f"File list output:\n{output}")
 
             # Parse file list to find all .cap files
             cap_files = []
