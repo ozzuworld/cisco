@@ -47,17 +47,23 @@ class CaptureSession:
         self,
         session_id: str,
         name: Optional[str],
-        duration_sec: int,
+        mode: str,  # 'standard' or 'rotating'
+        duration_sec: Optional[int],
+        size_per_file_mb: Optional[int],
+        max_files: Optional[int],
         filter_config: Optional[dict],
         targets: List[CaptureTargetInfo],
     ):
         self.session_id = session_id
         self.name = name or f"Session {session_id[:8]}"
+        self.mode = mode
         self.status = CaptureSessionStatus.PENDING
         self.created_at = datetime.now(timezone.utc)
         self.capture_started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
         self.duration_sec = duration_sec
+        self.size_per_file_mb = size_per_file_mb
+        self.max_files = max_files
         self.filter_config = filter_config
         self.targets = targets
         self.bundle_filename: Optional[str] = None
@@ -67,14 +73,18 @@ class CaptureSession:
 
     def to_info(self) -> CaptureSessionInfo:
         """Convert to CaptureSessionInfo model"""
+        from app.models import CaptureMode
         return CaptureSessionInfo(
             session_id=self.session_id,
             name=self.name,
+            mode=CaptureMode(self.mode),
             status=self.status,
             created_at=self.created_at,
             capture_started_at=self.capture_started_at,
             completed_at=self.completed_at,
             duration_sec=self.duration_sec,
+            size_per_file_mb=self.size_per_file_mb,
+            max_files=self.max_files,
             targets=self.targets,
             bundle_filename=self.bundle_filename,
         )
@@ -189,7 +199,10 @@ class CaptureSessionManager:
         session = CaptureSession(
             session_id=session_id,
             name=request.name,
+            mode=request.mode.value,
             duration_sec=request.duration_sec,
+            size_per_file_mb=request.size_per_file_mb,
+            max_files=request.max_files,
             filter_config=request.filter.model_dump() if request.filter else None,
             targets=targets,
         )
@@ -250,13 +263,19 @@ class CaptureSessionManager:
             if session.filter_config:
                 capture_filter = ModelCaptureFilter(**session.filter_config)
 
+            # Import CaptureMode for mode conversion
+            from app.models import CaptureMode
+
             capture_req = StartCaptureRequest(
                 device_type=target_info.device_type,
                 host=target_info.host,
                 port=target_info.port,
                 username=username,
                 password=password,
+                mode=CaptureMode(session.mode),
                 duration_sec=session.duration_sec,
+                size_per_file_mb=session.size_per_file_mb or 25,
+                max_files=session.max_files or 10,
                 interface=target_info.interface,
                 filter=capture_filter,
                 packet_count=100000,

@@ -1294,11 +1294,27 @@ class StartCaptureSessionRequest(BaseModel):
         description="Optional session name",
         max_length=100
     )
-    duration_sec: int = Field(
-        ...,
-        description="Capture duration in seconds",
+    mode: CaptureMode = Field(
+        default=CaptureMode.STANDARD,
+        description="Capture mode: 'standard' for fixed duration, 'rotating' for continuous ring buffer"
+    )
+    duration_sec: Optional[int] = Field(
+        default=None,
+        description="Capture duration in seconds (required for standard mode)",
         ge=10,
         le=600
+    )
+    size_per_file_mb: int = Field(
+        default=25,
+        description="Size of each rotation file in MB (rotating mode only)",
+        ge=1,
+        le=100
+    )
+    max_files: int = Field(
+        default=10,
+        description="Maximum number of rotation files to keep (rotating mode only)",
+        ge=2,
+        le=100
     )
     filter: Optional[CaptureFilter] = Field(
         default=None,
@@ -1327,6 +1343,13 @@ class StartCaptureSessionRequest(BaseModel):
             raise ValueError("Maximum 10 targets allowed per session")
         return v
 
+    @model_validator(mode='after')
+    def validate_mode_params(self) -> 'StartCaptureSessionRequest':
+        """Validate that duration_sec is provided for standard mode"""
+        if self.mode == CaptureMode.STANDARD and self.duration_sec is None:
+            raise ValueError("duration_sec is required for standard capture mode")
+        return self
+
 
 class CaptureTargetInfo(BaseModel):
     """Information about a single target in a capture session"""
@@ -1353,11 +1376,14 @@ class CaptureSessionInfo(BaseModel):
 
     session_id: str = Field(..., description="Unique session identifier")
     name: Optional[str] = Field(None, description="Session name")
+    mode: CaptureMode = Field(default=CaptureMode.STANDARD, description="Capture mode")
     status: CaptureSessionStatus = Field(..., description="Current session status")
     created_at: datetime = Field(..., description="When session was created")
     capture_started_at: Optional[datetime] = Field(None, description="When captures started")
     completed_at: Optional[datetime] = Field(None, description="When session completed")
-    duration_sec: int = Field(..., description="Capture duration")
+    duration_sec: Optional[int] = Field(None, description="Capture duration (standard mode only)")
+    size_per_file_mb: Optional[int] = Field(None, description="Size per file in MB (rotating mode only)")
+    max_files: Optional[int] = Field(None, description="Max files to keep (rotating mode only)")
     targets: List[CaptureTargetInfo] = Field(
         default_factory=list,
         description="List of capture targets"
