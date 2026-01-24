@@ -2558,11 +2558,9 @@ async def download_capture_session_bundle(session_id: str, request: Request):
     for target in session.targets:
         if target.capture_id and target.status == "completed":
             capture = capture_manager.get_capture(target.capture_id)
-            if capture:
-                capture_dir = Path(settings.artifacts_dir) / "captures"
-                capture_file = capture_dir / f"{capture.filename}.cap"
-                if capture_file.exists():
-                    capture_files.append((capture_file, f"{target.host}_{capture.filename}.cap"))
+            if capture and capture.local_file_path and capture.local_file_path.exists():
+                # Use the actual local_file_path from the capture object
+                capture_files.append((capture.local_file_path, f"{target.host}_{capture.local_file_path.name}"))
 
     if not capture_files:
         logger.warning(f"No capture files found for session {session_id} (request_id={request_id})")
