@@ -44,6 +44,7 @@ from app.expressway_client import (
 )
 from app.config import get_settings
 from app.prompt_responder import PromptResponder
+from app.network_utils import get_local_ip_for_target
 
 
 logger = logging.getLogger(__name__)
@@ -544,9 +545,21 @@ class CaptureManager:
                 logger.info(f"Capture {capture.capture_id} stop requested, skipping SFTP transfer")
                 return
 
+            # Determine the best SFTP host IP to use
+            # Smart detection: find the local IP that can reach the CUCM target
+            # This is crucial for VPN scenarios where CUCM is on a VPN network
+            target_host = capture.request.host
+            sftp_host = get_local_ip_for_target(target_host)
+            if not sftp_host:
+                # Fall back to configured/auto-detected host
+                sftp_host = settings.effective_sftp_host
+                logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
+            else:
+                logger.info(f"Using SFTP host {sftp_host} (detected for target {target_host})")
+
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
-                sftp_host=settings.effective_sftp_host,
+                sftp_host=sftp_host,
                 sftp_port=settings.sftp_port,
                 sftp_username=settings.sftp_username,
                 sftp_password=settings.sftp_password,

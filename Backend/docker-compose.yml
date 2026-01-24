@@ -8,6 +8,23 @@
 #
 # SFTP_HOST is auto-detected! The app will automatically detect the host's IP.
 # Override with SFTP_HOST env var if auto-detection doesn't work for your network.
+#
+# ============================================================================
+# VPN SCENARIO CONFIGURATION
+# ============================================================================
+# If you're connecting to CUCM over VPN, use ONE of these options:
+#
+# OPTION 1 (Recommended): Use host networking mode
+#   Uncomment network_mode and comment out the ports section below.
+#   This allows the container to use your VPN interface directly.
+#
+# OPTION 2: Set SFTP_HOST to your VPN IP manually
+#   In your .env file: SFTP_HOST=10.x.x.x (your VPN IP)
+#   Keep the ports section as-is.
+#
+# To find your VPN IP on Windows: ipconfig | findstr "10."
+# To find your VPN IP on Linux/Mac: ip addr | grep "10\."
+# ============================================================================
 
 version: '3.8'
 
@@ -20,7 +37,10 @@ services:
     container_name: cucm-log-collector
     restart: unless-stopped
 
-    # Port mappings
+    # VPN OPTION 1: Uncomment this line to use host networking (recommended for VPN)
+    # network_mode: host
+
+    # Port mappings (comment out if using network_mode: host)
     ports:
       - "8000:8000"   # FastAPI HTTP API
       - "2222:2222"   # Embedded SFTP Server
