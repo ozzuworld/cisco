@@ -284,9 +284,12 @@ class PromptResponder:
                             prompts_completed = True
                             prompts_completed_time = current_time
                             logger.info(f"All SFTP prompts answered, starting transfer timeout ({transfer_timeout}s)")
-
-                        # Clear buffer to wait for next prompt
-                        buffer = ""
+                            # After the last prompt, keep the buffer in case
+                            # transfer completion data arrived in the same chunk
+                            buffer = buffer[buffer.rfind('\n') + 1:] if '\n' in buffer else ""
+                        else:
+                            # Clear buffer to wait for next prompt
+                            buffer = ""
 
         except asyncio.TimeoutError as e:
             # Convert generic timeout to SFTP timeout

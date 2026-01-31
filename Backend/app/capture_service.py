@@ -23,6 +23,7 @@ from app.ssh_client import (
     CUCMConnectionError,
     CUCMCommandTimeoutError,
     CUCMSSHClientError,
+    CUCMSFTPTimeoutError,
 )
 from app.csr_client import (
     CSRSSHClient,
@@ -848,8 +849,8 @@ class CaptureManager:
                             for line in transcript_tail.split('\n'):
                                 if line.strip():
                                     logger.info(f"  CUCM: {line.strip()}")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Timeout uploading {cap_file} to relay")
+                    except (asyncio.TimeoutError, CUCMSFTPTimeoutError) as e:
+                        logger.warning(f"Timeout uploading {cap_file} to relay: {e}")
                         continue
 
                 # Wait for upload to complete
