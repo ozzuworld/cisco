@@ -283,7 +283,14 @@ else:
 
 @app.get("/")
 async def root():
-    """Root endpoint - returns service info"""
+    """Root endpoint - serve frontend or return service info"""
+    # Serve frontend if available
+    if FRONTEND_DIR.exists() and FRONTEND_DIR.is_dir():
+        index_file = FRONTEND_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(index_file)
+
+    # Fallback to API info if no frontend
     return {
         "service": "CUCM Log Collector",
         "version": "0.5.0",
@@ -2415,7 +2422,9 @@ async def get_capture_session_status(session_id: str, request: Request):
         now = datetime.now(timezone.utc)
         elapsed_td = now - session.capture_started_at
         elapsed_sec = int(elapsed_td.total_seconds())
-        remaining_sec = max(0, session.duration_sec - elapsed_sec)
+        # Only calculate remaining time for standard mode (when duration_sec is set)
+        if session.duration_sec is not None:
+            remaining_sec = max(0, session.duration_sec - elapsed_sec)
 
     return CaptureSessionStatusResponse(
         session=session.to_info(),
@@ -2551,11 +2560,9 @@ async def download_capture_session_bundle(session_id: str, request: Request):
     for target in session.targets:
         if target.capture_id and target.status == "completed":
             capture = capture_manager.get_capture(target.capture_id)
-            if capture:
-                capture_dir = Path(settings.artifacts_dir) / "captures"
-                capture_file = capture_dir / f"{capture.filename}.cap"
-                if capture_file.exists():
-                    capture_files.append((capture_file, f"{target.host}_{capture.filename}.cap"))
+            if capture and capture.local_file_path and capture.local_file_path.exists():
+                # Use the actual local_file_path from the capture object
+                capture_files.append((capture.local_file_path, f"{target.host}_{capture.local_file_path.name}"))
 
     if not capture_files:
         logger.warning(f"No capture files found for session {session_id} (request_id={request_id})")

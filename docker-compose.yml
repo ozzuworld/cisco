@@ -26,14 +26,29 @@ services:
       - TRANSCRIPT_DIR=/app/storage/transcripts
 
       # ======================================
-      # SFTP Server Settings
+      # SFTP Relay Mode (for VPN users)
       # ======================================
-      - SFTP_SERVER_ENABLED=true
+      # When CUCM cannot reach your local machine (VPN/NAT), use a relay server:
+      # 1. CUCM uploads files to the relay SFTP server
+      # 2. App downloads files from the relay server
+      - SFTP_RELAY_MODE=true
+
+      # Relay SFTP Server Settings
+      # Configure these to point to your relay server that CUCM can reach
+      - SFTP_HOST=104.156.42.4
+      - SFTP_PORT=22
+      - SFTP_USERNAME=wx001-sftp
+      - SFTP_PASSWORD=your-password-here
+      # Directory on relay server where files will be uploaded
+      - SFTP_REMOTE_BASE_DIR=cucm-captures
+
+      # ======================================
+      # Embedded SFTP Server (only if SFTP_RELAY_MODE=false)
+      # ======================================
+      - SFTP_SERVER_ENABLED=false
       - SFTP_SERVER_HOST=0.0.0.0
       - SFTP_SERVER_PORT=2222
       - SFTP_ROOT_PATH=/app/storage/received
-      - SFTP_USERNAME=cucm
-      - SFTP_PASSWORD=cisco123
 
       # ======================================
       # Security Settings

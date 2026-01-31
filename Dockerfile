@@ -16,13 +16,13 @@ FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
 # Copy frontend package files
-COPY frotend/package.json frotend/package-lock.json ./
+COPY frontend/package.json frontend/package-lock.json ./
 
 # Install frontend dependencies
 RUN npm ci
 
 # Copy frontend source code
-COPY frotend/ ./
+COPY frontend/ ./
 
 # Set build-time environment variables
 # API calls will use relative paths (same origin) - no CORS issues

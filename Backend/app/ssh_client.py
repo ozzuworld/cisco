@@ -560,6 +560,50 @@ class CUCMSSHClient:
 
         return await self._session.read_until_prompt(timeout=timeout)
 
+    async def recover_session(self, timeout: float = 10.0) -> None:
+        """
+        Attempt to recover an SSH session after an interrupt or timeout.
+
+        Clears the buffer and sends newlines to get back to a clean prompt state.
+
+        Args:
+            timeout: Timeout in seconds for recovery
+
+        Raises:
+            CUCMSSHClientError: If not connected
+            CUCMCommandTimeoutError: If recovery times out
+        """
+        if not self._session:
+            raise CUCMSSHClientError("Not connected. Call connect() first.")
+
+        logger.info("Attempting SSH session recovery")
+
+        # Clear any pending data in the buffer
+        self._session._buffer = ""
+
+        # Send a newline to trigger a fresh prompt
+        self._session.stdin.write('\n')
+        await self._session.stdin.drain()
+
+        # Wait briefly for the newline to be processed
+        await asyncio.sleep(0.5)
+
+        # Try to read until we see a prompt
+        try:
+            await self._session.read_until_prompt(timeout=timeout)
+            logger.info("Session recovery successful")
+        except CUCMCommandTimeoutError:
+            # Try one more time with another interrupt + newline
+            logger.warning("First recovery attempt failed, trying interrupt + newline")
+            await self._session.send_interrupt()
+            await asyncio.sleep(0.5)
+            self._session._buffer = ""
+            self._session.stdin.write('\n')
+            await self._session.stdin.drain()
+            await asyncio.sleep(0.5)
+            await self._session.read_until_prompt(timeout=timeout)
+            logger.info("Session recovery successful on second attempt")
+
     async def disconnect(self) -> None:
         """Close the SSH connection gracefully"""
         if self._session:

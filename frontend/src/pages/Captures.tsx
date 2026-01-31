@@ -58,6 +58,7 @@ const statusConfig: Record<CaptureStatus, { color: string; label: string }> = {
   running: { color: '#3b82f6', label: 'Running' },
   stopping: { color: '#eab308', label: 'Stopping' },
   completed: { color: '#22c55e', label: 'Completed' },
+  stopped: { color: '#22c55e', label: 'Stopped' },
   failed: { color: '#ef4444', label: 'Failed' },
   cancelled: { color: '#eab308', label: 'Cancelled' },
 }

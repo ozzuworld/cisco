@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     sftp_server_port: int = 2222  # Different from 22 to avoid conflicts
     sftp_server_host_key_path: Optional[str] = None  # Auto-generated if not set
 
+    # SFTP Transfer Mode
+    # sftp_pull_mode is deprecated - CUCM doesn't support direct SFTP downloads
+    sftp_pull_mode: bool = False  # Deprecated, kept for compatibility
+
+    # SFTP Relay Mode (for VPN users)
+    # When True: CUCM uploads to external relay server, then app downloads from relay
+    # Requires: SFTP_HOST, SFTP_USERNAME, SFTP_PASSWORD pointing to relay server
+    sftp_relay_mode: bool = False
+
     # Storage Settings
     storage_root: Path = Path("./storage")
 

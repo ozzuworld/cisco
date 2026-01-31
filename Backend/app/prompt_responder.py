@@ -133,7 +133,9 @@ class PromptResponder:
         stdout,
         timeout: float = 300.0,
         prompt: str = "admin:",
-        transcript_file = None
+        transcript_file = None,
+        stop_event: Optional[asyncio.Event] = None,
+        transfer_timeout: float = 180.0
     ) -> str:
         """
         Read output and respond to prompts until command completes.
@@ -147,6 +149,8 @@ class PromptResponder:
             timeout: Maximum time to wait for command completion
             prompt: Shell prompt that indicates command completion
             transcript_file: Optional file handle to write transcript incrementally
+            stop_event: Optional asyncio Event that signals stop request
+            transfer_timeout: Max time for transfer after prompts answered (default 180s)
 
         Returns:
             Complete transcript of the interaction
@@ -161,12 +165,22 @@ class PromptResponder:
         saw_prompt = False
         idle_start_time = None
         stable_idle_seconds = 3.0  # Wait 3s after prompt with no new prompts
+        prompts_completed = False  # Track when all prompts have been answered
+        prompts_completed_time = None  # Time when prompts were completed
 
         logger.debug("Starting prompt responder")
 
         try:
             async with asyncio.timeout(timeout):
                 while True:
+                    # Check for stop event (user requested stop)
+                    if stop_event and stop_event.is_set():
+                        logger.info("Stop event received during prompt responder")
+                        if transcript_file:
+                            transcript_file.write("\n\n[STOPPED: User requested stop]\n")
+                            transcript_file.flush()
+                        break
+
                     # Check for no-output timeout
                     current_time = asyncio.get_event_loop().time()
                     time_since_output = current_time - last_output_time
@@ -179,6 +193,18 @@ class PromptResponder:
                             transcript_file.write(f"[Last 500 chars: {buffer[-500:]}]\n")
                             transcript_file.flush()
                         raise CUCMSFTPTimeoutError(error_msg)
+
+                    # Check for transfer timeout (hard limit after prompts are answered)
+                    if prompts_completed and prompts_completed_time:
+                        time_since_prompts = current_time - prompts_completed_time
+                        if time_since_prompts > transfer_timeout:
+                            error_msg = f"SFTP transfer timed out: {transfer_timeout}s elapsed after prompts answered"
+                            logger.error(error_msg)
+                            if transcript_file:
+                                transcript_file.write(f"\n\n[ERROR: {error_msg}]\n")
+                                transcript_file.write(f"[Last 500 chars: {buffer[-500:]}]\n")
+                                transcript_file.flush()
+                            raise CUCMSFTPTimeoutError(error_msg)
 
                     # Read a chunk with short timeout to check for idle period
                     try:
@@ -210,12 +236,14 @@ class PromptResponder:
                         transcript_file.flush()
 
                     # Check for transfer completion indicators
-                    if "Transfer completed" in buffer or "done." in buffer.lower():
-                        logger.info("Transfer completion detected")
-                        # Continue reading to consume the shell prompt
-                        if prompt in buffer:
-                            logger.info("Shell prompt detected after transfer completion")
-                            break
+                    # Only check AFTER prompts are answered to avoid false positives
+                    if prompts_completed:
+                        if "Transfer completed" in buffer or "100%" in buffer:
+                            logger.info("Transfer completion detected")
+                            # Continue reading to consume the shell prompt
+                            if prompt in buffer:
+                                logger.info("Shell prompt detected after transfer completion")
+                                break
 
                     # Check if we've seen the shell prompt
                     if prompt in buffer and not saw_prompt:
@@ -249,6 +277,13 @@ class PromptResponder:
                         # Send response
                         stdin.write(response + '\n')
                         await stdin.drain()
+
+                        # Mark prompts as completed after the directory prompt
+                        # (the last prompt before transfer starts)
+                        if "directory" in matched.description.lower():
+                            prompts_completed = True
+                            prompts_completed_time = current_time
+                            logger.info(f"All SFTP prompts answered, starting transfer timeout ({transfer_timeout}s)")
 
                         # Clear buffer to wait for next prompt
                         buffer = ""

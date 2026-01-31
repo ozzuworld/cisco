@@ -1,6 +1,9 @@
 // Packet Capture Types
 
-export type CaptureStatus = 'pending' | 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled'
+export type CaptureStatus = 'pending' | 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled' | 'stopped'
+
+// Capture mode for standard vs rotating captures
+export type CaptureMode = 'standard' | 'rotating'
 
 export type CaptureProtocol = 'ip' | 'arp' | 'rarp' | 'all'
 
@@ -88,6 +91,7 @@ export type CaptureSessionStatus =
   | 'partial'      // Some devices succeeded - download available
   | 'failed'       // All devices failed
   | 'cancelled'    // User cancelled
+  | 'stopped'      // User stopped rotating capture
 
 // Per-target status values
 export type CaptureTargetStatus =
@@ -98,6 +102,7 @@ export type CaptureTargetStatus =
   | 'stopping'
   | 'collecting'
   | 'completed'
+  | 'stopped'      // User stopped rotating capture
   | 'failed'
   | 'cancelled'
 
@@ -114,7 +119,10 @@ export interface CaptureTargetRequest {
 // Start capture session request
 export interface StartCaptureSessionRequest {
   name?: string
-  duration_sec: number
+  mode?: CaptureMode           // Capture mode: standard (default) or rotating
+  duration_sec?: number        // Required for standard mode, ignored for rotating
+  size_per_file_mb?: number    // For rotating mode: size per file (1-100 MB, default: 25)
+  max_files?: number           // For rotating mode: max files to keep (2-100, default: 10)
   filter?: CaptureFilter
   targets: CaptureTargetRequest[]
   username?: string   // Optional global credentials (fallback)
@@ -143,11 +151,14 @@ export interface CaptureTargetInfo {
 export interface CaptureSessionInfo {
   session_id: string
   name?: string
+  mode?: CaptureMode            // standard or rotating
   status: CaptureSessionStatus
   created_at: string
   capture_started_at?: string
   completed_at?: string
   duration_sec: number
+  size_per_file_mb?: number     // For rotating captures
+  max_files?: number            // For rotating captures
   targets: CaptureTargetInfo[]
   bundle_filename?: string
 }
@@ -181,7 +192,7 @@ export interface StopCaptureSessionResponse {
 
 // Helper functions
 export function shouldPollCaptureSession(status: CaptureSessionStatus): boolean {
-  return !['completed', 'partial', 'failed', 'cancelled'].includes(status)
+  return !['completed', 'partial', 'failed', 'cancelled', 'stopped'].includes(status)
 }
 
 export function getSessionPollingInterval(status: CaptureSessionStatus): number {
@@ -202,7 +213,7 @@ export function getSessionPollingInterval(status: CaptureSessionStatus): number 
 }
 
 export function canDownloadSession(status: CaptureSessionStatus): boolean {
-  return status === 'completed' || status === 'partial'
+  return status === 'completed' || status === 'partial' || status === 'stopped'
 }
 
 // Default interfaces by device type

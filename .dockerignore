@@ -9,11 +9,11 @@
 docs/
 
 # Frontend development files
-frotend/node_modules/
-frotend/.env
-frotend/.env.local
-frotend/.env.development
-frotend/dist/
+frontend/node_modules/
+frontend/.env
+frontend/.env.local
+frontend/.env.development
+frontend/dist/
 
 # Backend development files
 Backend/__pycache__/
