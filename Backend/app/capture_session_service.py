@@ -412,6 +412,7 @@ class CaptureSessionManager:
                             "running": CaptureTargetStatus.CAPTURING,
                             "stopping": CaptureTargetStatus.STOPPING,
                             "completed": CaptureTargetStatus.COMPLETED,
+                            "stopped": CaptureTargetStatus.COMPLETED,
                             "failed": CaptureTargetStatus.FAILED,
                             "cancelled": CaptureTargetStatus.CANCELLED,
                         }
