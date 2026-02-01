@@ -1890,29 +1890,36 @@ class CaptureManager:
 
     async def stop_capture(self, capture_id: str) -> bool:
         """
-        Stop a running capture.
+        Stop a running or pending capture.
 
         Signals the capture to stop by setting the stop event.
-        The capture task will then send Ctrl+C, retrieve the file,
-        and complete normally.
+        For running captures, the task will send Ctrl+C, retrieve the file,
+        and complete normally. For pending captures still connecting,
+        cancels the task.
 
         Args:
             capture_id: Capture identifier
 
         Returns:
-            True if stop was initiated, False if capture not found/not running
+            True if stop was initiated, False if capture not found/not stoppable
         """
         capture = self._captures.get(capture_id)
         if not capture:
             return False
 
-        if capture.status != CaptureStatus.RUNNING:
-            return False
+        if capture.status == CaptureStatus.RUNNING:
+            logger.info(f"Stop requested for capture {capture_id}")
+            capture.status = CaptureStatus.STOPPING
+            capture._stop_event.set()
+            return True
 
-        logger.info(f"Stop requested for capture {capture_id}")
-        capture.status = CaptureStatus.STOPPING
-        capture._stop_event.set()  # Signal the capture loop to stop
-        return True
+        if capture.status == CaptureStatus.PENDING:
+            # Capture is still connecting - cancel the task
+            logger.info(f"Cancel requested for pending capture {capture_id}")
+            capture.cancel()
+            return True
+
+        return False
 
 
 def get_capture_manager() -> CaptureManager:

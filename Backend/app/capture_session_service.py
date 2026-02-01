@@ -334,10 +334,16 @@ class CaptureSessionManager:
 
         session.status = CaptureSessionStatus.STOPPING
 
-        # Stop all running captures
+        # Stop all active captures (running or still connecting)
+        active_statuses = {
+            CaptureTargetStatus.CAPTURING,
+            CaptureTargetStatus.CONFIGURING,
+            CaptureTargetStatus.READY,
+            CaptureTargetStatus.PENDING,
+        }
         tasks = []
         for target in session.targets:
-            if target.status == CaptureTargetStatus.CAPTURING and target.capture_id:
+            if target.status in active_statuses and target.capture_id:
                 task = self._stop_target_capture(session, target)
                 tasks.append(task)
 
