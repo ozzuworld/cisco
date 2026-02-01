@@ -10,44 +10,41 @@ services:
     ports:
       # Main application port (Frontend UI + API)
       - "8000:8000"
-      # SFTP server port (for CUCM to upload files)
+      # SFTP server port (for CUCM to upload files in local mode)
       - "2222:2222"
     volumes:
       # Persist storage across container restarts
       - ./storage:/app/storage
       # Optional: Mount profiles.yaml for customization
       - ./Backend/profiles.yaml:/app/profiles.yaml:ro
+    env_file:
+      - .env
     environment:
       # ======================================
-      # Application Settings
+      # Application Settings (fixed)
       # ======================================
       - ARTIFACTS_DIR=/app/storage/received
       - JOBS_DIR=/app/storage/jobs
       - TRANSCRIPT_DIR=/app/storage/transcripts
 
       # ======================================
-      # SFTP Relay Mode (for VPN users)
+      # SFTP Mode (from .env file)
       # ======================================
-      # When CUCM cannot reach your local machine (VPN/NAT), use a relay server:
-      # 1. CUCM uploads files to the relay SFTP server
-      # 2. App downloads files from the relay server
-      - SFTP_RELAY_MODE=true
-
-      # Relay SFTP Server Settings
-      # Configure these to point to your relay server that CUCM can reach
-      - SFTP_HOST=104.156.42.4
-      - SFTP_PORT=22
-      - SFTP_USERNAME=wx001-sftp
-      - SFTP_PASSWORD=your-password-here
-      # Directory on relay server where files will be uploaded
-      - SFTP_REMOTE_BASE_DIR=cucm-captures
+      # Switch modes:  cp .env.relay .env   (VPN/relay)
+      #                cp .env.local .env   (direct/embedded)
+      - SFTP_RELAY_MODE=${SFTP_RELAY_MODE:-false}
+      - SFTP_HOST=${SFTP_HOST:-}
+      - SFTP_PORT=${SFTP_PORT:-2222}
+      - SFTP_USERNAME=${SFTP_USERNAME:-cucm-collector}
+      - SFTP_PASSWORD=${SFTP_PASSWORD:-cucm-collector}
+      - SFTP_REMOTE_BASE_DIR=${SFTP_REMOTE_BASE_DIR:-}
 
       # ======================================
-      # Embedded SFTP Server (only if SFTP_RELAY_MODE=false)
+      # Embedded SFTP Server (from .env file)
       # ======================================
-      - SFTP_SERVER_ENABLED=false
-      - SFTP_SERVER_HOST=0.0.0.0
-      - SFTP_SERVER_PORT=2222
+      - SFTP_SERVER_ENABLED=${SFTP_SERVER_ENABLED:-true}
+      - SFTP_SERVER_HOST=${SFTP_SERVER_HOST:-0.0.0.0}
+      - SFTP_SERVER_PORT=${SFTP_SERVER_PORT:-2222}
       - SFTP_ROOT_PATH=/app/storage/received
 
       # ======================================
@@ -55,14 +52,12 @@ services:
       # ======================================
       # Uncomment to enable API key authentication
       # - API_KEY=your-secret-api-key-here
-
-      # CORS settings (default allows all origins)
-      - CORS_ALLOWED_ORIGINS=.*
+      - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-.*}
 
       # ======================================
       # Logging
       # ======================================
-      - LOG_LEVEL=INFO
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
 
     restart: unless-stopped
 
