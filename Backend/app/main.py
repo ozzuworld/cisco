@@ -690,6 +690,7 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
     Get current trace levels from CUCM node(s).
 
     Connects to each node and queries the current trace level for each service.
+    Nodes are queried concurrently for faster results.
     Use this to check the current state before/after setting trace levels.
 
     Args:
@@ -710,11 +711,8 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
     # Use provided services or defaults
     services = req_body.services or CUCM_TRACE_SERVICES
 
-    results = []
-    successful = 0
-    failed = 0
-
-    for host in req_body.hosts:
+    async def _get_node_trace_levels(host: str) -> NodeTraceLevelStatus:
+        """Get trace levels from a single node."""
         try:
             async with CUCMSSHClient(
                 host=host,
@@ -763,43 +761,48 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
                             raw_output=str(e)
                         ))
 
-                results.append(NodeTraceLevelStatus(
+                return NodeTraceLevelStatus(
                     host=host,
                     success=True,
                     services=service_levels,
                     error=None
-                ))
-                successful += 1
+                )
 
         except CUCMAuthError as e:
             logger.error(f"Authentication failed for {host}: {e}")
-            results.append(NodeTraceLevelStatus(
+            return NodeTraceLevelStatus(
                 host=host,
                 success=False,
                 services=[],
                 error="Authentication failed"
-            ))
-            failed += 1
+            )
 
         except CUCMConnectionError as e:
             logger.error(f"Connection error for {host}: {e}")
-            results.append(NodeTraceLevelStatus(
+            return NodeTraceLevelStatus(
                 host=host,
                 success=False,
                 services=[],
                 error=f"Connection error: {str(e)}"
-            ))
-            failed += 1
+            )
 
         except Exception as e:
             logger.exception(f"Error getting trace levels from {host}: {e}")
-            results.append(NodeTraceLevelStatus(
+            return NodeTraceLevelStatus(
                 host=host,
                 success=False,
                 services=[],
                 error=str(e)
-            ))
-            failed += 1
+            )
+
+    # Process all nodes concurrently
+    results = await asyncio.gather(*[
+        _get_node_trace_levels(host) for host in req_body.hosts
+    ])
+    results = list(results)
+
+    successful = sum(1 for r in results if r.success)
+    failed = sum(1 for r in results if not r.success)
 
     return GetTraceLevelResponse(
         results=results,
@@ -836,6 +839,7 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
 
     This allows you to set trace levels BEFORE an issue occurs, so when
     you collect logs later, they will contain the detailed information.
+    Nodes are configured concurrently for faster results.
 
     Use 'detailed' or 'verbose' when troubleshooting, then set back to
     'basic' when done to avoid performance impact.
@@ -857,11 +861,8 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
     services = req_body.services or CUCM_TRACE_SERVICES
     cucm_level = CUCM_TRACE_LEVELS.get(req_body.level.value, "Informational")
 
-    results = []
-    successful = 0
-    failed = 0
-
-    for host in req_body.hosts:
+    async def _set_node_trace_level(host: str) -> NodeTraceLevelResult:
+        """Set trace level on a single node."""
         try:
             async with CUCMSSHClient(
                 host=host,
@@ -892,51 +893,55 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
                         node_errors.append(f"{service}: {str(e)}")
 
                 if services_updated:
-                    results.append(NodeTraceLevelResult(
+                    return NodeTraceLevelResult(
                         host=host,
                         success=True,
                         services_updated=services_updated,
                         error="; ".join(node_errors) if node_errors else None
-                    ))
-                    successful += 1
+                    )
                 else:
-                    results.append(NodeTraceLevelResult(
+                    return NodeTraceLevelResult(
                         host=host,
                         success=False,
                         services_updated=[],
                         error="; ".join(node_errors) if node_errors else "No services updated"
-                    ))
-                    failed += 1
+                    )
 
         except CUCMAuthError as e:
             logger.error(f"[{host}] Authentication failed: {e}")
-            results.append(NodeTraceLevelResult(
+            return NodeTraceLevelResult(
                 host=host,
                 success=False,
                 services_updated=[],
                 error=f"Authentication failed: {str(e)}"
-            ))
-            failed += 1
+            )
 
         except CUCMConnectionError as e:
             logger.error(f"[{host}] Connection failed: {e}")
-            results.append(NodeTraceLevelResult(
+            return NodeTraceLevelResult(
                 host=host,
                 success=False,
                 services_updated=[],
                 error=f"Connection failed: {str(e)}"
-            ))
-            failed += 1
+            )
 
         except Exception as e:
             logger.exception(f"[{host}] Error setting trace level: {e}")
-            results.append(NodeTraceLevelResult(
+            return NodeTraceLevelResult(
                 host=host,
                 success=False,
                 services_updated=[],
                 error=str(e)
-            ))
-            failed += 1
+            )
+
+    # Process all nodes concurrently
+    results = await asyncio.gather(*[
+        _set_node_trace_level(host) for host in req_body.hosts
+    ])
+    results = list(results)
+
+    successful = sum(1 for r in results if r.success)
+    failed = sum(1 for r in results if not r.success)
 
     # Summary message
     if failed == 0:

@@ -74,7 +74,7 @@ export const traceService = {
       connect_timeout_sec: request.connect_timeout_sec,
       services: request.services,
     }, {
-      timeout: 180000, // 3 minutes - SSH + CLI startup per node can take 20s+
+      timeout: 300000, // 5 minutes - nodes run concurrently but CLI startup can be slow
     })
   },
 
@@ -91,7 +91,7 @@ export const traceService = {
       connect_timeout_sec: request.connect_timeout_sec,
       services: request.services,
     }, {
-      timeout: 180000, // 3 minutes - SSH + CLI startup per node can take 20s+
+      timeout: 300000, // 5 minutes - nodes run concurrently but CLI startup can be slow
     })
   },
 }
