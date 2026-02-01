@@ -722,66 +722,68 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
                 connect_timeout=float(req_body.connect_timeout_sec)
             ) as client:
 
+                # Run a single "show trace level" (no args) to get all services
+                # CUCM CLI does not accept multi-word service names as args
+                output = await client.execute_command("show trace level", timeout=30.0)
+                logger.info(f"[{host}] show trace level output: {repr(output.strip()[:500])}")
+
+                # Parse the output to find levels for each requested service
+                # Typical CUCM output formats vary but generally list
+                # service names with their trace levels
+                level_names = ["Debug", "Detailed", "Informational", "Error", "Fatal",
+                               "Arbitrary", "Entry_exit", "Significant", "Special",
+                               "State_Transition"]
+                output_lines = output.split('\n')
+
                 service_levels = []
                 for service in services:
-                    try:
-                        # Query current trace level
-                        # CUCM command: show trace level "Service Name"
-                        cmd = f'show trace level "{service}"'
-                        output = await client.execute_command(cmd, timeout=30.0)
+                    current_level = "Unknown"
+                    raw_match = None
+                    service_lower = service.lower()
 
-                        logger.info(f"[{host}] Trace level output for {service}: {repr(output.strip()[:300])}")
+                    for line in output_lines:
+                        line_stripped = line.strip()
+                        if not line_stripped:
+                            continue
+                        # Skip command echo and prompt lines
+                        if line_stripped.startswith('show ') or line_stripped.startswith('admin:'):
+                            continue
 
-                        # Parse output to extract current level
-                        # Priority order: look for lines explicitly mentioning "trace level"
-                        # then fall back to any line containing a known level name
-                        current_level = "Unknown"
-                        level_names = ["Debug", "Detailed", "Informational", "Error", "Fatal"]
-
-                        for line in output.split('\n'):
-                            line = line.strip()
-                            if not line:
-                                continue
-                            # Skip lines that are just the command echo
-                            if line.startswith('show ') or line.startswith('admin:'):
-                                continue
-
-                            # Best match: line explicitly mentions "trace level" or "trace is set"
-                            line_lower = line.lower()
-                            if 'trace' in line_lower and ('level' in line_lower or 'is set' in line_lower):
-                                for level_name in level_names:
-                                    if level_name.lower() in line_lower:
-                                        current_level = level_name
-                                        break
-                                if current_level != "Unknown":
-                                    break  # Found explicit trace level line, stop
-
-                        # Fallback: if no explicit trace level line found, scan all non-echo lines
-                        if current_level == "Unknown":
-                            for line in output.split('\n'):
-                                line = line.strip()
-                                if not line or line.startswith('show ') or line.startswith('admin:'):
-                                    continue
-                                for level_name in level_names:
-                                    if level_name in line:
-                                        current_level = level_name
-                                        break
-                                if current_level != "Unknown":
+                        # Check if this line mentions the service
+                        if service_lower in line_stripped.lower():
+                            raw_match = line_stripped
+                            # Look for a known level name on this line
+                            for level_name in level_names:
+                                if level_name.lower() in line_stripped.lower():
+                                    current_level = level_name
                                     break
+                            if current_level != "Unknown":
+                                break
 
-                        service_levels.append(ServiceTraceLevel(
-                            service_name=service,
-                            current_level=current_level,
-                            raw_output=output.strip()[:500] if output else None
-                        ))
+                    # If no service-specific line found, try scanning all lines
+                    # for level indicators (for simpler output formats)
+                    if current_level == "Unknown":
+                        for line in output_lines:
+                            line_stripped = line.strip()
+                            if not line_stripped:
+                                continue
+                            if line_stripped.startswith('show ') or line_stripped.startswith('admin:'):
+                                continue
+                            # Skip error messages about command syntax
+                            if 'parameter' in line_stripped.lower() or 'unsuccessfully' in line_stripped.lower():
+                                continue
+                            for level_name in level_names:
+                                if level_name in line_stripped:
+                                    current_level = level_name
+                                    break
+                            if current_level != "Unknown":
+                                break
 
-                    except Exception as e:
-                        logger.warning(f"Failed to get trace level for {service} on {host}: {e}")
-                        service_levels.append(ServiceTraceLevel(
-                            service_name=service,
-                            current_level="Error",
-                            raw_output=str(e)
-                        ))
+                    service_levels.append(ServiceTraceLevel(
+                        service_name=service,
+                        current_level=current_level,
+                        raw_output=raw_match or output.strip()[:500]
+                    ))
 
                 return NodeTraceLevelStatus(
                     host=host,
@@ -900,6 +902,8 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
                 for service in services:
                     try:
                         # Set trace level command
+                        # CUCM CLI: set trace enable <service_name> <level>
+                        # Try with quotes first; if that fails, try without
                         cmd = f'set trace enable "{service}" {cucm_level}'
                         logger.info(f"[{host}] Executing: {cmd}")
 
@@ -907,8 +911,26 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
                         output = await client.execute_command_with_confirmation(
                             cmd, confirmation="y", timeout=60.0
                         )
-                        services_updated.append(service)
-                        logger.info(f"[{host}] Successfully set trace level for {service}")
+                        logger.info(f"[{host}] Set trace output for {service}: {repr(output.strip()[:200])}")
+
+                        # Check if command failed due to parameter issues
+                        if 'unsuccessfully' in output.lower() or 'parameter' in output.lower():
+                            logger.warning(f"[{host}] Quoted command failed, retrying without quotes")
+                            # Retry without quotes - some CUCM versions handle
+                            # multi-word names differently
+                            cmd = f'set trace enable {service} {cucm_level}'
+                            logger.info(f"[{host}] Retrying: {cmd}")
+                            output = await client.execute_command_with_confirmation(
+                                cmd, confirmation="y", timeout=60.0
+                            )
+                            logger.info(f"[{host}] Retry output for {service}: {repr(output.strip()[:200])}")
+
+                        if 'unsuccessfully' not in output.lower():
+                            services_updated.append(service)
+                            logger.info(f"[{host}] Successfully set trace level for {service}")
+                        else:
+                            node_errors.append(f"{service}: Command failed")
+                            logger.warning(f"[{host}] Set trace failed for {service}")
 
                     except Exception as e:
                         logger.warning(f"[{host}] Failed to set trace for {service}: {e}")
