@@ -426,13 +426,34 @@ class CUCMSSHClient:
                 # Expected - we just wanted to collect banner text
                 pass
 
+            # Check if CLI is still starting up - extend timeout if needed
+            cli_starting_up = "starting up" in self._session._buffer.lower()
+            if cli_starting_up:
+                logger.info("CUCM CLI is starting up, waiting for CLI to become ready...")
+                # Wait additional time for CLI to finish starting, reading any output
+                try:
+                    async with asyncio.timeout(max(self.connect_timeout, 60.0)):
+                        while True:
+                            chunk = await stdout.read(1024)
+                            if chunk:
+                                self._session._buffer += chunk
+                                # Check if we got the prompt while waiting
+                                if self.prompt in self._session._buffer:
+                                    logger.info("CLI prompt appeared during startup wait")
+                                    break
+                            else:
+                                break  # EOF
+                except asyncio.TimeoutError:
+                    pass
+
             logger.debug(f"Banner collected ({len(self._session._buffer)} bytes), sending newline...")
             stdin.write('\n')
             await stdin.drain()
 
-            # Now wait for prompt with increased timeout
-            logger.debug("Waiting for prompt...")
-            await self._session.read_until_prompt(timeout=60.0)
+            # Now wait for prompt - use connect_timeout with a minimum of 60s
+            prompt_timeout = max(self.connect_timeout, 60.0)
+            logger.debug(f"Waiting for prompt (timeout={prompt_timeout}s)...")
+            await self._session.read_until_prompt(timeout=prompt_timeout)
             logger.info("Interactive shell session ready")
 
         except asyncio.TimeoutError:

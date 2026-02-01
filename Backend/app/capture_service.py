@@ -23,6 +23,7 @@ from app.ssh_client import (
     CUCMConnectionError,
     CUCMCommandTimeoutError,
     CUCMSSHClientError,
+    CUCMSFTPTimeoutError,
 )
 from app.csr_client import (
     CSRSSHClient,
@@ -45,7 +46,7 @@ from app.expressway_client import (
 )
 from app.config import get_settings
 from app.prompt_responder import PromptResponder
-from app.network_utils import get_local_ip_for_target
+from app.network_utils import get_local_ip_for_target, is_docker_internal_ip
 
 
 logger = logging.getLogger(__name__)
@@ -610,23 +611,32 @@ class CaptureManager:
                 await client.send_interrupt()
 
                 # Wait briefly for CUCM to process the interrupt
-                # IMPORTANT: Don't wait too long - rotating capture files may be cleaned up quickly!
                 await asyncio.sleep(3.0)
 
-                # Try to read any remaining output with a SHORT timeout
-                # Rotating capture cleanup may happen quickly, so don't block on this
+                # Try to read remaining output and get back to prompt
+                prompt_recovered = False
                 try:
-                    output = await client.read_until_prompt(timeout=5.0)
+                    output = await client.read_until_prompt(timeout=10.0)
                     logger.debug(f"Capture output: {output[:500] if output else '(empty)'}...")
+                    prompt_recovered = True
                 except Exception as e:
-                    logger.debug(f"Could not read capture output (expected for rotating): {e}")
-                    # Don't try to recover - just proceed to file retrieval
+                    logger.warning(f"Prompt not recovered after Ctrl+C: {e}")
 
-                # Retrieve all capture files IMMEDIATELY
-                # Rotating capture files may be cleaned up quickly after Ctrl+C
+                # If prompt didn't come back, use the session recovery mechanism
+                if not prompt_recovered:
+                    try:
+                        await client.recover_session(timeout=15.0)
+                        prompt_recovered = True
+                    except Exception as e2:
+                        logger.warning(f"Session recovery failed: {e2}")
+
+                # Retrieve capture files only if we have a working CLI session
                 capture.message = "Retrieving capture files..."
                 settings = get_settings()
-                if settings.sftp_relay_mode:
+                if not prompt_recovered:
+                    logger.warning("CLI prompt never recovered - skipping file retrieval")
+                    capture.message = "Capture stopped, CLI unresponsive - files may still be on CUCM"
+                elif settings.sftp_relay_mode:
                     logger.info("Using SFTP relay mode for rotating capture")
                     await self._retrieve_rotating_capture_files_relay(client, capture)
                 else:
@@ -683,9 +693,12 @@ class CaptureManager:
         capture: Capture
     ) -> None:
         """
-        Retrieve all rotation capture files from CUCM via SFTP (direct mode).
+        Retrieve all rotation capture files from CUCM via embedded SFTP (direct mode).
 
-        Rotation files are named: <filename>.cap, <filename>_001.cap, etc.
+        Uses 'file get activelog' for each file, which triggers CUCM to upload
+        directly to our embedded SFTP server. Files land in storage/received/.
+
+        Rotation files are named: <filename>.cap, <filename>.cap0, <filename>.cap1, etc.
 
         Args:
             client: Connected SSH client
@@ -701,13 +714,11 @@ class CaptureManager:
             output = await client.execute_command(list_cmd, timeout=30.0)
             logger.debug(f"File list output: {output[:500] if output else 'empty'}")
 
-            # Parse file list to find all .cap files
-            # Format: "12345  Jan 02 16:30  filename.cap"
+            # Parse file list - rotating captures use .cap, .cap0, .cap1, etc.
             cap_files = []
             for line in output.split('\n'):
                 if '.cap' in line and base_filename in line:
-                    # Extract filename from the line
-                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap)', line)
+                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap\d*)', line)
                     if match:
                         cap_files.append(match.group(1))
 
@@ -718,29 +729,122 @@ class CaptureManager:
                 capture.message = "Capture stopped, no files found"
                 return
 
-            # Create local directory
-            local_dir = settings.artifacts_dir / capture.capture_id
-            local_dir.mkdir(parents=True, exist_ok=True)
+            # Build SFTP directory path (what CUCM sees)
+            sftp_base = settings.sftp_remote_base_dir or ""
+            sftp_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
 
-            # Retrieve each file
-            total_size = 0
+            # Pre-create upload directory so CUCM can write to it
+            sftp_upload_dir = settings.artifacts_dir / capture.capture_id
+            sftp_upload_dir_nested = settings.artifacts_dir / sftp_directory if sftp_base else None
+            try:
+                sftp_upload_dir.mkdir(parents=True, exist_ok=True)
+                sftp_upload_dir.chmod(0o777)
+                logger.info(f"Created SFTP upload directory: {sftp_upload_dir}")
+
+                if sftp_upload_dir_nested and sftp_upload_dir_nested != sftp_upload_dir:
+                    sftp_upload_dir_nested.mkdir(parents=True, exist_ok=True)
+                    sftp_upload_dir_nested.chmod(0o777)
+                    logger.info(f"Created nested SFTP directory: {sftp_upload_dir_nested}")
+            except Exception as e:
+                logger.warning(f"Failed to create SFTP upload directory: {e}")
+
+            # Determine the best SFTP host IP for CUCM to connect back to
+            target_host = capture.request.host
+            if settings.sftp_host:
+                sftp_host = settings.sftp_host
+                logger.info(f"Using configured SFTP host: {sftp_host}")
+            else:
+                sftp_host = get_local_ip_for_target(target_host)
+                if not sftp_host:
+                    sftp_host = settings.effective_sftp_host
+                    logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
+                else:
+                    logger.info(f"Using auto-detected SFTP host {sftp_host} (for target {target_host})")
+
+                # Fail fast if Docker internal IP detected — CUCM can't reach it
+                if is_docker_internal_ip(sftp_host):
+                    error_msg = (
+                        f"Auto-detected IP {sftp_host} is a Docker internal address that CUCM cannot reach. "
+                        f"Set SFTP_HOST in your .env file to your PC's IP address on the CUCM network "
+                        f"(run 'ipconfig' or 'ip addr' to find it)."
+                    )
+                    logger.error(error_msg)
+                    capture.message = error_msg
+                    capture.status = "failed"
+                    return
+
+            # Retrieve each file via file get activelog + prompt responder
             collected_files = []
+            total_size = 0
 
             for cap_file in cap_files:
                 remote_path = f"platform/cli/{cap_file}"
-                local_file = local_dir / cap_file
+                logger.info(f"Retrieving rotation file: {cap_file}")
 
-                # TODO: Implement direct SFTP download for each file
-                # For now, use the existing file get approach
-                logger.info(f"Would retrieve: {remote_path}")
-                collected_files.append(local_file)
+                # Set up prompt responder for this file transfer
+                responder = PromptResponder(
+                    sftp_host=sftp_host,
+                    sftp_port=settings.sftp_port,
+                    sftp_username=settings.sftp_username,
+                    sftp_password=settings.sftp_password,
+                    sftp_directory=sftp_directory,
+                )
 
-            capture.files_collected = len(cap_files)
+                # Send file get command
+                get_cmd = f"file get activelog {remote_path}"
+                shell = client._session
+                if shell:
+                    shell.stdin.write(f"{get_cmd}\n")
+                    await shell.stdin.drain()
+
+                    # Handle SFTP prompts
+                    try:
+                        await asyncio.wait_for(
+                            responder.respond_to_prompts(
+                                shell.stdin,
+                                shell.stdout,
+                                transfer_timeout=180.0
+                            ),
+                            timeout=SFTP_PROMPT_TIMEOUT
+                        )
+                    except (asyncio.TimeoutError, CUCMSFTPTimeoutError) as e:
+                        logger.warning(f"Timeout retrieving {cap_file}: {e}")
+                        continue
+
+                # Wait for transfer to settle
+                await asyncio.sleep(2.0)
+
+                # Search for the uploaded file in the SFTP upload directory
+                # CUCM creates: <host>/<timestamp>/platform/cli/<file>
+                found_file = None
+                for f in sftp_upload_dir.rglob(cap_file):
+                    found_file = f
+                    logger.info(f"Found uploaded file: {found_file}")
+                    break
+
+                # Also search in nested dir if sftp_base is set
+                if not found_file and sftp_upload_dir_nested:
+                    for f in sftp_upload_dir_nested.rglob(cap_file):
+                        found_file = f
+                        logger.info(f"Found uploaded file at nested path: {found_file}")
+                        break
+
+                if found_file:
+                    file_size = found_file.stat().st_size
+                    total_size += file_size
+                    collected_files.append(found_file)
+                    logger.info(f"Retrieved {cap_file} ({file_size} bytes)")
+                else:
+                    logger.warning(f"Capture file {cap_file} not found in {sftp_upload_dir}")
+
+            capture.files_collected = len(collected_files)
             capture.local_file_paths = collected_files
             if collected_files:
-                capture.local_file_path = collected_files[0]  # Primary file
+                capture.local_file_path = collected_files[0]
             capture.file_size_bytes = total_size
-            capture.message = f"Retrieved {len(cap_files)} capture files"
+            capture.message = f"Retrieved {len(collected_files)} of {len(cap_files)} capture files"
+
+            logger.info(f"Rotating capture retrieval complete: {len(collected_files)} files, {total_size} bytes")
 
         except Exception as e:
             logger.warning(f"Failed to retrieve rotation files: {e}")
@@ -848,8 +952,8 @@ class CaptureManager:
                             for line in transcript_tail.split('\n'):
                                 if line.strip():
                                     logger.info(f"  CUCM: {line.strip()}")
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Timeout uploading {cap_file} to relay")
+                    except (asyncio.TimeoutError, CUCMSFTPTimeoutError) as e:
+                        logger.warning(f"Timeout uploading {cap_file} to relay: {e}")
                         continue
 
                 # Wait for upload to complete
@@ -1077,6 +1181,18 @@ class CaptureManager:
                     logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
                 else:
                     logger.info(f"Using auto-detected SFTP host {sftp_host} (for target {target_host})")
+
+                # Fail fast if Docker internal IP detected — CUCM can't reach it
+                if is_docker_internal_ip(sftp_host):
+                    error_msg = (
+                        f"Auto-detected IP {sftp_host} is a Docker internal address that CUCM cannot reach. "
+                        f"Set SFTP_HOST in your .env file to your PC's IP address on the CUCM network "
+                        f"(run 'ipconfig' or 'ip addr' to find it)."
+                    )
+                    logger.error(error_msg)
+                    capture.message = error_msg
+                    capture.status = "failed"
+                    return
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
@@ -1889,29 +2005,36 @@ class CaptureManager:
 
     async def stop_capture(self, capture_id: str) -> bool:
         """
-        Stop a running capture.
+        Stop a running or pending capture.
 
         Signals the capture to stop by setting the stop event.
-        The capture task will then send Ctrl+C, retrieve the file,
-        and complete normally.
+        For running captures, the task will send Ctrl+C, retrieve the file,
+        and complete normally. For pending captures still connecting,
+        cancels the task.
 
         Args:
             capture_id: Capture identifier
 
         Returns:
-            True if stop was initiated, False if capture not found/not running
+            True if stop was initiated, False if capture not found/not stoppable
         """
         capture = self._captures.get(capture_id)
         if not capture:
             return False
 
-        if capture.status != CaptureStatus.RUNNING:
-            return False
+        if capture.status == CaptureStatus.RUNNING:
+            logger.info(f"Stop requested for capture {capture_id}")
+            capture.status = CaptureStatus.STOPPING
+            capture._stop_event.set()
+            return True
 
-        logger.info(f"Stop requested for capture {capture_id}")
-        capture.status = CaptureStatus.STOPPING
-        capture._stop_event.set()  # Signal the capture loop to stop
-        return True
+        if capture.status == CaptureStatus.PENDING:
+            # Capture is still connecting - cancel the task
+            logger.info(f"Cancel requested for pending capture {capture_id}")
+            capture.cancel()
+            return True
+
+        return False
 
 
 def get_capture_manager() -> CaptureManager:

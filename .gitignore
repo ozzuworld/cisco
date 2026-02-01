@@ -1,0 +1,9 @@
+# Environment file (contains passwords)
+.env
+
+# Storage data
+storage/
+
+# Python
+__pycache__/
+*.pyc
