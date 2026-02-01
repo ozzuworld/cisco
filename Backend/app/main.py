@@ -728,8 +728,11 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
 
                 service_levels = []
                 for task in services:
-                    # Run "show trace level <tname>" for each task
-                    cmd = f"show trace level {task}"
+                    # Run "show trace <tname>" for each task
+                    # Note: "show trace" is the base command accepting 0-1 params.
+                    # "show trace level <task>" fails because "level" + "<task>" = 2 params.
+                    # The correct syntax is just "show trace <task>" (1 param).
+                    cmd = f"show trace {task}"
                     output = await client.execute_command(cmd, timeout=15.0)
                     logger.info(f"[{host}] {cmd} output: {repr(output.strip()[:300])}")
 
