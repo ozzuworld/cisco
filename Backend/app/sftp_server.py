@@ -376,6 +376,36 @@ async def generate_host_key(key_path: Path) -> asyncssh.SSHKey:
     return key
 
 
+async def generate_ecdsa_host_key(key_path: Path) -> asyncssh.SSHKey:
+    """
+    Generate or load an ECDSA SSH host key.
+
+    CUCM's PKIX-modified OpenSSH may have issues with RSA signature
+    algorithm negotiation. ECDSA avoids this entirely.
+
+    Args:
+        key_path: Path to the host key file
+
+    Returns:
+        SSH private key
+    """
+    if key_path.exists():
+        logger.info(f"Loading existing ECDSA host key from {key_path}")
+        return asyncssh.read_private_key(str(key_path))
+
+    logger.info(f"Generating new ECDSA host key at {key_path}")
+
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+
+    key = asyncssh.generate_private_key('ecdsa-sha2-nistp256')
+
+    key_path.write_bytes(key.export_private_key())
+    key_path.chmod(0o600)
+
+    logger.info(f"Generated new ECDSA host key: {key_path}")
+    return key
+
+
 class EmbeddedSFTPServer:
     """
     Manages the embedded SFTP server lifecycle.
@@ -436,10 +466,18 @@ class EmbeddedSFTPServer:
         # Ensure root path exists
         self._root_path.mkdir(parents=True, exist_ok=True)
 
-        # Generate or load host key
-        host_key = await generate_host_key(self._host_key_path)
-        logger.info(f"Host key algorithm: {host_key.get_algorithm()}, "
-                     f"key type: {type(host_key).__name__}")
+        # Generate or load host keys (ECDSA + RSA for maximum compatibility)
+        # ECDSA is preferred because CUCM's PKIX-modified OpenSSH may have
+        # issues with RSA signature algorithm negotiation (rsa-sha2-256/512).
+        # By offering ECDSA first, the key exchange avoids RSA complexity.
+        ecdsa_key_path = self._host_key_path.parent / "ssh_host_ecdsa_key"
+        ecdsa_key = await generate_ecdsa_host_key(ecdsa_key_path)
+        rsa_key = await generate_host_key(self._host_key_path)
+
+        host_keys = [ecdsa_key, rsa_key]
+        logger.info(
+            f"Host keys: {[k.get_algorithm() for k in host_keys]}"
+        )
 
         # Create server factory
         def server_factory():
@@ -453,9 +491,17 @@ class EmbeddedSFTPServer:
                 server_factory,
                 host=self._host,
                 port=self._port,
-                server_host_keys=[host_key],
+                server_host_keys=host_keys,
                 sftp_factory=sftp_factory,
-                process_factory=None  # SFTP only, no shell
+                process_factory=None,  # SFTP only, no shell
+                # Explicitly include ssh-rsa signature for older SSH clients
+                # that don't support rsa-sha2-256/512
+                signature_algs=[
+                    'ecdsa-sha2-nistp256',
+                    'rsa-sha2-512',
+                    'rsa-sha2-256',
+                    'ssh-rsa',
+                ],
             )
 
             self._started = True
