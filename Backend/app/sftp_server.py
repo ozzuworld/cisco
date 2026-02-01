@@ -377,32 +377,32 @@ async def generate_host_key(key_path: Path) -> asyncssh.SSHKey:
 
 
 async def generate_ecdsa_host_key(key_path: Path) -> asyncssh.SSHKey:
-    """
-    Generate or load an ECDSA SSH host key.
-
-    CUCM's PKIX-modified OpenSSH may have issues with RSA signature
-    algorithm negotiation. ECDSA avoids this entirely.
-
-    Args:
-        key_path: Path to the host key file
-
-    Returns:
-        SSH private key
-    """
+    """Generate or load an ECDSA SSH host key."""
     if key_path.exists():
         logger.info(f"Loading existing ECDSA host key from {key_path}")
         return asyncssh.read_private_key(str(key_path))
 
     logger.info(f"Generating new ECDSA host key at {key_path}")
-
     key_path.parent.mkdir(parents=True, exist_ok=True)
-
     key = asyncssh.generate_private_key('ecdsa-sha2-nistp256')
-
     key_path.write_bytes(key.export_private_key())
     key_path.chmod(0o600)
-
     logger.info(f"Generated new ECDSA host key: {key_path}")
+    return key
+
+
+async def generate_ed25519_host_key(key_path: Path) -> asyncssh.SSHKey:
+    """Generate or load an Ed25519 SSH host key (smallest/fastest)."""
+    if key_path.exists():
+        logger.info(f"Loading existing Ed25519 host key from {key_path}")
+        return asyncssh.read_private_key(str(key_path))
+
+    logger.info(f"Generating new Ed25519 host key at {key_path}")
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key = asyncssh.generate_private_key('ssh-ed25519')
+    key_path.write_bytes(key.export_private_key())
+    key_path.chmod(0o600)
+    logger.info(f"Generated new Ed25519 host key: {key_path}")
     return key
 
 
@@ -466,18 +466,25 @@ class EmbeddedSFTPServer:
         # Ensure root path exists
         self._root_path.mkdir(parents=True, exist_ok=True)
 
-        # Generate or load host keys (ECDSA + RSA for maximum compatibility)
-        # ECDSA is preferred because CUCM's PKIX-modified OpenSSH may have
-        # issues with RSA signature algorithm negotiation (rsa-sha2-256/512).
-        # By offering ECDSA first, the key exchange avoids RSA complexity.
-        ecdsa_key_path = self._host_key_path.parent / "ssh_host_ecdsa_key"
-        ecdsa_key = await generate_ecdsa_host_key(ecdsa_key_path)
-        rsa_key = await generate_host_key(self._host_key_path)
+        # Generate or load host keys (Ed25519, ECDSA, RSA for max compatibility)
+        # CUCM's PKIX-modified OpenSSH (SSH-2.0-OpenSSH_9.6 PKIX[14.4.2])
+        # may have specific algorithm requirements. Offering multiple key types
+        # ensures the client can pick one it supports.
+        key_dir = self._host_key_path.parent
+        host_keys = []
+        for name, gen_fn in [
+            ("ssh_host_ed25519_key", generate_ed25519_host_key),
+            ("ssh_host_ecdsa_key", generate_ecdsa_host_key),
+            ("ssh_host_key", generate_host_key),  # RSA
+        ]:
+            path = key_dir / name if name != "ssh_host_key" else self._host_key_path
+            try:
+                key = await gen_fn(path)
+                host_keys.append(key)
+            except Exception as e:
+                logger.warning(f"Failed to generate {name}: {e}")
 
-        host_keys = [ecdsa_key, rsa_key]
-        logger.info(
-            f"Host keys: {[k.get_algorithm() for k in host_keys]}"
-        )
+        logger.info(f"Host keys: {[k.get_algorithm() for k in host_keys]}")
 
         # Create server factory
         def server_factory():
@@ -486,22 +493,127 @@ class EmbeddedSFTPServer:
         # Create SFTP server factory
         sftp_factory = _create_sftp_server_factory(self._root_path)
 
+        # Build algorithm lists for maximum CUCM compatibility.
+        # Cisco bug CSCux74884: CUCM's SSH client may require legacy ciphers
+        # (aes256-cbc, 3des-cbc) and KEX (diffie-hellman-group1-sha1).
+        # We offer modern algorithms first, with legacy fallbacks.
+        # Only include algorithms that asyncssh actually supports.
+        def _get_available_algs():
+            """Get available algorithms from asyncssh submodules."""
+            available = {}
+            try:
+                from asyncssh.kex import get_kex_algs
+                available['kex'] = {
+                    a.decode() if isinstance(a, bytes) else a
+                    for a in get_kex_algs()
+                }
+            except Exception:
+                available['kex'] = None
+            try:
+                from asyncssh.encryption import get_encryption_algs
+                available['enc'] = {
+                    a.decode() if isinstance(a, bytes) else a
+                    for a in get_encryption_algs()
+                }
+            except Exception:
+                available['enc'] = None
+            try:
+                from asyncssh.mac import get_mac_algs
+                available['mac'] = {
+                    a.decode() if isinstance(a, bytes) else a
+                    for a in get_mac_algs()
+                }
+            except Exception:
+                available['mac'] = None
+            try:
+                from asyncssh.public_key import get_public_key_algs
+                available['sig'] = {
+                    a.decode() if isinstance(a, bytes) else a
+                    for a in get_public_key_algs()
+                }
+            except Exception:
+                available['sig'] = None
+            return available
+
+        avail = _get_available_algs()
+        logger.info(f"Available asyncssh algorithms: kex={avail.get('kex')}, "
+                     f"enc={avail.get('enc')}, mac={avail.get('mac')}, "
+                     f"sig={avail.get('sig')}")
+
+        def _filter(requested, supported_set):
+            if supported_set is None:
+                return requested  # Can't filter, use all
+            return [a for a in requested if a in supported_set]
+
+        kex_algs = _filter([
+            'curve25519-sha256',
+            'curve25519-sha256@libssh.org',
+            'ecdh-sha2-nistp256',
+            'ecdh-sha2-nistp384',
+            'ecdh-sha2-nistp521',
+            'diffie-hellman-group-exchange-sha256',
+            'diffie-hellman-group14-sha256',
+            'diffie-hellman-group16-sha512',
+            'diffie-hellman-group14-sha1',
+            'diffie-hellman-group-exchange-sha1',
+            'diffie-hellman-group1-sha1',
+        ], avail.get('kex'))
+
+        encryption_algs = _filter([
+            'chacha20-poly1305@openssh.com',
+            'aes256-gcm@openssh.com',
+            'aes128-gcm@openssh.com',
+            'aes256-ctr',
+            'aes192-ctr',
+            'aes128-ctr',
+            'aes256-cbc',
+            'aes192-cbc',
+            'aes128-cbc',
+            '3des-cbc',
+        ], avail.get('enc'))
+
+        mac_algs = _filter([
+            'hmac-sha2-512-etm@openssh.com',
+            'hmac-sha2-256-etm@openssh.com',
+            'hmac-sha2-512',
+            'hmac-sha2-256',
+            'hmac-sha1-etm@openssh.com',
+            'hmac-sha1',
+        ], avail.get('mac'))
+
+        sig_algs = _filter([
+            'ssh-ed25519',
+            'ecdsa-sha2-nistp256',
+            'rsa-sha2-512',
+            'rsa-sha2-256',
+            'ssh-rsa',
+        ], avail.get('sig'))
+
+        logger.info(f"Server KEX: {kex_algs}")
+        logger.info(f"Server Encryption: {encryption_algs}")
+        logger.info(f"Server MAC: {mac_algs}")
+        logger.info(f"Server Signature: {sig_algs}")
+
         try:
-            self._server = await asyncssh.create_server(
-                server_factory,
+            server_kwargs = dict(
                 host=self._host,
                 port=self._port,
                 server_host_keys=host_keys,
                 sftp_factory=sftp_factory,
                 process_factory=None,  # SFTP only, no shell
-                # Explicitly include ssh-rsa signature for older SSH clients
-                # that don't support rsa-sha2-256/512
-                signature_algs=[
-                    'ecdsa-sha2-nistp256',
-                    'rsa-sha2-512',
-                    'rsa-sha2-256',
-                    'ssh-rsa',
-                ],
+            )
+            # Only set algorithm lists if we got valid filtered results
+            if kex_algs:
+                server_kwargs['kex_algs'] = kex_algs
+            if encryption_algs:
+                server_kwargs['encryption_algs'] = encryption_algs
+            if mac_algs:
+                server_kwargs['mac_algs'] = mac_algs
+            if sig_algs:
+                server_kwargs['signature_algs'] = sig_algs
+
+            self._server = await asyncssh.create_server(
+                server_factory, **server_kwargs
             )
 
             self._started = True
