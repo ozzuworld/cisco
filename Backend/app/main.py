@@ -730,21 +730,43 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
                         cmd = f'show trace level "{service}"'
                         output = await client.execute_command(cmd, timeout=30.0)
 
+                        logger.info(f"[{host}] Trace level output for {service}: {repr(output.strip()[:300])}")
+
                         # Parse output to extract current level
+                        # Priority order: look for lines explicitly mentioning "trace level"
+                        # then fall back to any line containing a known level name
                         current_level = "Unknown"
+                        level_names = ["Debug", "Detailed", "Informational", "Error", "Fatal"]
+
                         for line in output.split('\n'):
                             line = line.strip()
-                            # Look for trace level in output
-                            if 'trace level' in line.lower() or 'Trace Level' in line:
-                                # Extract level name
-                                for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
-                                    if level_name.lower() in line.lower():
+                            if not line:
+                                continue
+                            # Skip lines that are just the command echo
+                            if line.startswith('show ') or line.startswith('admin:'):
+                                continue
+
+                            # Best match: line explicitly mentions "trace level" or "trace is set"
+                            line_lower = line.lower()
+                            if 'trace' in line_lower and ('level' in line_lower or 'is set' in line_lower):
+                                for level_name in level_names:
+                                    if level_name.lower() in line_lower:
                                         current_level = level_name
                                         break
-                            # Also check for direct level indicators
-                            for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
-                                if level_name in line:
-                                    current_level = level_name
+                                if current_level != "Unknown":
+                                    break  # Found explicit trace level line, stop
+
+                        # Fallback: if no explicit trace level line found, scan all non-echo lines
+                        if current_level == "Unknown":
+                            for line in output.split('\n'):
+                                line = line.strip()
+                                if not line or line.startswith('show ') or line.startswith('admin:'):
+                                    continue
+                                for level_name in level_names:
+                                    if level_name in line:
+                                        current_level = level_name
+                                        break
+                                if current_level != "Unknown":
                                     break
 
                         service_levels.append(ServiceTraceLevel(

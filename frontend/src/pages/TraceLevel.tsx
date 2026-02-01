@@ -79,10 +79,29 @@ export default function TraceLevel() {
   // Trace level state
   const [traceLevels, setTraceLevels] = useState<TraceLevelNodeResult[]>([])
   const [targetDebugLevel, setTargetDebugLevel] = useState<DebugLevel>('basic')
+  const [lastApplyResult, setLastApplyResult] = useState<{ success: boolean; message: string } | null>(null)
 
   // Hooks
   const getTraceLevelsMutation = useGetTraceLevels()
   const setTraceLevelsMutation = useSetTraceLevels()
+
+  // Map trace level names to chip colors
+  const getTraceLevelChipColor = (level: string): 'error' | 'warning' | 'info' | 'success' | 'default' => {
+    switch (level) {
+      case 'Debug': return 'warning'
+      case 'Detailed': return 'info'
+      case 'Informational': return 'success'
+      case 'Error': return 'error'
+      case 'Fatal': return 'error'
+      default: return 'default'
+    }
+  }
+
+  // Map trace level to human-readable description
+  const getTraceLevelLabel = (serviceName: string, level: string): string => {
+    const shortService = serviceName.replace('Cisco ', '')
+    return `${shortService}: ${level}`
+  }
 
   const handleConnect = async () => {
     if (!host || !username || !password) {
@@ -196,6 +215,8 @@ export default function TraceLevel() {
       return
     }
 
+    setLastApplyResult(null)
+
     setTraceLevelsMutation.mutate(
       {
         hosts: getEffectiveHosts(),
@@ -207,17 +228,23 @@ export default function TraceLevel() {
       {
         onSuccess: (response) => {
           if (response.successful_nodes > 0) {
-            enqueueSnackbar(
-              `Trace level set to ${targetDebugLevel} on ${response.successful_nodes} of ${response.total_nodes} nodes`,
-              { variant: 'success' }
-            )
+            setLastApplyResult({
+              success: true,
+              message: `Successfully applied "${targetDebugLevel}" trace level to ${response.successful_nodes} of ${response.total_nodes} node(s)`,
+            })
             handleFetchTraceLevels()
           } else {
-            enqueueSnackbar(response.message || 'Failed to set trace levels on any nodes', { variant: 'warning' })
+            setLastApplyResult({
+              success: false,
+              message: response.message || 'Failed to set trace levels on any nodes',
+            })
           }
         },
         onError: (error) => {
-          enqueueSnackbar(error instanceof Error ? error.message : 'Failed to set trace levels', { variant: 'error' })
+          setLastApplyResult({
+            success: false,
+            message: error instanceof Error ? error.message : 'Failed to set trace levels',
+          })
         },
       }
     )
@@ -533,9 +560,9 @@ export default function TraceLevel() {
                                 <Chip
                                   key={svc.service_name}
                                   size="small"
-                                  label={`${svc.service_name}: ${svc.current_level}`}
-                                  color={svc.current_level === 'Debug' ? 'warning' : svc.current_level === 'Detailed' ? 'info' : 'default'}
-                                  sx={{ height: 20, fontSize: '0.65rem' }}
+                                  label={getTraceLevelLabel(svc.service_name, svc.current_level)}
+                                  color={getTraceLevelChipColor(svc.current_level)}
+                                  sx={{ height: 22, fontSize: '0.7rem' }}
                                 />
                               ))}
                             </Box>
@@ -618,11 +645,26 @@ export default function TraceLevel() {
                 color="warning"
                 startIcon={setTraceLevelsMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />}
                 onClick={handleSetTraceLevels}
-                disabled={setTraceLevelsMutation.isPending || !device?.selectedNodes?.length}
+                disabled={setTraceLevelsMutation.isPending || getTraceLevelsMutation.isPending || !device?.selectedNodes?.length}
                 sx={{ mb: 2 }}
               >
                 {setTraceLevelsMutation.isPending ? 'Applying...' : `Apply to ${device?.selectedNodes?.length || 0} Selected Nodes`}
               </Button>
+
+              {lastApplyResult && (
+                <Alert
+                  severity={lastApplyResult.success ? 'success' : 'error'}
+                  sx={{ mb: 2 }}
+                  onClose={() => setLastApplyResult(null)}
+                >
+                  <Typography variant="body2">{lastApplyResult.message}</Typography>
+                  {lastApplyResult.success && getTraceLevelsMutation.isPending && (
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                      Verifying changes...
+                    </Typography>
+                  )}
+                </Alert>
+              )}
 
               {targetDebugLevel !== 'basic' && (
                 <Alert severity="warning">
