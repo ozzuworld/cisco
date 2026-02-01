@@ -693,9 +693,12 @@ class CaptureManager:
         capture: Capture
     ) -> None:
         """
-        Retrieve all rotation capture files from CUCM via SFTP (direct mode).
+        Retrieve all rotation capture files from CUCM via embedded SFTP (direct mode).
 
-        Rotation files are named: <filename>.cap, <filename>_001.cap, etc.
+        Uses 'file get activelog' for each file, which triggers CUCM to upload
+        directly to our embedded SFTP server. Files land in storage/received/.
+
+        Rotation files are named: <filename>.cap, <filename>.cap0, <filename>.cap1, etc.
 
         Args:
             client: Connected SSH client
@@ -711,13 +714,11 @@ class CaptureManager:
             output = await client.execute_command(list_cmd, timeout=30.0)
             logger.debug(f"File list output: {output[:500] if output else 'empty'}")
 
-            # Parse file list to find all .cap files
-            # Format: "12345  Jan 02 16:30  filename.cap"
+            # Parse file list - rotating captures use .cap, .cap0, .cap1, etc.
             cap_files = []
             for line in output.split('\n'):
                 if '.cap' in line and base_filename in line:
-                    # Extract filename from the line
-                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap)', line)
+                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap\d*)', line)
                     if match:
                         cap_files.append(match.group(1))
 
@@ -728,29 +729,110 @@ class CaptureManager:
                 capture.message = "Capture stopped, no files found"
                 return
 
-            # Create local directory
-            local_dir = settings.artifacts_dir / capture.capture_id
-            local_dir.mkdir(parents=True, exist_ok=True)
+            # Build SFTP directory path (what CUCM sees)
+            sftp_base = settings.sftp_remote_base_dir or ""
+            sftp_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
 
-            # Retrieve each file
-            total_size = 0
+            # Pre-create upload directory so CUCM can write to it
+            sftp_upload_dir = settings.artifacts_dir / capture.capture_id
+            sftp_upload_dir_nested = settings.artifacts_dir / sftp_directory if sftp_base else None
+            try:
+                sftp_upload_dir.mkdir(parents=True, exist_ok=True)
+                sftp_upload_dir.chmod(0o777)
+                logger.info(f"Created SFTP upload directory: {sftp_upload_dir}")
+
+                if sftp_upload_dir_nested and sftp_upload_dir_nested != sftp_upload_dir:
+                    sftp_upload_dir_nested.mkdir(parents=True, exist_ok=True)
+                    sftp_upload_dir_nested.chmod(0o777)
+                    logger.info(f"Created nested SFTP directory: {sftp_upload_dir_nested}")
+            except Exception as e:
+                logger.warning(f"Failed to create SFTP upload directory: {e}")
+
+            # Determine the best SFTP host IP for CUCM to connect back to
+            target_host = capture.request.host
+            if settings.sftp_host:
+                sftp_host = settings.sftp_host
+                logger.info(f"Using configured SFTP host: {sftp_host}")
+            else:
+                sftp_host = get_local_ip_for_target(target_host)
+                if not sftp_host:
+                    sftp_host = settings.effective_sftp_host
+                    logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
+                else:
+                    logger.info(f"Using auto-detected SFTP host {sftp_host} (for target {target_host})")
+
+            # Retrieve each file via file get activelog + prompt responder
             collected_files = []
+            total_size = 0
 
             for cap_file in cap_files:
                 remote_path = f"platform/cli/{cap_file}"
-                local_file = local_dir / cap_file
+                logger.info(f"Retrieving rotation file: {cap_file}")
 
-                # TODO: Implement direct SFTP download for each file
-                # For now, use the existing file get approach
-                logger.info(f"Would retrieve: {remote_path}")
-                collected_files.append(local_file)
+                # Set up prompt responder for this file transfer
+                responder = PromptResponder(
+                    sftp_host=sftp_host,
+                    sftp_port=settings.sftp_port,
+                    sftp_username=settings.sftp_username,
+                    sftp_password=settings.sftp_password,
+                    sftp_directory=sftp_directory,
+                )
 
-            capture.files_collected = len(cap_files)
+                # Send file get command
+                get_cmd = f"file get activelog {remote_path}"
+                shell = client._session
+                if shell:
+                    shell.stdin.write(f"{get_cmd}\n")
+                    await shell.stdin.drain()
+
+                    # Handle SFTP prompts
+                    try:
+                        await asyncio.wait_for(
+                            responder.respond_to_prompts(
+                                shell.stdin,
+                                shell.stdout,
+                                transfer_timeout=180.0
+                            ),
+                            timeout=SFTP_PROMPT_TIMEOUT
+                        )
+                    except (asyncio.TimeoutError, CUCMSFTPTimeoutError) as e:
+                        logger.warning(f"Timeout retrieving {cap_file}: {e}")
+                        continue
+
+                # Wait for transfer to settle
+                await asyncio.sleep(2.0)
+
+                # Search for the uploaded file in the SFTP upload directory
+                # CUCM creates: <host>/<timestamp>/platform/cli/<file>
+                found_file = None
+                for f in sftp_upload_dir.rglob(cap_file):
+                    found_file = f
+                    logger.info(f"Found uploaded file: {found_file}")
+                    break
+
+                # Also search in nested dir if sftp_base is set
+                if not found_file and sftp_upload_dir_nested:
+                    for f in sftp_upload_dir_nested.rglob(cap_file):
+                        found_file = f
+                        logger.info(f"Found uploaded file at nested path: {found_file}")
+                        break
+
+                if found_file:
+                    file_size = found_file.stat().st_size
+                    total_size += file_size
+                    collected_files.append(found_file)
+                    logger.info(f"Retrieved {cap_file} ({file_size} bytes)")
+                else:
+                    logger.warning(f"Capture file {cap_file} not found in {sftp_upload_dir}")
+
+            capture.files_collected = len(collected_files)
             capture.local_file_paths = collected_files
             if collected_files:
-                capture.local_file_path = collected_files[0]  # Primary file
+                capture.local_file_path = collected_files[0]
             capture.file_size_bytes = total_size
-            capture.message = f"Retrieved {len(cap_files)} capture files"
+            capture.message = f"Retrieved {len(collected_files)} of {len(cap_files)} capture files"
+
+            logger.info(f"Rotating capture retrieval complete: {len(collected_files)} files, {total_size} bytes")
 
         except Exception as e:
             logger.warning(f"Failed to retrieve rotation files: {e}")
