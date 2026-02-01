@@ -73,6 +73,8 @@ export const traceService = {
       port: request.port ?? 22,
       connect_timeout_sec: request.connect_timeout_sec,
       services: request.services,
+    }, {
+      timeout: 180000, // 3 minutes - SSH + CLI startup per node can take 20s+
     })
   },
 
@@ -88,6 +90,8 @@ export const traceService = {
       port: request.port ?? 22,
       connect_timeout_sec: request.connect_timeout_sec,
       services: request.services,
+    }, {
+      timeout: 180000, // 3 minutes - SSH + CLI startup per node can take 20s+
     })
   },
 }
