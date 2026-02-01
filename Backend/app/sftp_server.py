@@ -429,11 +429,17 @@ class EmbeddedSFTPServer:
             logger.warning("SFTP server already started")
             return
 
+        # Enable asyncssh debug logging to diagnose handshake issues
+        asyncssh_logger = logging.getLogger('asyncssh')
+        asyncssh_logger.setLevel(logging.DEBUG)
+
         # Ensure root path exists
         self._root_path.mkdir(parents=True, exist_ok=True)
 
         # Generate or load host key
         host_key = await generate_host_key(self._host_key_path)
+        logger.info(f"Host key algorithm: {host_key.get_algorithm()}, "
+                     f"key type: {type(host_key).__name__}")
 
         # Create server factory
         def server_factory():
@@ -449,27 +455,6 @@ class EmbeddedSFTPServer:
                 port=self._port,
                 server_host_keys=[host_key],
                 sftp_factory=sftp_factory,
-                # Allow older algorithms for CUCM compatibility
-                # CUCM (especially older versions) only supports legacy ssh-rsa
-                # signatures, which asyncssh 2.14+ disables by default
-                signature_algs=[
-                    'ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512',
-                ],
-                kex_algs=[
-                    'diffie-hellman-group14-sha256',
-                    'diffie-hellman-group14-sha1',
-                    'diffie-hellman-group-exchange-sha256',
-                    'diffie-hellman-group-exchange-sha1',
-                    'diffie-hellman-group1-sha1',
-                    'ecdh-sha2-nistp256',
-                    'ecdh-sha2-nistp384',
-                ],
-                encryption_algs=[
-                    'aes256-ctr', 'aes128-ctr', 'aes192-ctr',
-                    'aes256-cbc', 'aes128-cbc', 'aes192-cbc',
-                    '3des-cbc',
-                ],
-                mac_algs=['hmac-sha2-256', 'hmac-sha2-512', 'hmac-sha1', 'hmac-md5'],
                 process_factory=None  # SFTP only, no shell
             )
 
