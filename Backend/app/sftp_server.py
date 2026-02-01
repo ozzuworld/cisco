@@ -452,7 +452,7 @@ class EmbeddedSFTPServer:
                 # Allow older algorithms for CUCM compatibility
                 # CUCM (especially older versions) only supports legacy ssh-rsa
                 # signatures, which asyncssh 2.14+ disables by default
-                server_host_key_algs=[
+                signature_algs=[
                     'ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512',
                 ],
                 kex_algs=[
