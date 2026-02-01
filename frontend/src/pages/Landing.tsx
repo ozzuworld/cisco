@@ -1,22 +1,23 @@
 import { useNavigate } from 'react-router-dom'
 import { Box, Grid, Card, CardActionArea, Typography, alpha } from '@mui/material'
 import Lottie from 'lottie-react'
-import { Description, GraphicEq, HealthAndSafety } from '@mui/icons-material'
+import { Description, GraphicEq, HealthAndSafety, BugReport } from '@mui/icons-material'
 
 import callAnimation from '@/assets/call.json'
 import voiceAnimation from '@/assets/voice.json'
 import healthAnimation from '@/assets/health.json'
 
 interface FeatureCardProps {
-  animation: object
+  animation?: object
   title: string
   subtitle: string
   icon: React.ReactElement
+  largeIcon?: React.ReactElement
   accentColor: string
   onClick: () => void
 }
 
-function FeatureCard({ animation, title, subtitle, icon, accentColor, onClick }: FeatureCardProps) {
+function FeatureCard({ animation, title, subtitle, icon, largeIcon, accentColor, onClick }: FeatureCardProps) {
   return (
     <Card
       sx={{
@@ -96,7 +97,11 @@ function FeatureCard({ animation, title, subtitle, icon, accentColor, onClick }:
             p: 1,
           }}
         >
-          <Lottie animationData={animation} loop={true} style={{ width: '100%', height: '100%' }} />
+          {animation ? (
+            <Lottie animationData={animation} loop={true} style={{ width: '100%', height: '100%' }} />
+          ) : largeIcon ? (
+            largeIcon
+          ) : null}
         </Box>
 
         {/* Title */}
@@ -151,6 +156,7 @@ const FEATURE_COLORS = {
   callRouting: '#1976d2',   // blue
   voiceQuality: '#0d9488',  // teal
   healthCheck: '#10b981',   // emerald
+  traceLevel: '#ed6c02',    // orange/amber
 }
 
 export default function Landing() {
@@ -166,8 +172,8 @@ export default function Landing() {
         p: 3,
       }}
     >
-      <Grid container spacing={4} sx={{ maxWidth: 1200, justifyContent: 'center' }}>
-        <Grid item xs={12} sm={6} md={4}>
+      <Grid container spacing={4} sx={{ maxWidth: 1400, justifyContent: 'center' }}>
+        <Grid item xs={12} sm={6} md={3}>
           <FeatureCard
             animation={callAnimation}
             title="Call Routing"
@@ -177,7 +183,7 @@ export default function Landing() {
             onClick={() => navigate('/logs/new')}
           />
         </Grid>
-        <Grid item xs={12} sm={6} md={4}>
+        <Grid item xs={12} sm={6} md={3}>
           <FeatureCard
             animation={voiceAnimation}
             title="Voice Quality"
@@ -187,7 +193,7 @@ export default function Landing() {
             onClick={() => navigate('/captures')}
           />
         </Grid>
-        <Grid item xs={12} sm={6} md={4}>
+        <Grid item xs={12} sm={6} md={3}>
           <FeatureCard
             animation={healthAnimation}
             title="Health Check"
@@ -195,6 +201,16 @@ export default function Landing() {
             icon={<HealthAndSafety sx={{ fontSize: 22, color: FEATURE_COLORS.healthCheck }} />}
             accentColor={FEATURE_COLORS.healthCheck}
             onClick={() => navigate('/health')}
+          />
+        </Grid>
+        <Grid item xs={12} sm={6} md={3}>
+          <FeatureCard
+            title="Trace Level"
+            subtitle="Configure CUCM trace levels before collecting logs"
+            icon={<BugReport sx={{ fontSize: 22, color: FEATURE_COLORS.traceLevel }} />}
+            largeIcon={<BugReport sx={{ fontSize: 80, color: FEATURE_COLORS.traceLevel, opacity: 0.85 }} />}
+            accentColor={FEATURE_COLORS.traceLevel}
+            onClick={() => navigate('/trace-level')}
           />
         </Grid>
       </Grid>

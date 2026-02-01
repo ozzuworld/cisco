@@ -11,6 +11,7 @@ import Jobs from './pages/Jobs'
 import JobDetails from './pages/JobDetails'
 import NewJob from './pages/NewJob'
 import LogCollection from './pages/LogCollection'
+import TraceLevel from './pages/TraceLevel'
 import Health from './pages/Health'
 import CaptureSession from './pages/CaptureSession'
 import Profiles from './pages/Profiles'
@@ -47,6 +48,7 @@ function App() {
                   <Route path="jobs/new" element={<NewJob />} />
                   <Route path="jobs/:jobId" element={<JobDetails />} />
                   <Route path="logs/new" element={<LogCollection />} />
+                  <Route path="trace-level" element={<TraceLevel />} />
                   <Route path="health" element={<Health />} />
                   <Route path="captures" element={<CaptureSession />} />
                   <Route path="profiles" element={<Profiles />} />
