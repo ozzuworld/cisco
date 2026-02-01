@@ -167,6 +167,8 @@ class PromptResponder:
         stable_idle_seconds = 3.0  # Wait 3s after prompt with no new prompts
         prompts_completed = False  # Track when all prompts have been answered
         prompts_completed_time = None  # Time when prompts were completed
+        prompt_retry_counts: Dict[str, int] = {}  # Track retries per prompt
+        max_prompt_retries = 3  # Max times to answer the same prompt
 
         logger.debug("Starting prompt responder")
 
@@ -254,6 +256,24 @@ class PromptResponder:
                     # Check for prompts that need responses
                     matched = self.match_prompt(buffer)
                     if matched:
+                        # Track retries per prompt to detect infinite loops
+                        retry_key = matched.description
+                        prompt_retry_counts[retry_key] = prompt_retry_counts.get(retry_key, 0) + 1
+
+                        if prompt_retry_counts[retry_key] > max_prompt_retries:
+                            response = matched.response_generator()
+                            shown_value = "(hidden)" if "password" in matched.description.lower() else f"'{response}'"
+                            error_msg = (
+                                f"SFTP prompt '{matched.description}' asked {prompt_retry_counts[retry_key]} times "
+                                f"(max {max_prompt_retries}). CUCM is rejecting the value {shown_value}. "
+                                f"Check your SFTP settings in .env"
+                            )
+                            logger.error(error_msg)
+                            if transcript_file:
+                                transcript_file.write(f"\n\n[ERROR: {error_msg}]\n")
+                                transcript_file.flush()
+                            raise CUCMSFTPTimeoutError(error_msg)
+
                         # We got a prompt - reset idle tracking
                         idle_start_time = None
                         saw_prompt = False
