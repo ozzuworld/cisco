@@ -7,11 +7,13 @@ services:
       dockerfile: Dockerfile
     image: cucm-log-collector:latest
     container_name: cucm-log-collector
-    ports:
-      # Main application port (Frontend UI + API)
-      - "8000:8000"
-      # SFTP server port (for CUCM to upload files in local mode)
-      - "2222:2222"
+
+    # Use host networking so the container shares the host's network stack.
+    # This means the app can reach CUCM on local subnets (e.g. 172.168.0.0/24)
+    # and CUCM can reach the embedded SFTP server directly at the host's IP.
+    # Ports 8000 (UI/API) and 2222 (SFTP) bind directly on the host.
+    network_mode: host
+
     volumes:
       # Persist storage across container restarts
       - ./storage:/app/storage
@@ -77,12 +79,3 @@ services:
         reservations:
           cpus: '0.5'
           memory: 512M
-
-volumes:
-  # Named volume for persistence (optional, using bind mount above)
-  storage:
-    driver: local
-
-networks:
-  default:
-    name: cucm-network
