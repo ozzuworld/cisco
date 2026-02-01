@@ -611,23 +611,32 @@ class CaptureManager:
                 await client.send_interrupt()
 
                 # Wait briefly for CUCM to process the interrupt
-                # IMPORTANT: Don't wait too long - rotating capture files may be cleaned up quickly!
                 await asyncio.sleep(3.0)
 
-                # Try to read any remaining output with a SHORT timeout
-                # Rotating capture cleanup may happen quickly, so don't block on this
+                # Try to read remaining output and get back to prompt
+                prompt_recovered = False
                 try:
-                    output = await client.read_until_prompt(timeout=5.0)
+                    output = await client.read_until_prompt(timeout=10.0)
                     logger.debug(f"Capture output: {output[:500] if output else '(empty)'}...")
+                    prompt_recovered = True
                 except Exception as e:
-                    logger.debug(f"Could not read capture output (expected for rotating): {e}")
-                    # Don't try to recover - just proceed to file retrieval
+                    logger.warning(f"Prompt not recovered after Ctrl+C: {e}")
 
-                # Retrieve all capture files IMMEDIATELY
-                # Rotating capture files may be cleaned up quickly after Ctrl+C
+                # If prompt didn't come back, use the session recovery mechanism
+                if not prompt_recovered:
+                    try:
+                        await client.recover_session(timeout=15.0)
+                        prompt_recovered = True
+                    except Exception as e2:
+                        logger.warning(f"Session recovery failed: {e2}")
+
+                # Retrieve capture files only if we have a working CLI session
                 capture.message = "Retrieving capture files..."
                 settings = get_settings()
-                if settings.sftp_relay_mode:
+                if not prompt_recovered:
+                    logger.warning("CLI prompt never recovered - skipping file retrieval")
+                    capture.message = "Capture stopped, CLI unresponsive - files may still be on CUCM"
+                elif settings.sftp_relay_mode:
                     logger.info("Using SFTP relay mode for rotating capture")
                     await self._retrieve_rotating_capture_files_relay(client, capture)
                 else:
