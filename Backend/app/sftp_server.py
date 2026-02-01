@@ -44,7 +44,8 @@ class CUCMSFTPServer(SFTPServer):
         super().__init__(conn)
         self._root = root_path.resolve()
         self._conn = conn
-        logger.debug(f"SFTP session started, root={self._root}")
+        self._bytes_written = {}  # Track bytes per file handle
+        logger.info(f"SFTP session started, root={self._root}")
 
     def _resolve_path(self, path: str) -> Path:
         """
@@ -226,6 +227,8 @@ class CUCMSFTPServer(SFTPServer):
         try:
             handle.seek(offset)
             handle.write(data)
+            handle_id = id(handle)
+            self._bytes_written[handle_id] = self._bytes_written.get(handle_id, 0) + len(data)
             return len(data)
         except OSError as e:
             logger.error(f"Failed to write to file: {e}")
@@ -235,8 +238,14 @@ class CUCMSFTPServer(SFTPServer):
         """Close an open file or directory handle."""
         if hasattr(handle, 'close'):
             try:
+                handle_id = id(handle)
+                name = getattr(handle, 'name', 'unknown')
+                bytes_total = self._bytes_written.pop(handle_id, 0)
                 handle.close()
-                logger.debug("File handle closed")
+                if bytes_total > 0:
+                    logger.info(f"File write complete: {name} ({bytes_total} bytes)")
+                else:
+                    logger.debug(f"File handle closed: {name}")
             except Exception as e:
                 logger.warning(f"Error closing handle: {e}")
 
@@ -269,8 +278,11 @@ class CUCMSFTPServer(SFTPServer):
         # Return path relative to root (client's view)
         try:
             rel_path = resolved.relative_to(self._root)
-            return '/' + str(rel_path) if str(rel_path) != '.' else '/'
+            result = '/' + str(rel_path) if str(rel_path) != '.' else '/'
+            logger.info(f"SFTP realpath: {path} -> {result}")
+            return result
         except ValueError:
+            logger.info(f"SFTP realpath: {path} -> /")
             return '/'
 
     def exit(self) -> None:
@@ -308,7 +320,7 @@ class CUCMSSHServer(asyncssh.SSHServer):
         if exc:
             logger.warning(f"SSH connection lost: {exc}")
         else:
-            logger.debug("SSH connection closed")
+            logger.info("SSH connection closed cleanly")
 
     def begin_auth(self, username: str) -> bool:
         """Called when authentication begins - return True to require auth."""
@@ -438,10 +450,26 @@ class EmbeddedSFTPServer:
                 server_host_keys=[host_key],
                 sftp_factory=sftp_factory,
                 # Allow older algorithms for CUCM compatibility
-                kex_algs=['diffie-hellman-group14-sha256', 'diffie-hellman-group14-sha1',
-                          'diffie-hellman-group-exchange-sha256', 'ecdh-sha2-nistp256'],
-                encryption_algs=['aes256-ctr', 'aes128-ctr', 'aes256-cbc', 'aes128-cbc'],
-                mac_algs=['hmac-sha2-256', 'hmac-sha1'],
+                # CUCM (especially older versions) only supports legacy ssh-rsa
+                # signatures, which asyncssh 2.14+ disables by default
+                server_host_key_algs=[
+                    'ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512',
+                ],
+                kex_algs=[
+                    'diffie-hellman-group14-sha256',
+                    'diffie-hellman-group14-sha1',
+                    'diffie-hellman-group-exchange-sha256',
+                    'diffie-hellman-group-exchange-sha1',
+                    'diffie-hellman-group1-sha1',
+                    'ecdh-sha2-nistp256',
+                    'ecdh-sha2-nistp384',
+                ],
+                encryption_algs=[
+                    'aes256-ctr', 'aes128-ctr', 'aes192-ctr',
+                    'aes256-cbc', 'aes128-cbc', 'aes192-cbc',
+                    '3des-cbc',
+                ],
+                mac_algs=['hmac-sha2-256', 'hmac-sha2-512', 'hmac-sha1', 'hmac-md5'],
                 process_factory=None  # SFTP only, no shell
             )
 

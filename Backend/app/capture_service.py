@@ -793,13 +793,14 @@ class CaptureManager:
                 # Send file get command
                 get_cmd = f"file get activelog {remote_path}"
                 shell = client._session
+                transfer_transcript = ""
                 if shell:
                     shell.stdin.write(f"{get_cmd}\n")
                     await shell.stdin.drain()
 
                     # Handle SFTP prompts
                     try:
-                        await asyncio.wait_for(
+                        transfer_transcript = await asyncio.wait_for(
                             responder.respond_to_prompts(
                                 shell.stdin,
                                 shell.stdout,
@@ -810,6 +811,13 @@ class CaptureManager:
                     except (asyncio.TimeoutError, CUCMSFTPTimeoutError) as e:
                         logger.warning(f"Timeout retrieving {cap_file}: {e}")
                         continue
+
+                # Log CUCM output from the transfer for debugging
+                if transfer_transcript:
+                    # Show last 500 chars of transcript to see errors/transfer status
+                    snippet = transfer_transcript[-500:].strip()
+                    if snippet:
+                        logger.info(f"CUCM transfer output (last 500 chars): {snippet}")
 
                 # Wait for transfer to settle
                 await asyncio.sleep(2.0)
@@ -829,13 +837,32 @@ class CaptureManager:
                         logger.info(f"Found uploaded file at nested path: {found_file}")
                         break
 
+                # Fallback: search in the entire received directory
+                if not found_file:
+                    for f in settings.artifacts_dir.rglob(cap_file):
+                        found_file = f
+                        logger.info(f"Found uploaded file in received root: {found_file}")
+                        break
+
                 if found_file:
                     file_size = found_file.stat().st_size
                     total_size += file_size
                     collected_files.append(found_file)
                     logger.info(f"Retrieved {cap_file} ({file_size} bytes)")
                 else:
-                    logger.warning(f"Capture file {cap_file} not found in {sftp_upload_dir}")
+                    # Diagnostic: list what's actually in the upload directory
+                    try:
+                        all_files = list(sftp_upload_dir.rglob("*"))
+                        received_files = list(settings.artifacts_dir.rglob("*.cap*"))
+                        logger.warning(
+                            f"Capture file {cap_file} not found. "
+                            f"Upload dir ({sftp_upload_dir}) contains {len(all_files)} items: "
+                            f"{[str(f.relative_to(sftp_upload_dir)) for f in all_files[:10]]}. "
+                            f"Received dir has {len(received_files)} .cap files: "
+                            f"{[str(f.relative_to(settings.artifacts_dir)) for f in received_files[:10]]}"
+                        )
+                    except Exception as diag_err:
+                        logger.warning(f"Capture file {cap_file} not found in {sftp_upload_dir} (diag error: {diag_err})")
 
             capture.files_collected = len(collected_files)
             capture.local_file_paths = collected_files
