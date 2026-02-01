@@ -46,7 +46,7 @@ from app.expressway_client import (
 )
 from app.config import get_settings
 from app.prompt_responder import PromptResponder
-from app.network_utils import get_local_ip_for_target
+from app.network_utils import get_local_ip_for_target, is_docker_internal_ip
 
 
 logger = logging.getLogger(__name__)
@@ -761,6 +761,18 @@ class CaptureManager:
                 else:
                     logger.info(f"Using auto-detected SFTP host {sftp_host} (for target {target_host})")
 
+                # Fail fast if Docker internal IP detected — CUCM can't reach it
+                if is_docker_internal_ip(sftp_host):
+                    error_msg = (
+                        f"Auto-detected IP {sftp_host} is a Docker internal address that CUCM cannot reach. "
+                        f"Set SFTP_HOST in your .env file to your PC's IP address on the CUCM network "
+                        f"(run 'ipconfig' or 'ip addr' to find it)."
+                    )
+                    logger.error(error_msg)
+                    capture.message = error_msg
+                    capture.status = "failed"
+                    return
+
             # Retrieve each file via file get activelog + prompt responder
             collected_files = []
             total_size = 0
@@ -1169,6 +1181,18 @@ class CaptureManager:
                     logger.warning(f"Could not detect local IP for target {target_host}, using {sftp_host}")
                 else:
                     logger.info(f"Using auto-detected SFTP host {sftp_host} (for target {target_host})")
+
+                # Fail fast if Docker internal IP detected — CUCM can't reach it
+                if is_docker_internal_ip(sftp_host):
+                    error_msg = (
+                        f"Auto-detected IP {sftp_host} is a Docker internal address that CUCM cannot reach. "
+                        f"Set SFTP_HOST in your .env file to your PC's IP address on the CUCM network "
+                        f"(run 'ipconfig' or 'ip addr' to find it)."
+                    )
+                    logger.error(error_msg)
+                    capture.message = error_msg
+                    capture.status = "failed"
+                    return
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
