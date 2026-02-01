@@ -34,19 +34,44 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # CUCM trace level mapping
-# Maps our debug_level to CUCM trace level names
+# Maps our debug_level to CUCM CLI trace level keywords
+# Valid CLI levels: Error, Special, State_Transition, Significant, Entry_exit, Arbitrary, Detailed
+# Order (least to most verbose): Error < Special < State_Transition < Significant < Entry_exit < Arbitrary < Detailed
 CUCM_TRACE_LEVELS = {
-    "basic": "Informational",      # Default - minimal logging
-    "detailed": "Detailed",        # More verbose - good for TAC
-    "verbose": "Debug",            # Maximum detail - performance impact
+    "basic": "Error",              # Default - errors only, minimal performance impact
+    "detailed": "Significant",     # Moderate verbosity - good for general troubleshooting
+    "verbose": "Detailed",         # Maximum detail - what TAC typically requests
 }
 
-# CUCM services to set trace levels on
-# These are the main services TAC typically requests traces for
+# CUCM CLI task names for trace commands
+# These are the valid tname values for "show trace level <tname>" and "set trace enable <level> <tname>"
+# Discovered from CUCM CLI: "Valid tasks are: dbl dbnotify cdpmib syslogmib mib2agt servm clm sappagt snmpdm hostagt"
 CUCM_TRACE_SERVICES = [
-    "Cisco CallManager",           # Main CallManager service
-    "Cisco CTIManager",            # CTI related
+    "dbl",           # Database Layer
+    "servm",         # Service Manager
+    "clm",           # Cluster Manager
+    "cdpmib",        # CDP MIB Agent
+    "syslogmib",     # Syslog MIB Agent
+    "dbnotify",      # Database Change Notification
+    "mib2agt",       # MIB2 Agent (SNMP)
+    "sappagt",       # SNMP Application Agent
+    "snmpdm",        # SNMP Data Manager
+    "hostagt",       # Host Agent
 ]
+
+# Human-readable display names for task names
+CUCM_TASK_DISPLAY_NAMES = {
+    "dbl": "Database Layer",
+    "servm": "Service Manager",
+    "clm": "Cluster Manager",
+    "cdpmib": "CDP MIB",
+    "syslogmib": "Syslog MIB",
+    "dbnotify": "DB Notification",
+    "mib2agt": "MIB2 Agent",
+    "sappagt": "SNMP App Agent",
+    "snmpdm": "SNMP Data Mgr",
+    "hostagt": "Host Agent",
+}
 
 
 def build_trace_set_commands(debug_level: str) -> List[str]:
@@ -59,12 +84,12 @@ def build_trace_set_commands(debug_level: str) -> List[str]:
     Returns:
         List of CLI commands to execute
     """
-    cucm_level = CUCM_TRACE_LEVELS.get(debug_level, "Informational")
+    cucm_level = CUCM_TRACE_LEVELS.get(debug_level, "Error")
     commands = []
 
-    for service in CUCM_TRACE_SERVICES:
-        # CUCM trace command format
-        commands.append(f'set trace enable "{service}" {cucm_level}')
+    for task in CUCM_TRACE_SERVICES:
+        # CUCM CLI format: set trace enable <Level> <tname>
+        commands.append(f'set trace enable {cucm_level} {task}')
 
     return commands
 
@@ -78,9 +103,9 @@ def build_trace_reset_commands() -> List[str]:
     """
     commands = []
 
-    for service in CUCM_TRACE_SERVICES:
-        # Reset to Informational (basic/default level)
-        commands.append(f'set trace enable "{service}" Informational')
+    for task in CUCM_TRACE_SERVICES:
+        # Reset to Error (basic/default level)
+        commands.append(f'set trace enable Error {task}')
 
     return commands
 

@@ -659,7 +659,7 @@ from app.models import (
     NodeTraceLevelResult,
     DebugLevel,
 )
-from app.job_manager import CUCM_TRACE_LEVELS, CUCM_TRACE_SERVICES
+from app.job_manager import CUCM_TRACE_LEVELS, CUCM_TRACE_SERVICES, CUCM_TASK_DISPLAY_NAMES
 
 
 @app.post(
@@ -722,67 +722,48 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
                 connect_timeout=float(req_body.connect_timeout_sec)
             ) as client:
 
-                # Run a single "show trace level" (no args) to get all services
-                # CUCM CLI does not accept multi-word service names as args
-                output = await client.execute_command("show trace level", timeout=30.0)
-                logger.info(f"[{host}] show trace level output: {repr(output.strip()[:500])}")
-
-                # Parse the output to find levels for each requested service
-                # Typical CUCM output formats vary but generally list
-                # service names with their trace levels
-                level_names = ["Debug", "Detailed", "Informational", "Error", "Fatal",
-                               "Arbitrary", "Entry_exit", "Significant", "Special",
-                               "State_Transition"]
-                output_lines = output.split('\n')
+                # Valid CUCM CLI trace levels
+                level_names = ["Detailed", "Arbitrary", "Entry_exit", "Significant",
+                               "State_Transition", "Special", "Error"]
 
                 service_levels = []
-                for service in services:
-                    current_level = "Unknown"
-                    raw_match = None
-                    service_lower = service.lower()
+                for task in services:
+                    # Run "show trace level <tname>" for each task
+                    cmd = f"show trace level {task}"
+                    output = await client.execute_command(cmd, timeout=15.0)
+                    logger.info(f"[{host}] {cmd} output: {repr(output.strip()[:300])}")
 
-                    for line in output_lines:
+                    current_level = "Unknown"
+                    raw_output = output.strip()[:300]
+
+                    # Parse output lines looking for trace level keywords
+                    for line in output.split('\n'):
                         line_stripped = line.strip()
                         if not line_stripped:
                             continue
                         # Skip command echo and prompt lines
                         if line_stripped.startswith('show ') or line_stripped.startswith('admin:'):
                             continue
+                        # Skip error messages
+                        if 'unsuccessfully' in line_stripped.lower() or 'valid tasks' in line_stripped.lower():
+                            current_level = "Error (query failed)"
+                            break
 
-                        # Check if this line mentions the service
-                        if service_lower in line_stripped.lower():
-                            raw_match = line_stripped
-                            # Look for a known level name on this line
-                            for level_name in level_names:
-                                if level_name.lower() in line_stripped.lower():
-                                    current_level = level_name
-                                    break
-                            if current_level != "Unknown":
+                        # Look for a known level name on this line
+                        for level_name in level_names:
+                            if level_name.lower() in line_stripped.lower():
+                                current_level = level_name
                                 break
+                        if current_level != "Unknown":
+                            break
 
-                    # If no service-specific line found, try scanning all lines
-                    # for level indicators (for simpler output formats)
-                    if current_level == "Unknown":
-                        for line in output_lines:
-                            line_stripped = line.strip()
-                            if not line_stripped:
-                                continue
-                            if line_stripped.startswith('show ') or line_stripped.startswith('admin:'):
-                                continue
-                            # Skip error messages about command syntax
-                            if 'parameter' in line_stripped.lower() or 'unsuccessfully' in line_stripped.lower():
-                                continue
-                            for level_name in level_names:
-                                if level_name in line_stripped:
-                                    current_level = level_name
-                                    break
-                            if current_level != "Unknown":
-                                break
+                    # Use display name for the service_name field
+                    display_name = CUCM_TASK_DISPLAY_NAMES.get(task, task)
 
                     service_levels.append(ServiceTraceLevel(
-                        service_name=service,
+                        service_name=f"{display_name} ({task})",
                         current_level=current_level,
-                        raw_output=raw_match or output.strip()[:500]
+                        raw_output=raw_output
                     ))
 
                 return NodeTraceLevelStatus(
@@ -883,7 +864,7 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
 
     # Use provided services or defaults
     services = req_body.services or CUCM_TRACE_SERVICES
-    cucm_level = CUCM_TRACE_LEVELS.get(req_body.level.value, "Informational")
+    cucm_level = CUCM_TRACE_LEVELS.get(req_body.level.value, "Error")
 
     async def _set_node_trace_level(host: str) -> NodeTraceLevelResult:
         """Set trace level on a single node."""
@@ -899,42 +880,30 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
                 services_updated = []
                 node_errors = []
 
-                for service in services:
+                for task in services:
                     try:
-                        # Set trace level command
-                        # CUCM CLI: set trace enable <service_name> <level>
-                        # Try with quotes first; if that fails, try without
-                        cmd = f'set trace enable "{service}" {cucm_level}'
+                        # CUCM CLI syntax: set trace enable <Level> <tname>
+                        cmd = f'set trace enable {cucm_level} {task}'
                         logger.info(f"[{host}] Executing: {cmd}")
 
-                        # Use confirmation method since this command prompts for y/n
+                        # Use confirmation method since this command may prompt for y/n
                         output = await client.execute_command_with_confirmation(
-                            cmd, confirmation="y", timeout=60.0
+                            cmd, confirmation="y", timeout=30.0
                         )
-                        logger.info(f"[{host}] Set trace output for {service}: {repr(output.strip()[:200])}")
+                        logger.info(f"[{host}] Set trace output for {task}: {repr(output.strip()[:200])}")
 
-                        # Check if command failed due to parameter issues
-                        if 'unsuccessfully' in output.lower() or 'parameter' in output.lower():
-                            logger.warning(f"[{host}] Quoted command failed, retrying without quotes")
-                            # Retry without quotes - some CUCM versions handle
-                            # multi-word names differently
-                            cmd = f'set trace enable {service} {cucm_level}'
-                            logger.info(f"[{host}] Retrying: {cmd}")
-                            output = await client.execute_command_with_confirmation(
-                                cmd, confirmation="y", timeout=60.0
-                            )
-                            logger.info(f"[{host}] Retry output for {service}: {repr(output.strip()[:200])}")
+                        display_name = CUCM_TASK_DISPLAY_NAMES.get(task, task)
 
                         if 'unsuccessfully' not in output.lower():
-                            services_updated.append(service)
-                            logger.info(f"[{host}] Successfully set trace level for {service}")
+                            services_updated.append(f"{display_name} ({task})")
+                            logger.info(f"[{host}] Successfully set trace level for {task}")
                         else:
-                            node_errors.append(f"{service}: Command failed")
-                            logger.warning(f"[{host}] Set trace failed for {service}")
+                            node_errors.append(f"{task}: Command failed")
+                            logger.warning(f"[{host}] Set trace failed for {task}: {output.strip()[:200]}")
 
                     except Exception as e:
-                        logger.warning(f"[{host}] Failed to set trace for {service}: {e}")
-                        node_errors.append(f"{service}: {str(e)}")
+                        logger.warning(f"[{host}] Failed to set trace for {task}: {e}")
+                        node_errors.append(f"{task}: {str(e)}")
 
                 if services_updated:
                     return NodeTraceLevelResult(

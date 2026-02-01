@@ -86,21 +86,23 @@ export default function TraceLevel() {
   const setTraceLevelsMutation = useSetTraceLevels()
 
   // Map trace level names to chip colors
+  // CUCM CLI levels (least to most verbose): Error < Special < State_Transition < Significant < Entry_exit < Arbitrary < Detailed
   const getTraceLevelChipColor = (level: string): 'error' | 'warning' | 'info' | 'success' | 'default' => {
-    switch (level) {
-      case 'Debug': return 'warning'
-      case 'Detailed': return 'info'
-      case 'Informational': return 'success'
-      case 'Error': return 'error'
-      case 'Fatal': return 'error'
-      default: return 'default'
-    }
+    const lvl = level.toLowerCase()
+    if (lvl.includes('error')) return 'error'
+    if (lvl === 'special' || lvl === 'state_transition') return 'default'
+    if (lvl === 'significant' || lvl === 'entry_exit') return 'info'
+    if (lvl === 'arbitrary') return 'warning'
+    if (lvl === 'detailed') return 'success'
+    if (lvl === 'unknown') return 'default'
+    return 'default'
   }
 
-  // Map trace level to human-readable description
+  // Format trace level label for display - extract short task name from "Display Name (task)"
   const getTraceLevelLabel = (serviceName: string, level: string): string => {
-    const shortService = serviceName.replace('Cisco ', '')
-    return `${shortService}: ${level}`
+    const match = serviceName.match(/\((\w+)\)/)
+    const shortName = match ? match[1] : serviceName
+    return `${shortName}: ${level}`
   }
 
   const handleConnect = async () => {
@@ -557,13 +559,14 @@ export default function TraceLevel() {
                           nodeResult.success ? (
                             <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
                               {nodeResult.services.map((svc) => (
-                                <Chip
-                                  key={svc.service_name}
-                                  size="small"
-                                  label={getTraceLevelLabel(svc.service_name, svc.current_level)}
-                                  color={getTraceLevelChipColor(svc.current_level)}
-                                  sx={{ height: 22, fontSize: '0.7rem' }}
-                                />
+                                <Tooltip key={svc.service_name} title={svc.service_name} arrow>
+                                  <Chip
+                                    size="small"
+                                    label={getTraceLevelLabel(svc.service_name, svc.current_level)}
+                                    color={getTraceLevelChipColor(svc.current_level)}
+                                    sx={{ height: 22, fontSize: '0.7rem' }}
+                                  />
+                                </Tooltip>
                               ))}
                             </Box>
                           ) : (
