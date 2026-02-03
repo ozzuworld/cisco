@@ -71,7 +71,8 @@ COPY Backend/profiles.yaml .
 # Copy SFTP server configuration and entrypoint
 COPY Backend/sshd_config_sftp ./sshd_config_sftp
 COPY Backend/entrypoint.sh ./entrypoint.sh
-RUN chmod +x ./entrypoint.sh
+# Fix Windows CRLF line endings and make executable
+RUN sed -i 's/\r$//' ./entrypoint.sh ./sshd_config_sftp && chmod +x ./entrypoint.sh
 
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
