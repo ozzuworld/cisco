@@ -1375,12 +1375,16 @@ class CaptureManager:
                     remote_path = None
                     for candidate in path_candidates:
                         try:
-                            await sftp.stat(candidate)
+                            stat_result = await sftp.stat(candidate)
                             remote_path = candidate
-                            logger.info(f"Found capture file at SFTP path: {candidate}")
+                            logger.info(
+                                f"Found capture file at SFTP path: {candidate} "
+                                f"(stat size={stat_result.size}, "
+                                f"permissions={oct(stat_result.permissions) if stat_result.permissions else 'N/A'})"
+                            )
                             break
-                        except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPError):
-                            logger.debug(f"Path not found: {candidate}")
+                        except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPError) as e:
+                            logger.debug(f"Path not found: {candidate} ({e})")
                             continue
 
                     if not remote_path:
@@ -1388,17 +1392,35 @@ class CaptureManager:
                         capture.message = "Capture complete, file not found on CUCM SFTP"
                         return
 
-                    # Download using manual read to avoid stat-based size validation
-                    # CUCM's SFTP stat() returns incorrect sizes (e.g., partition size)
-                    logger.info(f"Downloading {remote_path} via manual SFTP read...")
+                    # Download using chunked reads with explicit size/offset.
+                    # CUCM's SFTP stat() returns incorrect file sizes (e.g., partition
+                    # size ~1.1GB). asyncssh's read() without args and sftp.get() both
+                    # validate bytes received against the stat'd size, causing failures.
+                    # By reading in explicit chunks, we bypass that validation entirely.
+                    logger.info(f"Downloading {remote_path} via chunked SFTP read...")
                     try:
                         async with sftp.open(remote_path, 'rb') as remote_file:
-                            data = await remote_file.read()
-                            local_file.write_bytes(data)
-                        logger.info(f"SFTP download complete: {local_file} ({len(data)} bytes)")
+                            with open(str(local_file), 'wb') as f:
+                                offset = 0
+                                block_size = 65536
+                                while True:
+                                    try:
+                                        chunk = await remote_file.read(block_size, offset)
+                                    except asyncssh.SFTPError:
+                                        # Server returned EOF or error - stop reading
+                                        break
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    offset += len(chunk)
+                        logger.info(f"SFTP chunked download complete: {local_file} ({offset} bytes)")
+                        if offset > 0 and offset < 256:
+                            # Very small file - log contents for debugging
+                            raw = local_file.read_bytes()
+                            logger.info(f"Small file hex dump: {raw.hex()}")
+                            logger.info(f"Small file text (lossy): {raw.decode('utf-8', errors='replace')}")
                     except asyncssh.SFTPError as e:
-                        # sftp.open/read may also fail - try sftp.get as fallback
-                        logger.warning(f"Manual read failed ({e}), trying sftp.get...")
+                        logger.warning(f"Chunked read failed ({e}), trying sftp.get as fallback...")
                         await sftp.get(remote_path, str(local_file), block_size=65536)
                         logger.info(f"SFTP get fallback complete: {local_file}")
 
@@ -1529,11 +1551,21 @@ class CaptureManager:
                         local_file = local_dir / cap_file
 
                         try:
-                            # Use manual read to avoid stat-based size validation
+                            # Use chunked reads with explicit size/offset to bypass
+                            # CUCM's incorrect stat() file sizes
                             logger.info(f"Downloading {cap_file}...")
                             async with sftp.open(remote_path, 'rb') as remote_f:
-                                data = await remote_f.read()
-                                local_file.write_bytes(data)
+                                with open(str(local_file), 'wb') as f:
+                                    dl_offset = 0
+                                    while True:
+                                        try:
+                                            chunk = await remote_f.read(65536, dl_offset)
+                                        except asyncssh.SFTPError:
+                                            break
+                                        if not chunk:
+                                            break
+                                        f.write(chunk)
+                                        dl_offset += len(chunk)
 
                             if local_file.exists() and local_file.stat().st_size > 0:
                                 file_size = local_file.stat().st_size
