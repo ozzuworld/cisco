@@ -1351,14 +1351,41 @@ class CaptureManager:
 
             logger.info(f"Pulling capture file via SFTP from CUCM {host}:{port}")
 
-            async with asyncssh.connect(
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-                known_hosts=None,
-            ) as conn:
-                async with conn.start_sftp_client() as sftp:
+            # Step 1: SSH connect
+            logger.info(f"[SFTP-PULL] Step 1: Connecting SSH to {host}:{port}...")
+            try:
+                conn = await asyncssh.connect(
+                    host=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    known_hosts=None,
+                )
+            except Exception as e:
+                logger.warning(f"[SFTP-PULL] SSH connect failed: {type(e).__name__}: {e}")
+                capture.message = f"Capture complete, SSH connect failed: {e}"
+                return
+
+            try:
+                logger.info(f"[SFTP-PULL] Step 2: SSH connected. Starting SFTP client...")
+
+                # Step 2: Start SFTP client - this is where CUCM may fail
+                try:
+                    sftp = await conn.start_sftp_client()
+                except Exception as e:
+                    logger.warning(
+                        f"[SFTP-PULL] SFTP client init failed: {type(e).__name__}: {e}. "
+                        f"Falling back to SCP..."
+                    )
+                    # SFTP subsystem failed - try SCP instead
+                    await self._retrieve_capture_file_scp(
+                        conn, capture, capture_file, path_candidates, local_file
+                    )
+                    return
+
+                try:
+                    logger.info(f"[SFTP-PULL] Step 3: SFTP client ready. Listing root...")
+
                     if capture._stop_event.is_set() or capture._cancelled:
                         logger.info(f"Capture {capture.capture_id} stop requested during SFTP")
                         return
@@ -1369,12 +1396,13 @@ class CaptureManager:
                         root_names = [e.filename for e in root_entries[:20]]
                         logger.info(f"CUCM SFTP root directory contents: {root_names}")
                     except Exception as e:
-                        logger.debug(f"Could not list SFTP root: {e}")
+                        logger.warning(f"Could not list SFTP root: {type(e).__name__}: {e}")
 
                     # Try each path candidate
                     remote_path = None
                     for candidate in path_candidates:
                         try:
+                            logger.info(f"[SFTP-PULL] Trying stat on: {candidate}")
                             stat_result = await sftp.stat(candidate)
                             remote_path = candidate
                             logger.info(
@@ -1392,12 +1420,8 @@ class CaptureManager:
                         capture.message = "Capture complete, file not found on CUCM SFTP"
                         return
 
-                    # Download using chunked reads with explicit size/offset.
-                    # CUCM's SFTP stat() returns incorrect file sizes (e.g., partition
-                    # size ~1.1GB). asyncssh's read() without args and sftp.get() both
-                    # validate bytes received against the stat'd size, causing failures.
-                    # By reading in explicit chunks, we bypass that validation entirely.
-                    logger.info(f"Downloading {remote_path} via chunked SFTP read...")
+                    # Download using chunked reads with explicit size/offset
+                    logger.info(f"[SFTP-PULL] Step 4: Downloading {remote_path} via chunked read...")
                     try:
                         async with sftp.open(remote_path, 'rb') as remote_file:
                             with open(str(local_file), 'wb') as f:
@@ -1407,7 +1431,6 @@ class CaptureManager:
                                     try:
                                         chunk = await remote_file.read(block_size, offset)
                                     except asyncssh.SFTPError:
-                                        # Server returned EOF or error - stop reading
                                         break
                                     if not chunk:
                                         break
@@ -1415,7 +1438,6 @@ class CaptureManager:
                                     offset += len(chunk)
                         logger.info(f"SFTP chunked download complete: {local_file} ({offset} bytes)")
                         if offset > 0 and offset < 256:
-                            # Very small file - log contents for debugging
                             raw = local_file.read_bytes()
                             logger.info(f"Small file hex dump: {raw.hex()}")
                             logger.info(f"Small file text (lossy): {raw.decode('utf-8', errors='replace')}")
@@ -1423,6 +1445,11 @@ class CaptureManager:
                         logger.warning(f"Chunked read failed ({e}), trying sftp.get as fallback...")
                         await sftp.get(remote_path, str(local_file), block_size=65536)
                         logger.info(f"SFTP get fallback complete: {local_file}")
+
+                finally:
+                    sftp.exit()
+            finally:
+                conn.close()
 
             # Verify file was downloaded
             if local_file.exists() and local_file.stat().st_size > 0:
@@ -1456,6 +1483,44 @@ class CaptureManager:
         except Exception as e:
             logger.warning(f"Failed to pull capture file: {e}")
             capture.message = f"Capture complete, file retrieval failed: {e}"
+
+    async def _retrieve_capture_file_scp(
+        self,
+        conn,
+        capture: Capture,
+        capture_file: str,
+        path_candidates: list,
+        local_file,
+    ) -> None:
+        """
+        Fallback: retrieve capture file using SCP instead of SFTP.
+
+        CUCM's SFTP subsystem may send malformed init packets that crash
+        asyncssh's SFTP client. SCP uses a different protocol path and
+        may work where SFTP fails.
+        """
+        import asyncssh
+
+        for candidate in path_candidates:
+            try:
+                logger.info(f"[SCP] Trying SCP download: {candidate} -> {local_file}")
+                await asyncssh.scp(
+                    (conn, candidate),
+                    str(local_file),
+                )
+                if local_file.exists() and local_file.stat().st_size > 0:
+                    file_size = local_file.stat().st_size
+                    capture.local_file_path = local_file
+                    capture.file_size_bytes = file_size
+                    capture.message = f"Capture file retrieved via SCP: {capture_file}"
+                    logger.info(f"[SCP] Download complete: {local_file} ({file_size} bytes)")
+                    return
+            except Exception as e:
+                logger.debug(f"[SCP] Path {candidate} failed: {type(e).__name__}: {e}")
+                continue
+
+        logger.warning(f"[SCP] All SCP paths failed for {capture_file}")
+        capture.message = "Capture complete, SCP download failed"
 
     async def _retrieve_rotating_capture_files_pull(
         self,
