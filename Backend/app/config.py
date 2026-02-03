@@ -26,28 +26,42 @@ class Settings(BaseSettings):
     # Authentication
     api_key: Optional[str] = None  # If set, enables API key auth
 
-    # SFTP Server Settings (where CUCM pushes logs)
-    # sftp_host: If empty/None, auto-detects the host's IP at runtime
+    # SFTP Server Settings (where CUCM pushes files via "file get activelog")
+    #
+    # CUCM does NOT support inbound SFTP connections (pull mode) or SCP.
+    # The only way to retrieve files from CUCM via CLI is "file get activelog",
+    # which tells CUCM to push the file outbound to an external SFTP server.
+    #
+    # For Docker Desktop on Windows:
+    #   Docker Desktop's port forwarding breaks inbound SSH key exchange, so
+    #   CUCM cannot reach the container's embedded SFTP server. Instead, point
+    #   these settings at your HOST machine's SSH/SFTP server:
+    #     SFTP_HOST=<your PC's IP on the CUCM network>
+    #     SFTP_PORT=22
+    #     SFTP_USERNAME=<your PC login username>
+    #     SFTP_PASSWORD=<your PC login password>
+    #     SFTP_REMOTE_BASE_DIR=<absolute path to storage/received on host>
+    #
+    # For native Linux Docker (or Docker with host networking):
+    #   The container's embedded SFTP server on port 2222 works directly.
+    #   Leave defaults as-is.
+    #
     sftp_host: Optional[str] = None  # Auto-detect if not set
     sftp_port: int = 2222  # Default to embedded SFTP port
     sftp_username: str = "cucm-collector"
     sftp_password: str = ""  # Never logged
-    # Empty base dir - SFTP chroots directly to storage/received
-    # Backend creates {job-id}/{node}/ and CUCM uploads there
+    # SFTP remote base dir - path prefix for upload directory on the SFTP server
+    # For embedded SFTP: leave empty (chroots to storage/received)
+    # For host SSH: set to absolute path of storage/received on host filesystem
     sftp_remote_base_dir: str = ""
 
     # Embedded SFTP Server Settings (Docker mode)
-    # When enabled, runs an SFTP server inside the container
+    # When enabled, runs an OpenSSH SFTP server inside the container
+    # Works on native Linux Docker; does NOT work through Docker Desktop port forwarding
     sftp_server_enabled: bool = False  # Set to True in Docker
     sftp_server_host: str = "0.0.0.0"
     sftp_server_port: int = 2222  # Different from 22 to avoid conflicts
     sftp_server_host_key_path: Optional[str] = None  # Auto-generated if not set
-
-    # SFTP Transfer Mode
-    # Pull mode: connect outbound to CUCM's SFTP to download files directly.
-    # This is the recommended mode for Docker Desktop on Windows, where inbound
-    # SSH connections (push mode) fail due to port forwarding limitations.
-    sftp_pull_mode: bool = True  # Default to pull mode (works through Docker NAT)
 
     # SFTP Relay Mode (for VPN users)
     # When True: CUCM uploads to external relay server, then app downloads from relay
