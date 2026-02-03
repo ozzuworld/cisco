@@ -25,9 +25,12 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         echo "[entrypoint] SFTP user '${SFTP_USER}' password configured"
     fi
 
-    # Ensure the SFTP chroot directory exists with correct ownership
-    # ChrootDirectory requires: owned by root, no group/other write (755)
-    # CUCM uploads land in per-capture subdirectories created by the app
+    # ChrootDirectory requires EVERY path component to be root-owned and not
+    # group/other writable. Fix /app/storage and /app/storage/received.
+    # This also handles volume mounts that may reset permissions.
+    chown root:root /app/storage
+    chmod 755 /app/storage
+
     SFTP_HOME="/app/storage/received"
     mkdir -p "${SFTP_HOME}"
     chown root:root "${SFTP_HOME}"
@@ -72,8 +75,16 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         /usr/sbin/sshd -D -e -f /app/sshd_config_sftp &
         SSHD_PID=$!
         echo "$SSHD_PID" > /tmp/sshd_sftp.pid
-        echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
-        echo "[entrypoint] SFTP listening on port ${SFTP_SERVER_PORT:-2222}"
+        # Verify sshd actually started and is still running
+        sleep 1
+        if kill -0 "$SSHD_PID" 2>/dev/null; then
+            echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
+            echo "[entrypoint] SFTP listening on port ${SFTP_SERVER_PORT:-2222}"
+        else
+            echo "[entrypoint] ERROR: sshd exited immediately after start!"
+            echo "[entrypoint] This usually means ChrootDirectory ownership is wrong."
+            echo "[entrypoint] Check: ls -la /app/storage/ (must be root:root 755)"
+        fi
         echo "[entrypoint] NOTE: If running on Docker Desktop (Windows/Mac), ensure"
         echo "[entrypoint]   Windows Firewall allows inbound TCP port ${SFTP_SERVER_PORT:-2222}"
         echo "[entrypoint]   PowerShell: New-NetFirewallRule -DisplayName 'CUCM SFTP' -Direction Inbound -Protocol TCP -LocalPort ${SFTP_SERVER_PORT:-2222} -Action Allow"

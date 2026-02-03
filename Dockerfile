@@ -77,13 +77,17 @@ RUN sed -i 's/\r$//' ./entrypoint.sh ./sshd_config_sftp && chmod +x ./entrypoint
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create storage directories with correct permissions
+# Create storage directories
+# /app/storage and /app/storage/received MUST be root:root 755
+# (ChrootDirectory requires every path component to be root-owned, not group/other writable)
+# Subdirectories for app data can be more permissive since they're not in the chroot path
 RUN mkdir -p /app/storage/received \
              /app/storage/jobs \
              /app/storage/transcripts \
              /app/storage/captures \
              /app/storage/sessions \
-    && chmod -R 775 /app/storage
+    && chmod 755 /app/storage \
+    && chmod 755 /app/storage/received
 
 # Create SFTP user for CUCM file uploads
 # Home directory is storage/received - CUCM uploads land here
