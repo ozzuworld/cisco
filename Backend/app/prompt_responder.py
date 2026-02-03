@@ -325,8 +325,8 @@ class PromptResponder:
                     buffer += chunk
                     transcript.append(chunk)
 
-                    # Log data received during transfer wait phase
-                    if prompts_completed:
+                    # Log data received during transfer wait phase (suppress single-char echo noise)
+                    if prompts_completed and len(chunk) > 2:
                         chunk_preview = chunk.replace('\n', '\\n').replace('\r', '\\r')
                         if len(chunk_preview) > 300:
                             chunk_preview = chunk_preview[:300] + "..."
