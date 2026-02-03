@@ -56,8 +56,12 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
     # Validate sshd config
     if /usr/sbin/sshd -t -f /app/sshd_config_sftp; then
         echo "[entrypoint] sshd config valid, starting SFTP server on port ${SFTP_SERVER_PORT:-2222}..."
-        /usr/sbin/sshd -f /app/sshd_config_sftp
-        echo "[entrypoint] OpenSSH SFTP server started (PID: $(cat /tmp/sshd_sftp.pid 2>/dev/null || echo 'unknown'))"
+        # Use -D (no daemonize) + -e (log to stderr) so logs appear in Docker output
+        # Run in background with & so the entrypoint can continue to start uvicorn
+        /usr/sbin/sshd -D -e -f /app/sshd_config_sftp &
+        SSHD_PID=$!
+        echo "$SSHD_PID" > /tmp/sshd_sftp.pid
+        echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
     else
         echo "[entrypoint] ERROR: Invalid sshd config! SFTP server will NOT start."
     fi

@@ -87,12 +87,13 @@ RUN mkdir -p /app/storage/received \
 
 # Create SFTP user for CUCM file uploads
 # Home directory is storage/received - CUCM uploads land here
-# Shell is /usr/sbin/nologin - SFTP only, no shell access
+# Shell is /bin/false for PAM compat; ForceCommand internal-sftp prevents shell access
 RUN useradd --home-dir /app/storage/received \
             --no-create-home \
-            --shell /usr/sbin/nologin \
+            --shell /bin/false \
             cucm-collector \
-    && chown cucm-collector:cucm-collector /app/storage/received
+    && chown cucm-collector:cucm-collector /app/storage/received \
+    && echo "/bin/false" >> /etc/shells
 
 # Create sshd privilege separation directory
 RUN mkdir -p /run/sshd

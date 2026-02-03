@@ -12,7 +12,7 @@
 Port 2222
 ListenAddress 0.0.0.0
 
-# PID file in a writable location
+# PID file - managed by entrypoint.sh (sshd runs with -D so doesn't write its own)
 PidFile /tmp/sshd_sftp.pid
 
 # Host keys (generated at container startup)
@@ -20,9 +20,10 @@ HostKey /app/storage/ssh_host_ed25519_key
 HostKey /app/storage/ssh_host_ecdsa_key
 HostKey /app/storage/ssh_host_rsa_key
 
-# Logging
+# Logging - use VERBOSE to see connection/auth details in Docker logs
+# (sshd is started with -e flag to log to stderr instead of syslog)
 SyslogFacility AUTH
-LogLevel INFO
+LogLevel VERBOSE
 
 # Authentication
 PermitRootLogin no
