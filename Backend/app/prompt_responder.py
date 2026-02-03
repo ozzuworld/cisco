@@ -169,6 +169,8 @@ class PromptResponder:
         prompts_completed_time = None  # Time when prompts were completed
         prompt_retry_counts: Dict[str, int] = {}  # Track retries per prompt
         max_prompt_retries = 3  # Max times to answer the same prompt
+        last_diagnostic_time = None  # For periodic diagnostic logging
+        diagnostic_interval = 15.0  # Log diagnostics every 15s during transfer wait
 
         logger.debug("Starting prompt responder")
 
@@ -188,8 +190,10 @@ class PromptResponder:
                     time_since_output = current_time - last_output_time
 
                     if time_since_output > no_output_timeout:
+                        buf_dump = buffer[-500:].replace('\n', '\\n').replace('\r', '\\r') if buffer else "(empty)"
                         error_msg = f"SFTP upload timed out: No data received for {no_output_timeout}s"
                         logger.error(error_msg)
+                        logger.error(f"[TIMEOUT-DUMP] Buffer at timeout ({len(buffer)} bytes): {buf_dump}")
                         if transcript_file:
                             transcript_file.write(f"\n\n[ERROR: {error_msg}]\n")
                             transcript_file.write(f"[Last 500 chars: {buffer[-500:]}]\n")
@@ -218,6 +222,19 @@ class PromptResponder:
                             if idle_duration >= stable_idle_seconds:
                                 logger.info(f"Command completed: stable idle ({idle_duration:.1f}s) after shell prompt")
                                 break
+
+                        # Periodic diagnostic logging during transfer wait
+                        if prompts_completed and prompts_completed_time:
+                            now_diag = asyncio.get_event_loop().time()
+                            if last_diagnostic_time is None or (now_diag - last_diagnostic_time) >= diagnostic_interval:
+                                last_diagnostic_time = now_diag
+                                wait_secs = now_diag - prompts_completed_time
+                                buf_preview = buffer[-200:].replace('\n', '\\n').replace('\r', '\\r') if buffer else "(empty)"
+                                logger.warning(
+                                    f"[TRANSFER-WAIT] {wait_secs:.0f}s since prompts answered. "
+                                    f"No SFTP activity. Buffer tail: {buf_preview}"
+                                )
+
                         continue
 
                     if not chunk:
@@ -231,6 +248,13 @@ class PromptResponder:
 
                     buffer += chunk
                     transcript.append(chunk)
+
+                    # Log data received during transfer wait phase
+                    if prompts_completed:
+                        chunk_preview = chunk.replace('\n', '\\n').replace('\r', '\\r')
+                        if len(chunk_preview) > 300:
+                            chunk_preview = chunk_preview[:300] + "..."
+                        logger.info(f"[TRANSFER-DATA] Received {len(chunk)} bytes: {chunk_preview}")
 
                     # Write to transcript file immediately
                     if transcript_file:
