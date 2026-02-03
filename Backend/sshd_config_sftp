@@ -11,6 +11,7 @@
 
 Port 2222
 ListenAddress 0.0.0.0
+AddressFamily inet
 
 # PID file - managed by entrypoint.sh (sshd runs with -D so doesn't write its own)
 PidFile /tmp/sshd_sftp.pid
@@ -20,10 +21,20 @@ HostKey /app/storage/ssh_host_ed25519_key
 HostKey /app/storage/ssh_host_ecdsa_key
 HostKey /app/storage/ssh_host_rsa_key
 
-# Logging - use VERBOSE to see connection/auth details in Docker logs
+# Logging - DEBUG3 for full handshake diagnostics
 # (sshd is started with -e flag to log to stderr instead of syslog)
+# DEBUG3 shows: protocol version exchange, algorithm negotiation,
+# key exchange steps, host key selection, and authentication attempts.
+# Change to VERBOSE or INFO once the handshake issue is resolved.
 SyslogFacility AUTH
-LogLevel VERBOSE
+LogLevel DEBUG3
+
+# Disable DNS reverse lookups - critical for Docker containers.
+# Without this, sshd tries to reverse-DNS the connecting IP (e.g. 172.18.0.1).
+# Docker internal IPs have no reverse DNS, so the lookup hangs for ~5 seconds,
+# during which sshd doesn't send its SSH version string. The connecting client
+# (CUCM) times out and closes the connection → "Connection closed [preauth]".
+UseDNS no
 
 # Authentication
 PermitRootLogin no
