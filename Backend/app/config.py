@@ -44,8 +44,10 @@ class Settings(BaseSettings):
     sftp_server_host_key_path: Optional[str] = None  # Auto-generated if not set
 
     # SFTP Transfer Mode
-    # sftp_pull_mode is deprecated - CUCM doesn't support direct SFTP downloads
-    sftp_pull_mode: bool = False  # Deprecated, kept for compatibility
+    # Pull mode: connect outbound to CUCM's SFTP to download files directly.
+    # This is the recommended mode for Docker Desktop on Windows, where inbound
+    # SSH connections (push mode) fail due to port forwarding limitations.
+    sftp_pull_mode: bool = True  # Default to pull mode (works through Docker NAT)
 
     # SFTP Relay Mode (for VPN users)
     # When True: CUCM uploads to external relay server, then app downloads from relay
