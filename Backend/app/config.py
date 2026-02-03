@@ -28,23 +28,15 @@ class Settings(BaseSettings):
 
     # SFTP Server Settings (where CUCM pushes files via "file get activelog")
     #
-    # CUCM does NOT support inbound SFTP connections (pull mode) or SCP.
+    # CUCM does NOT support inbound SFTP (pull mode) or SCP.
     # The only way to retrieve files from CUCM via CLI is "file get activelog",
-    # which tells CUCM to push the file outbound to an external SFTP server.
+    # which tells CUCM to push the file to the embedded SFTP server.
     #
-    # For Docker Desktop on Windows:
-    #   Docker Desktop's port forwarding breaks inbound SSH key exchange, so
-    #   CUCM cannot reach the container's embedded SFTP server. Instead, point
-    #   these settings at your HOST machine's SSH/SFTP server:
-    #     SFTP_HOST=<your PC's IP on the CUCM network>
-    #     SFTP_PORT=22
-    #     SFTP_USERNAME=<your PC login username>
-    #     SFTP_PASSWORD=<your PC login password>
-    #     SFTP_REMOTE_BASE_DIR=<absolute path to storage/received on host>
+    # The embedded SFTP server runs inside the container on port 2222.
+    # SFTP_HOST must be set to the machine's IP so CUCM knows where to connect.
+    # If left empty, the app auto-detects the IP.
     #
-    # For native Linux Docker (or Docker with host networking):
-    #   The container's embedded SFTP server on port 2222 works directly.
-    #   Leave defaults as-is.
+    # Docker Desktop: ensure Windows Firewall allows inbound TCP port 2222.
     #
     sftp_host: Optional[str] = None  # Auto-detect if not set
     sftp_port: int = 2222  # Default to embedded SFTP port
@@ -56,8 +48,8 @@ class Settings(BaseSettings):
     sftp_remote_base_dir: str = ""
 
     # Embedded SFTP Server Settings (Docker mode)
-    # When enabled, runs an OpenSSH SFTP server inside the container
-    # Works on native Linux Docker; does NOT work through Docker Desktop port forwarding
+    # When enabled, runs an OpenSSH SFTP server inside the container on port 2222
+    # CUCM pushes files here via "file get activelog"
     sftp_server_enabled: bool = False  # Set to True in Docker
     sftp_server_host: str = "0.0.0.0"
     sftp_server_port: int = 2222  # Different from 22 to avoid conflicts

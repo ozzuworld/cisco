@@ -28,17 +28,12 @@ services:
       # ======================================
       # SFTP Settings (where CUCM pushes files)
       # ======================================
-      # CUCM uses "file get activelog" to push files to an external SFTP server.
-      # CUCM does NOT support inbound SFTP pull or SCP.
+      # CUCM uses "file get activelog" to push files to the embedded SFTP server.
+      # The embedded server runs inside this container on port 2222.
+      # SFTP_HOST must be set to your machine's IP so CUCM knows where to connect.
       #
-      # DOCKER DESKTOP (Windows/Mac):
-      #   Port forwarding breaks SSH, so CUCM can't reach the container's
-      #   embedded SFTP. Point these at your HOST machine's SSH server:
-      #     SFTP_HOST=<your PC IP>   SFTP_PORT=22
-      #     SFTP_USERNAME=<PC login> SFTP_PASSWORD=<PC password>
-      #     SFTP_REMOTE_BASE_DIR=<absolute path to ./storage/received on host>
-      #
-      # NATIVE LINUX DOCKER: Leave defaults (embedded SFTP on port 2222 works)
+      # If SFTP_HOST is empty, the app auto-detects your IP.
+      # Docker Desktop: ensure Windows Firewall allows inbound TCP port 2222.
       #
       - SFTP_RELAY_MODE=${SFTP_RELAY_MODE:-false}
       - SFTP_HOST=${SFTP_HOST:-}
