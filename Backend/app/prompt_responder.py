@@ -104,6 +104,70 @@ class PromptResponder:
             ),
         ]
 
+    async def _read_from_streams(self, stdout, stderr, timeout: float = 0.5) -> str:
+        """
+        Read from stdout and optionally stderr, returning first available data.
+
+        In PTY sessions stderr is usually merged into stdout, but some prompts
+        (like SSH host key verification) may arrive on stderr separately.
+
+        Args:
+            stdout: SSH stdout reader
+            stderr: Optional SSH stderr reader
+            timeout: Read timeout in seconds
+
+        Returns:
+            Data read from either stream
+
+        Raises:
+            asyncio.TimeoutError: If no data available within timeout
+        """
+        if not stderr:
+            return await asyncio.wait_for(stdout.read(1024), timeout=timeout)
+
+        # Race stdout and stderr reads
+        stdout_task = asyncio.create_task(stdout.read(1024))
+        stderr_task = asyncio.create_task(stderr.read(1024))
+
+        try:
+            done, pending = await asyncio.wait(
+                {stdout_task, stderr_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except Exception:
+            stdout_task.cancel()
+            stderr_task.cancel()
+            raise
+
+        # Cancel any still-pending tasks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if not done:
+            raise asyncio.TimeoutError()
+
+        # Collect data from all completed tasks
+        combined = ""
+        for task in done:
+            try:
+                result = task.result()
+                if result:
+                    if task is stderr_task:
+                        logger.debug(f"[STDERR] Received {len(result)} bytes: {result[:200]}")
+                    combined += result
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if not combined:
+            raise asyncio.TimeoutError()
+
+        return combined
+
     def match_prompt(self, text: str) -> Optional[PromptPattern]:
         """
         Try to match text against known prompts.
@@ -135,7 +199,8 @@ class PromptResponder:
         prompt: str = "admin:",
         transcript_file = None,
         stop_event: Optional[asyncio.Event] = None,
-        transfer_timeout: float = 180.0
+        transfer_timeout: float = 180.0,
+        stderr=None
     ) -> str:
         """
         Read output and respond to prompts until command completes.
@@ -151,6 +216,7 @@ class PromptResponder:
             transcript_file: Optional file handle to write transcript incrementally
             stop_event: Optional asyncio Event that signals stop request
             transfer_timeout: Max time for transfer after prompts answered (default 180s)
+            stderr: Optional SSH stderr reader (merged into output for prompt detection)
 
         Returns:
             Complete transcript of the interaction
@@ -191,7 +257,16 @@ class PromptResponder:
 
                     if time_since_output > no_output_timeout:
                         buf_dump = buffer[-500:].replace('\n', '\\n').replace('\r', '\\r') if buffer else "(empty)"
-                        error_msg = f"SFTP upload timed out: No data received for {no_output_timeout}s"
+                        # Detect host key stall pattern: no data after prompts answered
+                        if prompts_completed:
+                            error_msg = (
+                                f"SFTP upload timed out: No data received for {no_output_timeout}s after prompts answered. "
+                                f"This usually means CUCM's SFTP client rejected the server's SSH host key. "
+                                f"SSH into CUCM and run 'file get activelog' manually to accept the host key, "
+                                f"then retry from the app."
+                            )
+                        else:
+                            error_msg = f"SFTP upload timed out: No data received for {no_output_timeout}s"
                         logger.error(error_msg)
                         logger.error(f"[TIMEOUT-DUMP] Buffer at timeout ({len(buffer)} bytes): {buf_dump}")
                         if transcript_file:
@@ -212,9 +287,10 @@ class PromptResponder:
                                 transcript_file.flush()
                             raise CUCMSFTPTimeoutError(error_msg)
 
-                    # Read a chunk with short timeout to check for idle period
+                    # Read from stdout (and stderr if available) with short timeout
+                    # Some prompts (e.g., SSH host key verification) may arrive on stderr
                     try:
-                        chunk = await asyncio.wait_for(stdout.read(1024), timeout=0.5)
+                        chunk = await self._read_from_streams(stdout, stderr, timeout=0.5)
                     except asyncio.TimeoutError:
                         # No data available - check if we're in stable idle after prompt
                         if saw_prompt and idle_start_time:

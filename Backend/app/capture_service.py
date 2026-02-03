@@ -735,22 +735,19 @@ class CaptureManager:
                 capture.message = "Capture stopped, no files found"
                 return
 
-            # Build SFTP directory path (what CUCM sees)
-            sftp_base = settings.sftp_remote_base_dir or ""
-            sftp_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
+            # Build SFTP directory path (what CUCM sees inside the chroot)
+            # ChrootDirectory is /app/storage/received, so "/" maps there
+            # Path must start with / for CUCM to accept it
+            sftp_directory = f"/{capture.capture_id}"
 
-            # Pre-create upload directory so CUCM can write to it
+            # Pre-create upload directory inside the chroot so CUCM can write to it
+            # The chroot root (/app/storage/received) is root-owned (required by sshd)
+            # so we create a writable subdirectory for each capture
             sftp_upload_dir = settings.artifacts_dir / capture.capture_id
-            sftp_upload_dir_nested = settings.artifacts_dir / sftp_directory if sftp_base else None
             try:
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
                 sftp_upload_dir.chmod(0o777)
                 logger.info(f"Created SFTP upload directory: {sftp_upload_dir}")
-
-                if sftp_upload_dir_nested and sftp_upload_dir_nested != sftp_upload_dir:
-                    sftp_upload_dir_nested.mkdir(parents=True, exist_ok=True)
-                    sftp_upload_dir_nested.chmod(0o777)
-                    logger.info(f"Created nested SFTP directory: {sftp_upload_dir_nested}")
             except Exception as e:
                 logger.warning(f"Failed to create SFTP upload directory: {e}")
 
@@ -810,7 +807,8 @@ class CaptureManager:
                             responder.respond_to_prompts(
                                 shell.stdin,
                                 shell.stdout,
-                                transfer_timeout=180.0
+                                transfer_timeout=180.0,
+                                stderr=shell.stderr
                             ),
                             timeout=SFTP_PROMPT_TIMEOUT
                         )
@@ -835,13 +833,6 @@ class CaptureManager:
                     found_file = f
                     logger.info(f"Found uploaded file: {found_file}")
                     break
-
-                # Also search in nested dir if sftp_base is set
-                if not found_file and sftp_upload_dir_nested:
-                    for f in sftp_upload_dir_nested.rglob(cap_file):
-                        found_file = f
-                        logger.info(f"Found uploaded file at nested path: {found_file}")
-                        break
 
                 # Fallback: search in the entire received directory
                 if not found_file:
@@ -974,7 +965,8 @@ class CaptureManager:
                             responder.respond_to_prompts(
                                 shell.stdin,
                                 shell.stdout,
-                                transfer_timeout=180.0
+                                transfer_timeout=180.0,
+                                stderr=shell.stderr
                             ),
                             timeout=SFTP_PROMPT_TIMEOUT
                         )
@@ -1167,27 +1159,17 @@ class CaptureManager:
                 capture.file_size_bytes = int(size_match.group(1))
                 logger.debug(f"Capture file size: {capture.file_size_bytes} bytes")
 
-            # Build SFTP directory path (what CUCM sees)
-            sftp_base = settings.sftp_remote_base_dir or ""
-            sftp_directory = f"{sftp_base}/{capture.capture_id}".strip("/")
+            # Build SFTP directory path (what CUCM sees inside the chroot)
+            # ChrootDirectory is /app/storage/received, so "/" maps there
+            # Path must start with / for CUCM to accept it
+            sftp_directory = f"/{capture.capture_id}"
 
-            # Create directory at SFTP received location for CUCM to upload to
-            # Handle both possible bind mount configurations:
-            # 1. Bind mount at /received/ level: files land at artifacts_dir/<capture_id>/
-            # 2. Bind mount at chroot level: files land at artifacts_dir/<sftp_base>/<capture_id>/
+            # Create writable subdirectory inside the chroot for CUCM to upload to
             sftp_upload_dir = settings.artifacts_dir / capture.capture_id
-            sftp_upload_dir_nested = settings.artifacts_dir / sftp_directory if sftp_base else None
-
             try:
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
                 sftp_upload_dir.chmod(0o777)
                 logger.info(f"Created SFTP upload directory: {sftp_upload_dir}")
-
-                # Also create nested path if sftp_base is set
-                if sftp_upload_dir_nested and sftp_upload_dir_nested != sftp_upload_dir:
-                    sftp_upload_dir_nested.mkdir(parents=True, exist_ok=True)
-                    sftp_upload_dir_nested.chmod(0o777)
-                    logger.info(f"Created nested SFTP directory: {sftp_upload_dir_nested}")
             except Exception as e:
                 logger.warning(f"Failed to create SFTP upload directory: {e}")
 
@@ -1248,14 +1230,14 @@ class CaptureManager:
                 await shell.stdin.drain()
 
                 # Handle prompts with timeout
-                # respond_to_prompts expects (stdin, stdout) separately
-                # Pass stop_event so transfer can be interrupted by user
+                # Pass stderr to catch host key prompts that may arrive there
                 await asyncio.wait_for(
                     responder.respond_to_prompts(
                         shell.stdin,
                         shell.stdout,
                         stop_event=capture._stop_event,
-                        transfer_timeout=180.0  # 3 min timeout for SFTP transfer
+                        transfer_timeout=180.0,  # 3 min timeout for SFTP transfer
+                        stderr=shell.stderr
                     ),
                     timeout=SFTP_PROMPT_TIMEOUT
                 )
@@ -1272,13 +1254,6 @@ class CaptureManager:
                 found_file = cap_file
                 logger.info(f"Found capture file at: {found_file}")
                 break
-
-            # If not found, try nested directory
-            if not found_file and sftp_upload_dir_nested:
-                for cap_file in sftp_upload_dir_nested.rglob(capture_file):
-                    found_file = cap_file
-                    logger.info(f"Found capture file at nested path: {found_file}")
-                    break
 
             if found_file:
                 capture.local_file_path = found_file
@@ -1368,7 +1343,8 @@ class CaptureManager:
                         shell.stdin,
                         shell.stdout,
                         stop_event=capture._stop_event,
-                        transfer_timeout=180.0
+                        transfer_timeout=180.0,
+                        stderr=shell.stderr
                     ),
                     timeout=SFTP_PROMPT_TIMEOUT
                 )

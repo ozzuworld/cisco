@@ -25,11 +25,13 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         echo "[entrypoint] SFTP user '${SFTP_USER}' password configured"
     fi
 
-    # Ensure the SFTP user's home directory exists and is writable
+    # Ensure the SFTP chroot directory exists with correct ownership
+    # ChrootDirectory requires: owned by root, no group/other write (755)
+    # CUCM uploads land in per-capture subdirectories created by the app
     SFTP_HOME="/app/storage/received"
     mkdir -p "${SFTP_HOME}"
-    chown "${SFTP_USER}:${SFTP_USER}" "${SFTP_HOME}"
-    chmod 775 "${SFTP_HOME}"
+    chown root:root "${SFTP_HOME}"
+    chmod 755 "${SFTP_HOME}"
 
     # Generate SSH host keys if they don't exist
     KEY_DIR="/app/storage"

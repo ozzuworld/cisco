@@ -88,11 +88,13 @@ RUN mkdir -p /app/storage/received \
 # Create SFTP user for CUCM file uploads
 # Home directory is storage/received - CUCM uploads land here
 # Shell is /bin/false for PAM compat; ForceCommand internal-sftp prevents shell access
+# ChrootDirectory requires /app/storage/received to be root-owned with 755
 RUN useradd --home-dir /app/storage/received \
             --no-create-home \
             --shell /bin/false \
             cucm-collector \
-    && chown cucm-collector:cucm-collector /app/storage/received \
+    && chown root:root /app/storage/received \
+    && chmod 755 /app/storage/received \
     && echo "/bin/false" >> /etc/shells
 
 # Create sshd privilege separation directory
