@@ -1209,6 +1209,21 @@ class CaptureManager:
                     capture.status = "failed"
                     return
 
+            # Verify sshd is still running before initiating SFTP transfer
+            try:
+                import subprocess
+                sshd_check = subprocess.run(
+                    ["ss", "-tlnp", f"sport = :{settings.sftp_port}"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if f":{settings.sftp_port}" not in sshd_check.stdout:
+                    logger.error(f"sshd is NOT listening on port {settings.sftp_port}! SFTP transfer will fail.")
+                    logger.error(f"ss output: {sshd_check.stdout.strip()}")
+                else:
+                    logger.info(f"sshd confirmed listening on port {settings.sftp_port}")
+            except Exception as e:
+                logger.warning(f"Could not verify sshd status: {e}")
+
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
                 sftp_host=sftp_host,
@@ -1231,7 +1246,7 @@ class CaptureManager:
 
                 # Handle prompts with timeout
                 # Pass stderr to catch host key prompts that may arrive there
-                await asyncio.wait_for(
+                cucm_transcript = await asyncio.wait_for(
                     responder.respond_to_prompts(
                         shell.stdin,
                         shell.stdout,
@@ -1241,6 +1256,15 @@ class CaptureManager:
                     ),
                     timeout=SFTP_PROMPT_TIMEOUT
                 )
+
+                # Log what CUCM said during the file transfer (captures error messages)
+                if cucm_transcript:
+                    # Show last 500 chars which contain the result/error
+                    tail = cucm_transcript[-500:] if len(cucm_transcript) > 500 else cucm_transcript
+                    for line in tail.split('\n'):
+                        stripped = line.strip()
+                        if stripped:
+                            logger.info(f"  CUCM: {stripped}")
 
             # Wait for SFTP transfer to complete
             await asyncio.sleep(2.0)

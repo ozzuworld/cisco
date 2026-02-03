@@ -237,6 +237,7 @@ class PromptResponder:
         max_prompt_retries = 3  # Max times to answer the same prompt
         last_diagnostic_time = None  # For periodic diagnostic logging
         diagnostic_interval = 15.0  # Log diagnostics every 15s during transfer wait
+        pending_chars = ""  # Accumulate single-char echoes for batched logging
 
         logger.debug("Starting prompt responder")
 
@@ -296,11 +297,21 @@ class PromptResponder:
                         if saw_prompt and idle_start_time:
                             idle_duration = current_time - idle_start_time
                             if idle_duration >= stable_idle_seconds:
+                                # Flush any accumulated echo chars
+                                if pending_chars:
+                                    pc = pending_chars.replace('\n', '\\n').replace('\r', '\\r')
+                                    logger.info(f"[TRANSFER-DATA] Echo: {pc}")
+                                    pending_chars = ""
                                 logger.info(f"Command completed: stable idle ({idle_duration:.1f}s) after shell prompt")
                                 break
 
                         # Periodic diagnostic logging during transfer wait
                         if prompts_completed and prompts_completed_time:
+                            # Flush accumulated chars on timeout (shows error messages char-by-char)
+                            if pending_chars:
+                                pc = pending_chars.replace('\n', '\\n').replace('\r', '\\r')
+                                logger.info(f"[TRANSFER-DATA] Echo: {pc}")
+                                pending_chars = ""
                             now_diag = asyncio.get_event_loop().time()
                             if last_diagnostic_time is None or (now_diag - last_diagnostic_time) >= diagnostic_interval:
                                 last_diagnostic_time = now_diag
@@ -308,7 +319,7 @@ class PromptResponder:
                                 buf_preview = buffer[-200:].replace('\n', '\\n').replace('\r', '\\r') if buffer else "(empty)"
                                 logger.warning(
                                     f"[TRANSFER-WAIT] {wait_secs:.0f}s since prompts answered. "
-                                    f"No SFTP activity. Buffer tail: {buf_preview}"
+                                    f"Buffer tail: {buf_preview}"
                                 )
 
                         continue
@@ -325,12 +336,22 @@ class PromptResponder:
                     buffer += chunk
                     transcript.append(chunk)
 
-                    # Log data received during transfer wait phase (suppress single-char echo noise)
-                    if prompts_completed and len(chunk) > 2:
-                        chunk_preview = chunk.replace('\n', '\\n').replace('\r', '\\r')
-                        if len(chunk_preview) > 300:
-                            chunk_preview = chunk_preview[:300] + "..."
-                        logger.info(f"[TRANSFER-DATA] Received {len(chunk)} bytes: {chunk_preview}")
+                    # Log data received during transfer wait phase
+                    # CUCM echoes text char-by-char through PTY, so accumulate small chunks
+                    # and log them together when a multi-byte chunk arrives or on flush
+                    if prompts_completed:
+                        if len(chunk) <= 2:
+                            pending_chars += chunk
+                        else:
+                            # Flush any accumulated chars first
+                            if pending_chars:
+                                pc = pending_chars.replace('\n', '\\n').replace('\r', '\\r')
+                                logger.info(f"[TRANSFER-DATA] Echo: {pc}")
+                                pending_chars = ""
+                            chunk_preview = chunk.replace('\n', '\\n').replace('\r', '\\r')
+                            if len(chunk_preview) > 300:
+                                chunk_preview = chunk_preview[:300] + "..."
+                            logger.info(f"[TRANSFER-DATA] Received {len(chunk)} bytes: {chunk_preview}")
 
                     # Write to transcript file immediately
                     if transcript_file:
