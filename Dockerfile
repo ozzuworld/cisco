@@ -3,6 +3,7 @@
 # ==============================================================================
 # This Dockerfile builds both frontend and backend into a single container
 # The FastAPI backend serves the React frontend and handles all API requests
+# OpenSSH sshd handles SFTP for CUCM file uploads (replaces asyncssh)
 #
 # Build: docker build -t cucm-log-collector:latest .
 # Run:   docker run -p 8000:8000 -p 2222:2222 -v ./storage:/app/storage cucm-log-collector
@@ -32,7 +33,7 @@ ENV VITE_API_BASE_URL=""
 RUN npm run build
 
 # ------------------------------------------------------------------------------
-# Stage 2: Final Application (Python + FastAPI + Frontend)
+# Stage 2: Final Application (Python + FastAPI + Frontend + OpenSSH SFTP)
 # ------------------------------------------------------------------------------
 FROM python:3.11-slim
 
@@ -49,10 +50,12 @@ WORKDIR /app
 # - gcc: Required for Python packages with C extensions
 # - libffi-dev: Required for cryptography package
 # - curl: For healthchecks
+# - openssh-server: SFTP server for CUCM file uploads (replaces asyncssh)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libffi-dev \
     curl \
+    openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy backend requirements
@@ -65,6 +68,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY Backend/app/ ./app/
 COPY Backend/profiles.yaml .
 
+# Copy SFTP server configuration and entrypoint
+COPY Backend/sshd_config_sftp ./sshd_config_sftp
+COPY Backend/entrypoint.sh ./entrypoint.sh
+# Fix Windows CRLF line endings and make executable
+RUN sed -i 's/\r$//' ./entrypoint.sh ./sshd_config_sftp && chmod +x ./entrypoint.sh
+
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
@@ -76,22 +85,29 @@ RUN mkdir -p /app/storage/received \
              /app/storage/sessions \
     && chmod -R 775 /app/storage
 
-# Create non-root user for security
-RUN useradd --create-home --shell /bin/bash appuser \
-    && chown -R appuser:appuser /app
+# Create SFTP user for CUCM file uploads
+# Home directory is storage/received - CUCM uploads land here
+# Shell is /bin/false for PAM compat; ForceCommand internal-sftp prevents shell access
+RUN useradd --home-dir /app/storage/received \
+            --no-create-home \
+            --shell /bin/false \
+            cucm-collector \
+    && chown cucm-collector:cucm-collector /app/storage/received \
+    && echo "/bin/false" >> /etc/shells
 
-# Switch to non-root user
-USER appuser
+# Create sshd privilege separation directory
+RUN mkdir -p /run/sshd
 
 # Expose ports
 # 8000 - HTTP (Frontend UI + API)
-# 2222 - Embedded SFTP Server (for CUCM file uploads)
+# 2222 - OpenSSH SFTP Server (for CUCM file uploads)
 EXPOSE 8000 2222
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
-# Default command - run FastAPI with uvicorn
-# The application serves both frontend (/) and API (/api/*)
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Entrypoint handles sshd setup + uvicorn startup
+# Container runs as root so sshd can manage user authentication
+# Security: sshd restricts the SFTP user via ForceCommand internal-sftp
+CMD ["./entrypoint.sh"]

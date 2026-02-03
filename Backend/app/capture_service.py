@@ -494,7 +494,11 @@ class CaptureManager:
                 # Retrieve the capture file
                 capture.message = "Retrieving capture file..."
                 settings = get_settings()
-                if settings.sftp_relay_mode:
+                if settings.sftp_pull_mode:
+                    # Pull mode: connect outbound to CUCM's SFTP to download directly
+                    logger.info("Using SFTP pull mode (download from CUCM directly)")
+                    await self._retrieve_capture_file_pull(client, capture)
+                elif settings.sftp_relay_mode:
                     # Relay mode: CUCM uploads to relay server, then we pull from relay
                     logger.info("Using SFTP relay mode (CUCM -> relay -> local)")
                     await self._retrieve_capture_file_relay(client, capture)
@@ -636,6 +640,9 @@ class CaptureManager:
                 if not prompt_recovered:
                     logger.warning("CLI prompt never recovered - skipping file retrieval")
                     capture.message = "Capture stopped, CLI unresponsive - files may still be on CUCM"
+                elif settings.sftp_pull_mode:
+                    logger.info("Using SFTP pull mode for rotating capture")
+                    await self._retrieve_rotating_capture_files_pull(client, capture)
                 elif settings.sftp_relay_mode:
                     logger.info("Using SFTP relay mode for rotating capture")
                     await self._retrieve_rotating_capture_files_relay(client, capture)
@@ -793,13 +800,14 @@ class CaptureManager:
                 # Send file get command
                 get_cmd = f"file get activelog {remote_path}"
                 shell = client._session
+                transfer_transcript = ""
                 if shell:
                     shell.stdin.write(f"{get_cmd}\n")
                     await shell.stdin.drain()
 
                     # Handle SFTP prompts
                     try:
-                        await asyncio.wait_for(
+                        transfer_transcript = await asyncio.wait_for(
                             responder.respond_to_prompts(
                                 shell.stdin,
                                 shell.stdout,
@@ -810,6 +818,13 @@ class CaptureManager:
                     except (asyncio.TimeoutError, CUCMSFTPTimeoutError) as e:
                         logger.warning(f"Timeout retrieving {cap_file}: {e}")
                         continue
+
+                # Log CUCM output from the transfer for debugging
+                if transfer_transcript:
+                    # Show last 500 chars of transcript to see errors/transfer status
+                    snippet = transfer_transcript[-500:].strip()
+                    if snippet:
+                        logger.info(f"CUCM transfer output (last 500 chars): {snippet}")
 
                 # Wait for transfer to settle
                 await asyncio.sleep(2.0)
@@ -829,13 +844,32 @@ class CaptureManager:
                         logger.info(f"Found uploaded file at nested path: {found_file}")
                         break
 
+                # Fallback: search in the entire received directory
+                if not found_file:
+                    for f in settings.artifacts_dir.rglob(cap_file):
+                        found_file = f
+                        logger.info(f"Found uploaded file in received root: {found_file}")
+                        break
+
                 if found_file:
                     file_size = found_file.stat().st_size
                     total_size += file_size
                     collected_files.append(found_file)
                     logger.info(f"Retrieved {cap_file} ({file_size} bytes)")
                 else:
-                    logger.warning(f"Capture file {cap_file} not found in {sftp_upload_dir}")
+                    # Diagnostic: list what's actually in the upload directory
+                    try:
+                        all_files = list(sftp_upload_dir.rglob("*"))
+                        received_files = list(settings.artifacts_dir.rglob("*.cap*"))
+                        logger.warning(
+                            f"Capture file {cap_file} not found. "
+                            f"Upload dir ({sftp_upload_dir}) contains {len(all_files)} items: "
+                            f"{[str(f.relative_to(sftp_upload_dir)) for f in all_files[:10]]}. "
+                            f"Received dir has {len(received_files)} .cap files: "
+                            f"{[str(f.relative_to(settings.artifacts_dir)) for f in received_files[:10]]}"
+                        )
+                    except Exception as diag_err:
+                        logger.warning(f"Capture file {cap_file} not found in {sftp_upload_dir} (diag error: {diag_err})")
 
             capture.files_collected = len(collected_files)
             capture.local_file_paths = collected_files
@@ -1277,7 +1311,9 @@ class CaptureManager:
         the capture file directly. This works in VPN/NAT scenarios where
         CUCM cannot connect back to the client.
 
-        The capture file is stored at: activelog/platform/cli/<filename>.cap
+        Uses manual file reading instead of sftp.get() because CUCM's SFTP
+        returns incorrect file sizes from stat(), causing sftp.get() to fail
+        with byte count mismatches.
 
         Args:
             client: Connected SSH client (used for credentials)
@@ -1287,8 +1323,14 @@ class CaptureManager:
 
         settings = get_settings()
         capture_file = f"{capture.filename}.cap"
-        # CUCM SFTP uses paths relative to root, try without leading slash
-        remote_path = f"activelog/platform/cli/{capture_file}"
+
+        # CUCM SFTP path candidates (try multiple formats)
+        path_candidates = [
+            f"activelog/platform/cli/{capture_file}",
+            f"/activelog/platform/cli/{capture_file}",
+            f"platform/cli/{capture_file}",
+            f"/var/log/active/platform/cli/{capture_file}",
+        ]
 
         try:
             # Check if stop was requested before starting retrieval
@@ -1301,59 +1343,107 @@ class CaptureManager:
             local_dir.mkdir(parents=True, exist_ok=True)
             local_file = local_dir / capture_file
 
-            logger.info(f"Pulling capture file via SFTP from CUCM: {remote_path}")
-
             # Connect to CUCM's SFTP server using same credentials as SSH
             host = capture.request.host
             port = capture.request.port or 22
             username = capture.request.username
             password = capture.request.password
 
-            # Use asyncssh to connect and download the file
+            logger.info(f"Pulling capture file via SFTP from CUCM {host}:{port}")
+
             async with asyncssh.connect(
                 host=host,
                 port=port,
                 username=username,
                 password=password,
-                known_hosts=None,  # Accept any host key (like SSH client)
+                known_hosts=None,
             ) as conn:
                 async with conn.start_sftp_client() as sftp:
-                    # Check if stop was requested
                     if capture._stop_event.is_set() or capture._cancelled:
                         logger.info(f"Capture {capture.capture_id} stop requested during SFTP")
                         return
 
-                    # Try to stat the file first to verify it exists
+                    # Try to list the root to understand CUCM's SFTP structure
                     try:
-                        file_stat = await sftp.stat(remote_path)
-                        logger.info(f"Found capture file: {remote_path}, size: {file_stat.size} bytes")
-                    except asyncssh.SFTPNoSuchFile:
-                        # Try with leading slash
-                        remote_path = f"/{remote_path}"
-                        logger.info(f"Trying alternate path: {remote_path}")
-                        file_stat = await sftp.stat(remote_path)
-                        logger.info(f"Found capture file: {remote_path}, size: {file_stat.size} bytes")
+                        root_entries = await sftp.readdir('.')
+                        root_names = [e.filename for e in root_entries[:20]]
+                        logger.info(f"CUCM SFTP root directory contents: {root_names}")
+                    except Exception as e:
+                        logger.debug(f"Could not list SFTP root: {e}")
 
-                    logger.info(f"SFTP connected, downloading {remote_path} to {local_file}")
+                    # Try each path candidate
+                    remote_path = None
+                    for candidate in path_candidates:
+                        try:
+                            stat_result = await sftp.stat(candidate)
+                            remote_path = candidate
+                            logger.info(
+                                f"Found capture file at SFTP path: {candidate} "
+                                f"(stat size={stat_result.size}, "
+                                f"permissions={oct(stat_result.permissions) if stat_result.permissions else 'N/A'})"
+                            )
+                            break
+                        except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPError) as e:
+                            logger.debug(f"Path not found: {candidate} ({e})")
+                            continue
 
-                    # Download the file with block_size to handle large files
-                    await sftp.get(remote_path, str(local_file), block_size=65536)
+                    if not remote_path:
+                        logger.warning(f"Capture file not found on CUCM SFTP (tried: {path_candidates})")
+                        capture.message = "Capture complete, file not found on CUCM SFTP"
+                        return
 
-                    logger.info(f"SFTP download complete: {local_file}")
+                    # Download using chunked reads with explicit size/offset.
+                    # CUCM's SFTP stat() returns incorrect file sizes (e.g., partition
+                    # size ~1.1GB). asyncssh's read() without args and sftp.get() both
+                    # validate bytes received against the stat'd size, causing failures.
+                    # By reading in explicit chunks, we bypass that validation entirely.
+                    logger.info(f"Downloading {remote_path} via chunked SFTP read...")
+                    try:
+                        async with sftp.open(remote_path, 'rb') as remote_file:
+                            with open(str(local_file), 'wb') as f:
+                                offset = 0
+                                block_size = 65536
+                                while True:
+                                    try:
+                                        chunk = await remote_file.read(block_size, offset)
+                                    except asyncssh.SFTPError:
+                                        # Server returned EOF or error - stop reading
+                                        break
+                                    if not chunk:
+                                        break
+                                    f.write(chunk)
+                                    offset += len(chunk)
+                        logger.info(f"SFTP chunked download complete: {local_file} ({offset} bytes)")
+                        if offset > 0 and offset < 256:
+                            # Very small file - log contents for debugging
+                            raw = local_file.read_bytes()
+                            logger.info(f"Small file hex dump: {raw.hex()}")
+                            logger.info(f"Small file text (lossy): {raw.decode('utf-8', errors='replace')}")
+                    except asyncssh.SFTPError as e:
+                        logger.warning(f"Chunked read failed ({e}), trying sftp.get as fallback...")
+                        await sftp.get(remote_path, str(local_file), block_size=65536)
+                        logger.info(f"SFTP get fallback complete: {local_file}")
 
             # Verify file was downloaded
-            if local_file.exists():
+            if local_file.exists() and local_file.stat().st_size > 0:
                 capture.local_file_path = local_file
                 capture.file_size_bytes = local_file.stat().st_size
                 capture.message = f"Capture file retrieved: {capture_file}"
                 logger.info(f"Retrieved capture file: {local_file} ({capture.file_size_bytes} bytes)")
             else:
-                logger.warning(f"Capture file not found after download: {local_file}")
+                logger.warning(f"Capture file empty or not found after download: {local_file}")
                 capture.message = "Capture complete, file download failed"
 
         except asyncssh.SFTPError as e:
             logger.warning(f"SFTP error retrieving capture file: {e}")
-            capture.message = f"Capture complete, SFTP error: {e}"
+            # Check if partial download exists
+            if local_file.exists() and local_file.stat().st_size > 0:
+                capture.local_file_path = local_file
+                capture.file_size_bytes = local_file.stat().st_size
+                capture.message = f"Capture file retrieved (partial): {capture_file}"
+                logger.info(f"Partial file saved: {local_file} ({capture.file_size_bytes} bytes)")
+            else:
+                capture.message = f"Capture complete, SFTP error: {e}"
 
         except asyncssh.PermissionDenied as e:
             logger.warning(f"SFTP permission denied: {e}")
@@ -1366,6 +1456,154 @@ class CaptureManager:
         except Exception as e:
             logger.warning(f"Failed to pull capture file: {e}")
             capture.message = f"Capture complete, file retrieval failed: {e}"
+
+    async def _retrieve_rotating_capture_files_pull(
+        self,
+        client: CUCMSSHClient,
+        capture: Capture
+    ) -> None:
+        """
+        Retrieve rotating capture files by pulling FROM CUCM's SFTP server.
+
+        This connects outbound to CUCM's SSH/SFTP service and downloads
+        the capture files directly. Works through Docker Desktop NAT
+        where inbound SFTP connections fail.
+
+        Uses manual file reading to avoid CUCM stat() size mismatches.
+
+        Args:
+            client: Connected SSH client
+            capture: Capture object to update
+        """
+        import asyncssh
+
+        settings = get_settings()
+        base_filename = capture.filename
+
+        try:
+            # List all capture files matching the pattern via CLI
+            list_cmd = f"file list activelog platform/cli/{base_filename}* detail"
+            logger.info(f"Listing rotation files: {list_cmd}")
+            output = await client.execute_command(list_cmd, timeout=30.0)
+            logger.debug(f"File list output: {output[:500] if output else 'empty'}")
+
+            # Parse file list - rotating captures use .cap, .cap0, .cap1, etc.
+            cap_files = []
+            for line in output.split('\n'):
+                if '.cap' in line and base_filename in line:
+                    match = re.search(rf'({re.escape(base_filename)}[_0-9]*\.cap\d*)', line)
+                    if match:
+                        cap_files.append(match.group(1))
+
+            logger.info(f"Found {len(cap_files)} rotation files: {cap_files}")
+
+            if not cap_files:
+                logger.warning("No rotation capture files found")
+                capture.message = "Capture stopped, no files found"
+                return
+
+            # Create local directory for downloads
+            local_dir = settings.artifacts_dir / capture.capture_id
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+            # Connect to CUCM's SFTP server using same credentials as SSH
+            host = capture.request.host
+            port = capture.request.port or 22
+            username = capture.request.username
+            password = capture.request.password
+
+            logger.info(f"Connecting to CUCM SFTP at {host}:{port} to pull {len(cap_files)} files")
+
+            async with asyncssh.connect(
+                host=host,
+                port=port,
+                username=username,
+                password=password,
+                known_hosts=None,
+            ) as conn:
+                async with conn.start_sftp_client() as sftp:
+                    collected_files = []
+                    total_size = 0
+
+                    # Determine the correct SFTP base path on first file
+                    sftp_base = None
+                    for base_candidate in ["activelog/platform/cli", "/activelog/platform/cli",
+                                           "platform/cli", "/var/log/active/platform/cli"]:
+                        try:
+                            await sftp.stat(f"{base_candidate}/{cap_files[0]}")
+                            sftp_base = base_candidate
+                            logger.info(f"CUCM SFTP base path: {sftp_base}")
+                            break
+                        except (asyncssh.SFTPNoSuchFile, asyncssh.SFTPError):
+                            continue
+
+                    if not sftp_base:
+                        logger.warning("Could not find capture files on CUCM SFTP")
+                        capture.message = "Capture stopped, files not found on CUCM SFTP"
+                        return
+
+                    for cap_file in cap_files:
+                        if capture._stop_event.is_set() or capture._cancelled:
+                            logger.info(f"Capture {capture.capture_id} cancelled during pull")
+                            break
+
+                        remote_path = f"{sftp_base}/{cap_file}"
+                        local_file = local_dir / cap_file
+
+                        try:
+                            # Use chunked reads with explicit size/offset to bypass
+                            # CUCM's incorrect stat() file sizes
+                            logger.info(f"Downloading {cap_file}...")
+                            async with sftp.open(remote_path, 'rb') as remote_f:
+                                with open(str(local_file), 'wb') as f:
+                                    dl_offset = 0
+                                    while True:
+                                        try:
+                                            chunk = await remote_f.read(65536, dl_offset)
+                                        except asyncssh.SFTPError:
+                                            break
+                                        if not chunk:
+                                            break
+                                        f.write(chunk)
+                                        dl_offset += len(chunk)
+
+                            if local_file.exists() and local_file.stat().st_size > 0:
+                                file_size = local_file.stat().st_size
+                                collected_files.append(local_file)
+                                total_size += file_size
+                                logger.info(f"Downloaded {cap_file}: {file_size} bytes")
+                            else:
+                                logger.warning(f"File empty after download: {local_file}")
+
+                        except Exception as e:
+                            logger.warning(f"Failed to pull {cap_file}: {e}")
+
+                    # Update capture with results
+                    capture.files_collected = len(collected_files)
+                    capture.file_size_bytes = total_size
+                    if collected_files:
+                        capture.local_file_path = collected_files[0]
+                        capture.message = f"Downloaded {len(collected_files)} files ({total_size} bytes)"
+                        logger.info(f"Pull complete: {len(collected_files)} files, {total_size} bytes")
+                    else:
+                        capture.message = "Capture stopped, no files downloaded"
+                        logger.warning("No files were successfully downloaded")
+
+        except asyncssh.SFTPError as e:
+            logger.warning(f"SFTP error pulling rotation files: {e}")
+            capture.message = f"Capture stopped, SFTP error: {e}"
+
+        except asyncssh.PermissionDenied as e:
+            logger.warning(f"SFTP permission denied: {e}")
+            capture.message = "Capture stopped, SFTP permission denied"
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout pulling rotation files for {capture.capture_id}")
+            capture.message = "Capture stopped, file download timed out"
+
+        except Exception as e:
+            logger.warning(f"Failed to pull rotation files: {e}")
+            capture.message = f"Capture stopped, file retrieval failed: {e}"
 
     async def _retrieve_capture_file_relay(
         self,
