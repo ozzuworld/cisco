@@ -2019,7 +2019,16 @@ async def get_capture_status(capture_id: str, request: Request):
             }
         )
 
-    return CaptureStatusResponse(capture=capture.to_info())
+    download_available = (
+        capture.status == "completed" and
+        capture.local_file_path is not None and
+        capture.local_file_path.exists()
+    )
+
+    return CaptureStatusResponse(
+        capture=capture.to_info(),
+        download_available=download_available
+    )
 
 
 @app.post(

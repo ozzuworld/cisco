@@ -736,13 +736,14 @@ class CaptureManager:
                 return
 
             # Build SFTP directory path (what CUCM sees inside the chroot)
-            # ChrootDirectory is /app/storage/received, so "/" maps there
-            # Path must start with / for CUCM to accept it
-            sftp_directory = f"/{capture.capture_id}"
+            # If sftp_remote_base_dir is set (e.g. "received"), prefix it
+            # so CUCM uploads to the correct chroot subdirectory
+            if settings.sftp_remote_base_dir:
+                sftp_directory = f"{settings.sftp_remote_base_dir}/{capture.capture_id}"
+            else:
+                sftp_directory = f"{capture.capture_id}"
 
-            # Pre-create upload directory inside the chroot so CUCM can write to it
-            # The chroot root (/app/storage/received) is root-owned (required by sshd)
-            # so we create a writable subdirectory for each capture
+            # Pre-create upload directory so CUCM can write to it
             sftp_upload_dir = settings.artifacts_dir / capture.capture_id
             try:
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
@@ -1160,11 +1161,14 @@ class CaptureManager:
                 logger.debug(f"Capture file size: {capture.file_size_bytes} bytes")
 
             # Build SFTP directory path (what CUCM sees inside the chroot)
-            # ChrootDirectory is /app/storage/received, so "/" maps there
-            # Path must start with / for CUCM to accept it
-            sftp_directory = f"/{capture.capture_id}"
+            # If sftp_remote_base_dir is set (e.g. "received"), prefix it
+            # so CUCM uploads to the correct chroot subdirectory
+            if settings.sftp_remote_base_dir:
+                sftp_directory = f"{settings.sftp_remote_base_dir}/{capture.capture_id}"
+            else:
+                sftp_directory = f"{capture.capture_id}"
 
-            # Create writable subdirectory inside the chroot for CUCM to upload to
+            # Create writable subdirectory for CUCM to upload to
             sftp_upload_dir = settings.artifacts_dir / capture.capture_id
             try:
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
