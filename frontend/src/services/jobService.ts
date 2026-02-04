@@ -157,7 +157,7 @@ export const jobService = {
    * Download all job artifacts as ZIP (triggers browser download)
    */
   async downloadAllArtifacts(jobId: string): Promise<void> {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const url = `${baseUrl}/jobs/${jobId}/download`
 
     // Open download in new tab/trigger browser download
@@ -168,7 +168,7 @@ export const jobService = {
    * Fetch all job artifacts as blob (for bundling)
    */
   async fetchArtifactsBlob(jobId: string): Promise<Blob> {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const response = await fetch(`${baseUrl}/jobs/${jobId}/download`, {
       method: 'GET',
       headers: {
@@ -187,7 +187,7 @@ export const jobService = {
    * Download single artifact
    */
   async downloadArtifact(jobId: string, artifactId: string): Promise<void> {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const url = `${baseUrl}/jobs/${jobId}/artifacts/${artifactId}/download`
 
     window.open(url, '_blank')
@@ -197,7 +197,7 @@ export const jobService = {
    * Download logs for a specific node
    */
   async downloadNodeArtifacts(jobId: string, nodeIp: string): Promise<void> {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const url = `${baseUrl}/jobs/${jobId}/nodes/${nodeIp}/download`
 
     window.open(url, '_blank')

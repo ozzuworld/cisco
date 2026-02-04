@@ -101,7 +101,7 @@ export const logService = {
    * Download collected logs (triggers browser download)
    */
   downloadCollection(collectionId: string, filename: string): void {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const url = `${baseUrl}/logs/${collectionId}/download`
 
     const link = document.createElement('a')
@@ -116,7 +116,7 @@ export const logService = {
    * Fetch collected logs as blob (for bundling)
    */
   async fetchCollectionBlob(collectionId: string): Promise<Blob> {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const response = await fetch(`${baseUrl}/logs/${collectionId}/download`, {
       method: 'GET',
       headers: {
