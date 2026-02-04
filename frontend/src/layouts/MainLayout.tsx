@@ -24,6 +24,7 @@ import {
   Settings as SettingsIcon,
   DarkMode as DarkModeIcon,
   LightMode as LightModeIcon,
+  BugReport as TraceLevelIcon,
 } from '@mui/icons-material'
 import { useJobNotifications } from '@/hooks'
 import { useTheme } from '@/context'
@@ -38,6 +39,7 @@ const navItems: NavItem[] = [
   { text: 'Home', icon: <HomeIcon />, path: '/' },
   { text: 'Dashboard', icon: <DashboardIcon />, path: '/dashboard' },
   { text: 'Jobs', icon: <WorkIcon />, path: '/jobs' },
+  { text: 'Trace Level', icon: <TraceLevelIcon />, path: '/trace-level' },
   { text: 'Health', icon: <HealthIcon />, path: '/health' },
   { text: 'Captures', icon: <CaptureIcon />, path: '/captures' },
   { text: 'Profiles', icon: <FolderIcon />, path: '/profiles' },

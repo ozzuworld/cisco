@@ -34,8 +34,6 @@ import {
   alpha,
   ToggleButton,
   ToggleButtonGroup,
-  Alert,
-  Tooltip,
 } from '@mui/material'
 import {
   Visibility,
@@ -64,21 +62,14 @@ import {
   DateRange,
   Warning as WarningIcon,
   Edit as EditIcon,
-  Refresh,
-  BugReport as DebugIcon,
-  Info as InfoIcon,
-  Save as SaveIcon,
 } from '@mui/icons-material'
 import { useSnackbar } from 'notistack'
 import { logService, jobService } from '@/services'
-import { useGetTraceLevels, useSetTraceLevels } from '@/hooks'
-import type { TraceLevelNodeResult } from '@/services/traceService'
 import type {
   ClusterNode,
   LogProfile,
   LogDeviceType,
   DeviceProfile,
-  DebugLevel,
 } from '@/types'
 
 type DeviceType = 'cucm' | 'cube' | 'expressway'
@@ -149,15 +140,6 @@ export default function LogCollection() {
   // CUCM profiles
   const [cucmProfiles, setCucmProfiles] = useState<LogProfile[]>([])
   const [selectedCucmProfile, setSelectedCucmProfile] = useState('callmanager_full')
-
-  // Trace level management state
-  const [traceLevels, setTraceLevels] = useState<TraceLevelNodeResult[]>([])
-  const [targetDebugLevel, setTargetDebugLevel] = useState<DebugLevel>('basic')
-  const [traceSettingsExpanded, setTraceSettingsExpanded] = useState(true)
-
-  // Trace level hooks
-  const getTraceLevelsMutation = useGetTraceLevels()
-  const setTraceLevelsMutation = useSetTraceLevels()
 
   // Time range options
   const [timeMode, setTimeMode] = useState<'relative' | 'range'>('relative')
@@ -336,81 +318,6 @@ export default function LogCollection() {
   const isIpModified = (device: DeviceEntry, originalIp: string): boolean => {
     const effectiveIp = getEffectiveIp(device, originalIp)
     return effectiveIp !== originalIp
-  }
-
-  // Get the first CUCM device with discovered nodes
-  const getCucmDeviceForTraceOps = (): DeviceEntry | null => {
-    return devices.find(d => d.type === 'cucm' && d.discoveredNodes && d.discoveredNodes.length > 0) || null
-  }
-
-  // Fetch current trace levels from CUCM nodes
-  const handleFetchTraceLevels = async () => {
-    const cucmDevice = getCucmDeviceForTraceOps()
-    if (!cucmDevice) {
-      enqueueSnackbar('No CUCM device with discovered nodes', { variant: 'warning' })
-      return
-    }
-
-    // Use effective IPs (edited IPs) for the request
-    const effectiveHosts = (cucmDevice.selectedNodes || []).map(originalIp =>
-      cucmDevice.nodeIpOverrides?.[originalIp] || originalIp
-    )
-
-    getTraceLevelsMutation.mutate(
-      {
-        hosts: effectiveHosts,
-        username: cucmDevice.username,
-        password: cucmDevice.password,
-        port: cucmDevice.port,
-      },
-      {
-        onSuccess: (response) => {
-          setTraceLevels(response.results)
-          enqueueSnackbar(`Retrieved trace levels from ${response.successful_nodes} of ${response.total_nodes} nodes`, { variant: 'success' })
-        },
-        onError: (error) => {
-          enqueueSnackbar(error instanceof Error ? error.message : 'Failed to fetch trace levels', { variant: 'error' })
-        },
-      }
-    )
-  }
-
-  // Set trace levels on CUCM nodes
-  const handleSetTraceLevels = async () => {
-    const cucmDevice = getCucmDeviceForTraceOps()
-    if (!cucmDevice) {
-      enqueueSnackbar('No CUCM device with discovered nodes', { variant: 'warning' })
-      return
-    }
-
-    // Use effective IPs (edited IPs) for the request
-    const effectiveHosts = (cucmDevice.selectedNodes || []).map(originalIp =>
-      cucmDevice.nodeIpOverrides?.[originalIp] || originalIp
-    )
-
-    setTraceLevelsMutation.mutate(
-      {
-        hosts: effectiveHosts,
-        username: cucmDevice.username,
-        password: cucmDevice.password,
-        port: cucmDevice.port,
-        level: targetDebugLevel,  // Must be lowercase: "basic", "detailed", or "verbose"
-      },
-      {
-        onSuccess: (response) => {
-          if (response.successful_nodes > 0) {
-            enqueueSnackbar(`Trace level set to ${targetDebugLevel} on ${response.successful_nodes} of ${response.total_nodes} nodes`, { variant: 'success' })
-            // Refresh trace levels after setting
-            handleFetchTraceLevels()
-          } else {
-            enqueueSnackbar(response.message || 'Failed to set trace levels on any nodes', { variant: 'warning' })
-          }
-        },
-        onError: (error) => {
-          enqueueSnackbar(error instanceof Error ? error.message : 'Failed to set trace levels', { variant: 'error' })
-        },
-      }
-    )
   }
 
   const canStartCollection = () => {
@@ -1217,204 +1124,6 @@ export default function LogCollection() {
             )
           })}
         </Grid>
-      )}
-
-      {/* Trace Settings Section - CUCM trace level configuration */}
-      {devices.some(d => d.type === 'cucm' && d.discoveredNodes && d.discoveredNodes.length > 0) && !isCollecting && !collectionComplete && (
-        <Paper
-          sx={{
-            p: 2,
-            mt: 3,
-            background: theme => theme.palette.mode === 'dark'
-              ? 'linear-gradient(135deg, rgba(255,152,0,0.1) 0%, rgba(255,193,7,0.05) 100%)'
-              : 'linear-gradient(135deg, rgba(255,152,0,0.08) 0%, rgba(255,193,7,0.04) 100%)',
-            border: theme => `1px solid ${alpha(theme.palette.warning.main, 0.3)}`,
-            borderRadius: 3,
-          }}
-        >
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              cursor: 'pointer',
-              '&:hover': { opacity: 0.8 },
-            }}
-            onClick={() => setTraceSettingsExpanded(!traceSettingsExpanded)}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-              <Box
-                sx={{
-                  width: 8,
-                  height: 28,
-                  borderRadius: 1,
-                  bgcolor: 'warning.main',
-                }}
-              />
-              <DebugIcon sx={{ color: 'warning.main', fontSize: 24 }} />
-              <Typography variant="h6" fontWeight={600}>Trace Settings</Typography>
-              <Tooltip title="Trace levels must be configured on CUCM BEFORE collecting logs. Higher levels provide more detail for troubleshooting.">
-                <InfoIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
-              </Tooltip>
-            </Box>
-            <IconButton size="small">
-              {traceSettingsExpanded ? <ExpandLess /> : <ExpandMore />}
-            </IconButton>
-          </Box>
-          <Collapse in={traceSettingsExpanded}>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5, mb: 2, ml: 3 }}>
-              Check and configure CUCM trace levels before collecting logs
-            </Typography>
-
-            <Alert severity="info" sx={{ mb: 2, mx: 1 }}>
-              <Typography variant="body2">
-                Trace levels must be set on CUCM <strong>before</strong> the issue occurs or reproduces.
-                After changing trace levels, wait for the issue to occur, then collect logs.
-              </Typography>
-            </Alert>
-
-            <Grid container spacing={3}>
-              {/* Current Trace Levels */}
-              <Grid item xs={12} md={6}>
-                <Box
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
-                    border: '1px solid',
-                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-                    <Typography variant="subtitle2" fontWeight={600}>Current Trace Levels</Typography>
-                    <Button
-                      size="small"
-                      startIcon={getTraceLevelsMutation.isPending ? <CircularProgress size={16} /> : <Refresh />}
-                      onClick={handleFetchTraceLevels}
-                      disabled={getTraceLevelsMutation.isPending}
-                    >
-                      {getTraceLevelsMutation.isPending ? 'Checking...' : 'Check Status'}
-                    </Button>
-                  </Box>
-
-                  {traceLevels.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
-                      Click "Check Status" to fetch current trace levels from CUCM nodes
-                    </Typography>
-                  ) : (
-                    <List dense sx={{ bgcolor: 'background.paper', borderRadius: 1 }}>
-                      {traceLevels.map((nodeResult, index) => (
-                        <ListItem key={nodeResult.host} divider={index < traceLevels.length - 1}>
-                          <ListItemIcon sx={{ minWidth: 36 }}>
-                            {nodeResult.success ? (
-                              <CheckCircle color="success" sx={{ fontSize: 20 }} />
-                            ) : (
-                              <ErrorIcon color="error" sx={{ fontSize: 20 }} />
-                            )}
-                          </ListItemIcon>
-                          <ListItemText
-                            primary={nodeResult.host}
-                            secondary={
-                              nodeResult.success ? (
-                                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                                  {nodeResult.services.map((svc) => (
-                                    <Chip
-                                      key={svc.service_name}
-                                      size="small"
-                                      label={`${svc.service_name}: ${svc.current_level}`}
-                                      color={svc.current_level === 'Debug' ? 'warning' : svc.current_level === 'Detailed' ? 'info' : 'default'}
-                                      sx={{ height: 20, fontSize: '0.65rem' }}
-                                    />
-                                  ))}
-                                </Box>
-                              ) : (
-                                <Typography variant="caption" color="error">
-                                  {nodeResult.error || 'Error fetching level'}
-                                </Typography>
-                              )
-                            }
-                            primaryTypographyProps={{ variant: 'body2' }}
-                          />
-                        </ListItem>
-                      ))}
-                    </List>
-                  )}
-                </Box>
-              </Grid>
-
-              {/* Set Trace Levels */}
-              <Grid item xs={12} md={6}>
-                <Box
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
-                    border: '1px solid',
-                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
-                  }}
-                >
-                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
-                    Set Trace Level
-                  </Typography>
-
-                  <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-                    <InputLabel>Target Debug Level</InputLabel>
-                    <Select
-                      value={targetDebugLevel}
-                      label="Target Debug Level"
-                      onChange={e => setTargetDebugLevel(e.target.value as DebugLevel)}
-                    >
-                      <MenuItem value="basic">
-                        <Box>
-                          <Typography variant="body2">Basic (Default)</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Standard trace levels, minimal performance impact
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                      <MenuItem value="detailed">
-                        <Box>
-                          <Typography variant="body2">Detailed - TAC Troubleshooting</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Increased verbosity for troubleshooting
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                      <MenuItem value="verbose">
-                        <Box>
-                          <Typography variant="body2">Verbose - Full Debug</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Maximum detail (may impact performance)
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    </Select>
-                  </FormControl>
-
-                  <Button
-                    variant="contained"
-                    fullWidth
-                    color="warning"
-                    startIcon={setTraceLevelsMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />}
-                    onClick={handleSetTraceLevels}
-                    disabled={setTraceLevelsMutation.isPending}
-                  >
-                    {setTraceLevelsMutation.isPending ? 'Applying...' : 'Apply to All Selected Nodes'}
-                  </Button>
-
-                  {targetDebugLevel !== 'basic' && (
-                    <Alert severity="warning" sx={{ mt: 2 }}>
-                      <Typography variant="caption">
-                        Higher trace levels generate more logs and may impact system performance.
-                        Remember to reset to "Basic" after troubleshooting.
-                      </Typography>
-                    </Alert>
-                  )}
-                </Box>
-              </Grid>
-            </Grid>
-          </Collapse>
-        </Paper>
       )}
 
       {/* Collection Profiles - show before collection starts */}
