@@ -22,9 +22,9 @@ HostKey /app/storage/ssh_host_ecdsa_key
 HostKey /app/storage/ssh_host_rsa_key
 
 # Logging (sshd is started with -e flag to log to stderr instead of syslog)
-# Change to DEBUG3 for full handshake diagnostics if troubleshooting.
+# DEBUG3 for full handshake diagnostics during troubleshooting.
 SyslogFacility AUTH
-LogLevel INFO
+LogLevel DEBUG3
 
 # Disable DNS reverse lookups - critical for Docker containers.
 # Without this, sshd tries to reverse-DNS the connecting IP (e.g. 172.18.0.1).

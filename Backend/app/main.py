@@ -1265,7 +1265,15 @@ async def get_job_status(job_id: str, request: Request):
         computed_reltime_value=job.computed_reltime_value,
         computation_timestamp=job.computation_timestamp,
         # Include debug level
-        debug_level=job.debug_level
+        debug_level=job.debug_level,
+        # Download available if job finished and has artifacts
+        download_available=(
+            job.status in (JobStatusEnum.SUCCEEDED, JobStatusEnum.PARTIAL) and
+            any(
+                artifact for ns in job.node_statuses.values()
+                for artifact in ns.artifacts
+            )
+        )
     )
 
 

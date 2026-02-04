@@ -8,8 +8,10 @@ services:
     ports:
       # Main application port (Frontend UI + API)
       - "8000:8000"
-      # SFTP server port (for CUCM to upload files in local mode)
-      - "2222:2222"
+      # SFTP server: host port 22 → container sshd on 2222
+      # CUCM connects to port 22 (trusted), Docker forwards to container
+      # Host sshd moved to port 22222 to free port 22 for Docker
+      - "22:2222"
     volumes:
       # Persist storage across container restarts
       - ./storage:/app/storage

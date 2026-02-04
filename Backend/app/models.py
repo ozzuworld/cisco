@@ -587,6 +587,12 @@ class JobStatusResponse(BaseModel):
         description="Debug/trace verbosity level used for this job (basic/detailed/verbose)"
     )
 
+    # Download availability
+    download_available: bool = Field(
+        default=False,
+        description="Whether artifacts are available for download"
+    )
+
 
 class ArtifactsResponse(BaseModel):
     """Response for artifacts listing"""
