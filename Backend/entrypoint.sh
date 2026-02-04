@@ -25,11 +25,16 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         echo "[entrypoint] SFTP user '${SFTP_USER}' password configured"
     fi
 
-    # Ensure the SFTP user's home directory exists and is writable
+    # ChrootDirectory requires EVERY path component to be root-owned and not
+    # group/other writable. Fix /app/storage and /app/storage/received.
+    # This also handles volume mounts that may reset permissions.
+    chown root:root /app/storage
+    chmod 755 /app/storage
+
     SFTP_HOME="/app/storage/received"
     mkdir -p "${SFTP_HOME}"
-    chown "${SFTP_USER}:${SFTP_USER}" "${SFTP_HOME}"
-    chmod 775 "${SFTP_HOME}"
+    chown root:root "${SFTP_HOME}"
+    chmod 755 "${SFTP_HOME}"
 
     # Generate SSH host keys if they don't exist
     KEY_DIR="/app/storage"
@@ -53,6 +58,15 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
     # Create required directory for sshd privilege separation
     mkdir -p /run/sshd
 
+    # Ensure /etc/ssh/moduli exists (required for DH group exchange algorithms)
+    # Some slim Docker images may not include it. Without it, sshd silently
+    # drops connections during key exchange ("Connection closed [preauth]").
+    if [ ! -s /etc/ssh/moduli ]; then
+        echo "[entrypoint] WARNING: /etc/ssh/moduli is missing or empty."
+        echo "[entrypoint] DH group exchange algorithms will not work."
+        echo "[entrypoint] This is handled by sshd_config excluding group-exchange algorithms."
+    fi
+
     # Validate sshd config
     if /usr/sbin/sshd -t -f /app/sshd_config_sftp; then
         echo "[entrypoint] sshd config valid, starting SFTP server on port ${SFTP_SERVER_PORT:-2222}..."
@@ -61,7 +75,19 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         /usr/sbin/sshd -D -e -f /app/sshd_config_sftp &
         SSHD_PID=$!
         echo "$SSHD_PID" > /tmp/sshd_sftp.pid
-        echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
+        # Verify sshd actually started and is still running
+        sleep 1
+        if kill -0 "$SSHD_PID" 2>/dev/null; then
+            echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
+            echo "[entrypoint] SFTP listening on port ${SFTP_SERVER_PORT:-2222}"
+        else
+            echo "[entrypoint] ERROR: sshd exited immediately after start!"
+            echo "[entrypoint] This usually means ChrootDirectory ownership is wrong."
+            echo "[entrypoint] Check: ls -la /app/storage/ (must be root:root 755)"
+        fi
+        echo "[entrypoint] NOTE: If running on Docker Desktop (Windows/Mac), ensure"
+        echo "[entrypoint]   Windows Firewall allows inbound TCP port ${SFTP_SERVER_PORT:-2222}"
+        echo "[entrypoint]   PowerShell: New-NetFirewallRule -DisplayName 'CUCM SFTP' -Direction Inbound -Protocol TCP -LocalPort ${SFTP_SERVER_PORT:-2222} -Action Allow"
     else
         echo "[entrypoint] ERROR: Invalid sshd config! SFTP server will NOT start."
     fi

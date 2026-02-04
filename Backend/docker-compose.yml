@@ -59,9 +59,16 @@ services:
       # Override with specific domain regex for production if needed
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-.*}
 
-      # SFTP Client Settings (what we tell CUCM to connect to)
-      # SFTP_HOST is auto-detected if not set - the app finds its own IP
-      # Override if auto-detection doesn't work for your network setup
+      # ================================================================
+      # SFTP Settings (where CUCM pushes files via "file get activelog")
+      # ================================================================
+      # CUCM uses "file get activelog" to push files to the embedded
+      # SFTP server running in this container on port 2222.
+      # SFTP_HOST must be set to your machine's IP on the CUCM network.
+      #
+      # Docker Desktop: ensure Windows Firewall allows inbound TCP 2222:
+      #   New-NetFirewallRule -DisplayName 'CUCM SFTP' -Direction Inbound -Protocol TCP -LocalPort 2222 -Action Allow
+      # ================================================================
       - SFTP_HOST=${SFTP_HOST:-}
       - SFTP_PORT=${SFTP_PORT:-2222}
       - SFTP_USERNAME=${SFTP_USERNAME:-cucm-collector}

@@ -77,22 +77,28 @@ RUN sed -i 's/\r$//' ./entrypoint.sh ./sshd_config_sftp && chmod +x ./entrypoint
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create storage directories with correct permissions
+# Create storage directories
+# /app/storage and /app/storage/received MUST be root:root 755
+# (ChrootDirectory requires every path component to be root-owned, not group/other writable)
+# Subdirectories for app data can be more permissive since they're not in the chroot path
 RUN mkdir -p /app/storage/received \
              /app/storage/jobs \
              /app/storage/transcripts \
              /app/storage/captures \
              /app/storage/sessions \
-    && chmod -R 775 /app/storage
+    && chmod 755 /app/storage \
+    && chmod 755 /app/storage/received
 
 # Create SFTP user for CUCM file uploads
 # Home directory is storage/received - CUCM uploads land here
 # Shell is /bin/false for PAM compat; ForceCommand internal-sftp prevents shell access
+# ChrootDirectory requires /app/storage/received to be root-owned with 755
 RUN useradd --home-dir /app/storage/received \
             --no-create-home \
             --shell /bin/false \
             cucm-collector \
-    && chown cucm-collector:cucm-collector /app/storage/received \
+    && chown root:root /app/storage/received \
+    && chmod 755 /app/storage/received \
     && echo "/bin/false" >> /etc/shells
 
 # Create sshd privilege separation directory

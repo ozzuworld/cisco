@@ -26,10 +26,15 @@ services:
       - TRANSCRIPT_DIR=/app/storage/transcripts
 
       # ======================================
-      # SFTP Mode (from .env file)
+      # SFTP Settings (where CUCM pushes files)
       # ======================================
-      # Switch modes:  cp .env.relay .env   (VPN/relay)
-      #                cp .env.local .env   (direct/embedded)
+      # CUCM uses "file get activelog" to push files to the embedded SFTP server.
+      # The embedded server runs inside this container on port 2222.
+      # SFTP_HOST must be set to your machine's IP so CUCM knows where to connect.
+      #
+      # If SFTP_HOST is empty, the app auto-detects your IP.
+      # Docker Desktop: ensure Windows Firewall allows inbound TCP port 2222.
+      #
       - SFTP_RELAY_MODE=${SFTP_RELAY_MODE:-false}
       - SFTP_HOST=${SFTP_HOST:-}
       - SFTP_PORT=${SFTP_PORT:-2222}

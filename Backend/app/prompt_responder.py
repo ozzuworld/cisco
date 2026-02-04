@@ -104,6 +104,70 @@ class PromptResponder:
             ),
         ]
 
+    async def _read_from_streams(self, stdout, stderr, timeout: float = 0.5) -> str:
+        """
+        Read from stdout and optionally stderr, returning first available data.
+
+        In PTY sessions stderr is usually merged into stdout, but some prompts
+        (like SSH host key verification) may arrive on stderr separately.
+
+        Args:
+            stdout: SSH stdout reader
+            stderr: Optional SSH stderr reader
+            timeout: Read timeout in seconds
+
+        Returns:
+            Data read from either stream
+
+        Raises:
+            asyncio.TimeoutError: If no data available within timeout
+        """
+        if not stderr:
+            return await asyncio.wait_for(stdout.read(1024), timeout=timeout)
+
+        # Race stdout and stderr reads
+        stdout_task = asyncio.create_task(stdout.read(1024))
+        stderr_task = asyncio.create_task(stderr.read(1024))
+
+        try:
+            done, pending = await asyncio.wait(
+                {stdout_task, stderr_task},
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except Exception:
+            stdout_task.cancel()
+            stderr_task.cancel()
+            raise
+
+        # Cancel any still-pending tasks
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if not done:
+            raise asyncio.TimeoutError()
+
+        # Collect data from all completed tasks
+        combined = ""
+        for task in done:
+            try:
+                result = task.result()
+                if result:
+                    if task is stderr_task:
+                        logger.debug(f"[STDERR] Received {len(result)} bytes: {result[:200]}")
+                    combined += result
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if not combined:
+            raise asyncio.TimeoutError()
+
+        return combined
+
     def match_prompt(self, text: str) -> Optional[PromptPattern]:
         """
         Try to match text against known prompts.
@@ -135,7 +199,8 @@ class PromptResponder:
         prompt: str = "admin:",
         transcript_file = None,
         stop_event: Optional[asyncio.Event] = None,
-        transfer_timeout: float = 180.0
+        transfer_timeout: float = 180.0,
+        stderr=None
     ) -> str:
         """
         Read output and respond to prompts until command completes.
@@ -151,6 +216,7 @@ class PromptResponder:
             transcript_file: Optional file handle to write transcript incrementally
             stop_event: Optional asyncio Event that signals stop request
             transfer_timeout: Max time for transfer after prompts answered (default 180s)
+            stderr: Optional SSH stderr reader (merged into output for prompt detection)
 
         Returns:
             Complete transcript of the interaction
@@ -169,6 +235,9 @@ class PromptResponder:
         prompts_completed_time = None  # Time when prompts were completed
         prompt_retry_counts: Dict[str, int] = {}  # Track retries per prompt
         max_prompt_retries = 3  # Max times to answer the same prompt
+        last_diagnostic_time = None  # For periodic diagnostic logging
+        diagnostic_interval = 15.0  # Log diagnostics every 15s during transfer wait
+        pending_chars = ""  # Accumulate single-char echoes for batched logging
 
         logger.debug("Starting prompt responder")
 
@@ -188,8 +257,19 @@ class PromptResponder:
                     time_since_output = current_time - last_output_time
 
                     if time_since_output > no_output_timeout:
-                        error_msg = f"SFTP upload timed out: No data received for {no_output_timeout}s"
+                        buf_dump = buffer[-500:].replace('\n', '\\n').replace('\r', '\\r') if buffer else "(empty)"
+                        # Detect host key stall pattern: no data after prompts answered
+                        if prompts_completed:
+                            error_msg = (
+                                f"SFTP upload timed out: No data received for {no_output_timeout}s after prompts answered. "
+                                f"This usually means CUCM's SFTP client rejected the server's SSH host key. "
+                                f"SSH into CUCM and run 'file get activelog' manually to accept the host key, "
+                                f"then retry from the app."
+                            )
+                        else:
+                            error_msg = f"SFTP upload timed out: No data received for {no_output_timeout}s"
                         logger.error(error_msg)
+                        logger.error(f"[TIMEOUT-DUMP] Buffer at timeout ({len(buffer)} bytes): {buf_dump}")
                         if transcript_file:
                             transcript_file.write(f"\n\n[ERROR: {error_msg}]\n")
                             transcript_file.write(f"[Last 500 chars: {buffer[-500:]}]\n")
@@ -208,16 +288,40 @@ class PromptResponder:
                                 transcript_file.flush()
                             raise CUCMSFTPTimeoutError(error_msg)
 
-                    # Read a chunk with short timeout to check for idle period
+                    # Read from stdout (and stderr if available) with short timeout
+                    # Some prompts (e.g., SSH host key verification) may arrive on stderr
                     try:
-                        chunk = await asyncio.wait_for(stdout.read(1024), timeout=0.5)
+                        chunk = await self._read_from_streams(stdout, stderr, timeout=0.5)
                     except asyncio.TimeoutError:
                         # No data available - check if we're in stable idle after prompt
                         if saw_prompt and idle_start_time:
                             idle_duration = current_time - idle_start_time
                             if idle_duration >= stable_idle_seconds:
+                                # Flush any accumulated echo chars
+                                if pending_chars:
+                                    pc = pending_chars.replace('\n', '\\n').replace('\r', '\\r')
+                                    logger.info(f"[TRANSFER-DATA] Echo: {pc}")
+                                    pending_chars = ""
                                 logger.info(f"Command completed: stable idle ({idle_duration:.1f}s) after shell prompt")
                                 break
+
+                        # Periodic diagnostic logging during transfer wait
+                        if prompts_completed and prompts_completed_time:
+                            # Flush accumulated chars on timeout (shows error messages char-by-char)
+                            if pending_chars:
+                                pc = pending_chars.replace('\n', '\\n').replace('\r', '\\r')
+                                logger.info(f"[TRANSFER-DATA] Echo: {pc}")
+                                pending_chars = ""
+                            now_diag = asyncio.get_event_loop().time()
+                            if last_diagnostic_time is None or (now_diag - last_diagnostic_time) >= diagnostic_interval:
+                                last_diagnostic_time = now_diag
+                                wait_secs = now_diag - prompts_completed_time
+                                buf_preview = buffer[-200:].replace('\n', '\\n').replace('\r', '\\r') if buffer else "(empty)"
+                                logger.warning(
+                                    f"[TRANSFER-WAIT] {wait_secs:.0f}s since prompts answered. "
+                                    f"Buffer tail: {buf_preview}"
+                                )
+
                         continue
 
                     if not chunk:
@@ -231,6 +335,23 @@ class PromptResponder:
 
                     buffer += chunk
                     transcript.append(chunk)
+
+                    # Log data received during transfer wait phase
+                    # CUCM echoes text char-by-char through PTY, so accumulate small chunks
+                    # and log them together when a multi-byte chunk arrives or on flush
+                    if prompts_completed:
+                        if len(chunk) <= 2:
+                            pending_chars += chunk
+                        else:
+                            # Flush any accumulated chars first
+                            if pending_chars:
+                                pc = pending_chars.replace('\n', '\\n').replace('\r', '\\r')
+                                logger.info(f"[TRANSFER-DATA] Echo: {pc}")
+                                pending_chars = ""
+                            chunk_preview = chunk.replace('\n', '\\n').replace('\r', '\\r')
+                            if len(chunk_preview) > 300:
+                                chunk_preview = chunk_preview[:300] + "..."
+                            logger.info(f"[TRANSFER-DATA] Received {len(chunk)} bytes: {chunk_preview}")
 
                     # Write to transcript file immediately
                     if transcript_file:
