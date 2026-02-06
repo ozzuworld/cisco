@@ -25,11 +25,16 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         echo "[entrypoint] SFTP user '${SFTP_USER}' password configured"
     fi
 
-    # Ensure the SFTP user's home directory exists and is writable
+    # ChrootDirectory requires EVERY path component to be root-owned and not
+    # group/other writable. Fix /app/storage and /app/storage/received.
+    # This also handles volume mounts that may reset permissions.
+    chown root:root /app/storage
+    chmod 755 /app/storage
+
     SFTP_HOME="/app/storage/received"
     mkdir -p "${SFTP_HOME}"
-    chown "${SFTP_USER}:${SFTP_USER}" "${SFTP_HOME}"
-    chmod 775 "${SFTP_HOME}"
+    chown root:root "${SFTP_HOME}"
+    chmod 755 "${SFTP_HOME}"
 
     # Generate SSH host keys if they don't exist
     KEY_DIR="/app/storage"
@@ -53,6 +58,82 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
     # Create required directory for sshd privilege separation
     mkdir -p /run/sshd
 
+    # --- Set up SCP support inside chroot ---
+    # IOS-XE/CUBE devices use 'monitor capture export scp://...' which requires
+    # a real shell and scp binary inside the chroot. SFTP (used by CUCM) works
+    # via internal-sftp which doesn't need any binaries in the chroot.
+    echo "[entrypoint] Setting up SCP support in chroot..."
+    CHROOT="${SFTP_HOME}"
+
+    # Create directories for SCP binaries and libraries
+    mkdir -p "${CHROOT}/bin" "${CHROOT}/usr/bin" "${CHROOT}/lib" "${CHROOT}/lib64" \
+             "${CHROOT}/lib/x86_64-linux-gnu" "${CHROOT}/usr/lib/x86_64-linux-gnu" \
+             "${CHROOT}/usr/lib/openssh" "${CHROOT}/dev" "${CHROOT}/etc"
+
+    # Copy SCP binary and shell
+    cp /usr/bin/scp "${CHROOT}/usr/bin/" 2>/dev/null || true
+    cp /bin/sh "${CHROOT}/bin/" 2>/dev/null || true
+
+    # Create /dev/null (required by scp)
+    mknod -m 666 "${CHROOT}/dev/null" c 1 3 2>/dev/null || true
+
+    # Copy required shared libraries for scp and sh
+    for binary in /usr/bin/scp /bin/sh; do
+        if [ -f "$binary" ]; then
+            for lib in $(ldd "$binary" 2>/dev/null | grep -oE '/[^ ]+' | sort -u); do
+                if [ -f "$lib" ]; then
+                    dest="${CHROOT}${lib}"
+                    mkdir -p "$(dirname "$dest")"
+                    cp "$lib" "$dest" 2>/dev/null || true
+                fi
+            done
+        fi
+    done
+
+    # Copy the dynamic linker
+    for ld in /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+        if [ -f "$ld" ]; then
+            dest="${CHROOT}${ld}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$ld" "$dest" 2>/dev/null || true
+        fi
+    done
+
+    # Create minimal /etc/passwd for SCP user resolution
+    SFTP_UID=$(id -u "${SFTP_USER}" 2>/dev/null || echo "1000")
+    SFTP_GID=$(id -g "${SFTP_USER}" 2>/dev/null || echo "1000")
+    echo "root:x:0:0:root:/root:/bin/sh" > "${CHROOT}/etc/passwd"
+    echo "${SFTP_USER}:x:${SFTP_UID}:${SFTP_GID}::/:/bin/sh" >> "${CHROOT}/etc/passwd"
+    echo "root:x:0:" > "${CHROOT}/etc/group"
+    echo "${SFTP_USER}:x:${SFTP_GID}:" >> "${CHROOT}/etc/group"
+
+    # Copy NSS libraries for user lookup
+    for lib in /lib/x86_64-linux-gnu/libnss_files* /lib/x86_64-linux-gnu/libnss_compat*; do
+        if [ -f "$lib" ]; then
+            dest="${CHROOT}${lib}"
+            mkdir -p "$(dirname "$dest")"
+            cp "$lib" "$dest" 2>/dev/null || true
+        fi
+    done
+
+    # Create writable upload directory for SCP
+    # ChrootDirectory root must be root-owned 755, so user can't write to /.
+    # SCP files go into /uploads/ which is writable by the SFTP user.
+    mkdir -p "${SFTP_HOME}/uploads"
+    chown "${SFTP_USER}:${SFTP_USER}" "${SFTP_HOME}/uploads"
+    chmod 775 "${SFTP_HOME}/uploads"
+
+    echo "[entrypoint] SCP chroot setup complete"
+
+    # Ensure /etc/ssh/moduli exists (required for DH group exchange algorithms)
+    # Some slim Docker images may not include it. Without it, sshd silently
+    # drops connections during key exchange ("Connection closed [preauth]").
+    if [ ! -s /etc/ssh/moduli ]; then
+        echo "[entrypoint] WARNING: /etc/ssh/moduli is missing or empty."
+        echo "[entrypoint] DH group exchange algorithms will not work."
+        echo "[entrypoint] This is handled by sshd_config excluding group-exchange algorithms."
+    fi
+
     # Validate sshd config
     if /usr/sbin/sshd -t -f /app/sshd_config_sftp; then
         echo "[entrypoint] sshd config valid, starting SFTP server on port ${SFTP_SERVER_PORT:-2222}..."
@@ -61,7 +142,19 @@ if [ "${SFTP_SERVER_ENABLED}" = "true" ] || [ "${SFTP_SERVER_ENABLED}" = "True" 
         /usr/sbin/sshd -D -e -f /app/sshd_config_sftp &
         SSHD_PID=$!
         echo "$SSHD_PID" > /tmp/sshd_sftp.pid
-        echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
+        # Verify sshd actually started and is still running
+        sleep 1
+        if kill -0 "$SSHD_PID" 2>/dev/null; then
+            echo "[entrypoint] OpenSSH SFTP server started (PID: ${SSHD_PID})"
+            echo "[entrypoint] SFTP listening on port ${SFTP_SERVER_PORT:-2222}"
+        else
+            echo "[entrypoint] ERROR: sshd exited immediately after start!"
+            echo "[entrypoint] This usually means ChrootDirectory ownership is wrong."
+            echo "[entrypoint] Check: ls -la /app/storage/ (must be root:root 755)"
+        fi
+        echo "[entrypoint] NOTE: If running on Docker Desktop (Windows/Mac), ensure"
+        echo "[entrypoint]   Windows Firewall allows inbound TCP port ${SFTP_SERVER_PORT:-2222}"
+        echo "[entrypoint]   PowerShell: New-NetFirewallRule -DisplayName 'CUCM SFTP' -Direction Inbound -Protocol TCP -LocalPort ${SFTP_SERVER_PORT:-2222} -Action Allow"
     else
         echo "[entrypoint] ERROR: Invalid sshd config! SFTP server will NOT start."
     fi

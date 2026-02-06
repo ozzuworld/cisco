@@ -11,6 +11,7 @@
 
 Port 2222
 ListenAddress 0.0.0.0
+AddressFamily inet
 
 # PID file - managed by entrypoint.sh (sshd runs with -D so doesn't write its own)
 PidFile /tmp/sshd_sftp.pid
@@ -20,10 +21,16 @@ HostKey /app/storage/ssh_host_ed25519_key
 HostKey /app/storage/ssh_host_ecdsa_key
 HostKey /app/storage/ssh_host_rsa_key
 
-# Logging - use VERBOSE to see connection/auth details in Docker logs
-# (sshd is started with -e flag to log to stderr instead of syslog)
+# Logging (sshd is started with -e flag to log to stderr instead of syslog)
 SyslogFacility AUTH
-LogLevel VERBOSE
+LogLevel INFO
+
+# Disable DNS reverse lookups - critical for Docker containers.
+# Without this, sshd tries to reverse-DNS the connecting IP (e.g. 172.18.0.1).
+# Docker internal IPs have no reverse DNS, so the lookup hangs for ~5 seconds,
+# during which sshd doesn't send its SSH version string. The connecting client
+# (CUCM) times out and closes the connection → "Connection closed [preauth]".
+UseDNS no
 
 # Authentication
 PermitRootLogin no
@@ -42,7 +49,12 @@ PermitTunnel no
 GatewayPorts no
 
 # Key Exchange Algorithms (modern first, legacy fallback for CUCM)
-KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group-exchange-sha256,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group14-sha1,diffie-hellman-group1-sha1
+# NOTE: diffie-hellman-group-exchange-sha256 is intentionally EXCLUDED because
+# it requires /etc/ssh/moduli which may be missing in slim Docker images.
+# Without moduli, sshd silently drops the connection during key exchange,
+# causing "Connection closed [preauth]" errors. The fixed-group algorithms
+# below do not require moduli and work reliably in Docker containers.
+KexAlgorithms curve25519-sha256,curve25519-sha256@libssh.org,ecdh-sha2-nistp256,ecdh-sha2-nistp384,ecdh-sha2-nistp521,diffie-hellman-group14-sha256,diffie-hellman-group16-sha512,diffie-hellman-group14-sha1,diffie-hellman-group1-sha1
 
 # Ciphers (modern first, legacy CBC fallback for CUCM)
 Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr,aes256-cbc,aes192-cbc,aes128-cbc,3des-cbc
@@ -53,9 +65,15 @@ MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512,h
 # Host Key Algorithms
 HostKeyAlgorithms ssh-ed25519,ecdsa-sha2-nistp256,rsa-sha2-512,rsa-sha2-256,ssh-rsa
 
-# Force SFTP-only for the CUCM collector user
-# The user's home dir is /app/storage/received - CUCM uploads land there
+# Chroot the collector user to /app/storage/received
+# so CUCM's "Download directory: /" maps to /app/storage/received/
+# ChrootDirectory requires the target dir to be root-owned (handled in entrypoint.sh)
+#
+# NOTE: ForceCommand internal-sftp is NOT used here because IOS-XE/CUBE devices
+# use SCP (not SFTP) for 'monitor capture export scp://...' which requires
+# shell access. SFTP still works via the global Subsystem line above.
+# Chroot + restricted shell provides security. SCP binaries are set up in entrypoint.sh.
 Match User cucm-collector
-    ForceCommand internal-sftp
+    ChrootDirectory /app/storage/received
     AllowTcpForwarding no
     X11Forwarding no

@@ -40,6 +40,10 @@ class CollectionProfile(BaseModel):
         default=None,
         description="Optional regex pattern to match filenames"
     )
+    trace_services: List[str] = Field(
+        default_factory=list,
+        description="CUCM services to configure trace levels for (used by Trace Level page)"
+    )
 
 
 class CubeProfile(BaseModel):

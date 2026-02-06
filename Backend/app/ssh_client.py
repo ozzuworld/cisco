@@ -98,105 +98,94 @@ class InteractiveShellSession:
         start_time = time.time()
         bytes_read = 0
         iterations = 0
-        prompt_found = False
 
-        try:
-            async with asyncio.timeout(timeout):
-                while True:
-                    iterations += 1
+        deadline = start_time + timeout
 
-                    # Read chunk
-                    chunk = await self.stdout.read(1024)
-                    if chunk:
-                        self._buffer += chunk
-                        bytes_read += len(chunk)
-
-                    elapsed = time.time() - start_time
-
-                    # Check for prompt only after minimum read duration
-                    # This prevents early exit before all output has arrived
-                    if elapsed >= min_read_duration:
-                        match = prompt_pattern.search(self._buffer)
-                        if match:
-                            prompt_found = True
-                            # Extract output before the prompt
-                            output_text = self._buffer[:match.start()]
-
-                            # Keep anything after the prompt in buffer for next read
-                            self._buffer = self._buffer[match.end():]
-
-                            # Debug logging for tiny output (potential bug indicator)
-                            if len(output_text.strip()) < 50:
-                                logger.warning(
-                                    f"Tiny output captured ({len(output_text)} bytes): "
-                                    f"request_id={request_id or 'N/A'}, "
-                                    f"prompt_seen={prompt_found}, "
-                                    f"bytes_read={bytes_read}, "
-                                    f"iterations={iterations}, "
-                                    f"elapsed={elapsed:.2f}s, "
-                                    f"output={repr(output_text[:100])}"
-                                )
-
-                            return output_text
-
-                    # If no more data, check one last time for prompt, then return
-                    if not chunk:
-                        # Check for prompt one last time at EOF
-                        match = prompt_pattern.search(self._buffer)
-                        if match:
-                            prompt_found = True
-                            output_text = self._buffer[:match.start()]
-                            self._buffer = self._buffer[match.end():]
-
-                            # Debug logging for tiny output
-                            if len(output_text.strip()) < 50:
-                                logger.warning(
-                                    f"Tiny output at EOF ({len(output_text)} bytes): "
-                                    f"request_id={request_id or 'N/A'}, "
-                                    f"prompt_seen={prompt_found}, "
-                                    f"bytes_read={bytes_read}, "
-                                    f"iterations={iterations}, "
-                                    f"output={repr(output_text[:100])}"
-                                )
-
-                            return output_text
-                        else:
-                            # EOF without finding prompt - return what we have
-                            logger.warning(
-                                f"EOF before prompt: bytes_read={bytes_read}, "
-                                f"iterations={iterations}, buffer_len={len(self._buffer)}"
-                            )
-                            output_text = self._buffer
-                            self._buffer = ""
-                            return output_text
-
-        except TimeoutError:
-            # One final prompt check before raising timeout error
-            # The prompt might be there, but read() was blocking waiting for more data
+        def _check_prompt():
+            """Check buffer for prompt and return (output, True) or (None, False)."""
             match = prompt_pattern.search(self._buffer)
             if match:
-                logger.debug(
-                    f"Found prompt after timeout - data was already buffered. "
-                    f"bytes_read={bytes_read}"
-                )
                 output_text = self._buffer[:match.start()]
                 self._buffer = self._buffer[match.end():]
-                return output_text
+                return output_text, True
+            return None, False
 
-            # Debug logging on timeout
-            buffer_tail = self._buffer[-500:] if len(self._buffer) > 500 else self._buffer
-            logger.error(
-                f"Timeout waiting for prompt '{self.prompt}' after {timeout}s. "
-                f"request_id={request_id or 'N/A'}, "
-                f"prompt_seen={prompt_found}, "
-                f"bytes_read={bytes_read}, "
-                f"iterations={iterations}, "
-                f"buffer_len={len(self._buffer)}, "
-                f"Buffer tail (last 500 chars): {repr(buffer_tail)}"
+        try:
+            while True:
+                iterations += 1
+                elapsed = time.time() - start_time
+
+                # ── 1. Check buffer for prompt BEFORE blocking on read ──
+                # After min_read_duration, the prompt may already be in the
+                # buffer from a previous chunk.  Checking first avoids a
+                # blocking read(1024) that would sit until the next timeout.
+                if elapsed >= min_read_duration:
+                    output_text, found = _check_prompt()
+                    if found:
+                        logger.debug(
+                            f"Prompt found after {elapsed:.2f}s, "
+                            f"bytes_read={bytes_read}, iterations={iterations}"
+                        )
+                        return output_text
+
+                # ── 2. Read data with a short inner timeout ──
+                # Use a 2-second read window so we loop back to the prompt
+                # check frequently instead of blocking until the outer
+                # deadline.
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break  # Overall timeout exceeded
+
+                read_timeout = min(2.0, remaining)
+                try:
+                    chunk = await asyncio.wait_for(
+                        self.stdout.read(1024), timeout=read_timeout
+                    )
+                except asyncio.TimeoutError:
+                    # No data arrived within the read window — loop back
+                    # and re-check the buffer for the prompt.
+                    continue
+
+                if chunk:
+                    self._buffer += chunk
+                    bytes_read += len(chunk)
+                else:
+                    # EOF — do a final prompt check, then return whatever we have
+                    output_text, found = _check_prompt()
+                    if found:
+                        return output_text
+                    logger.warning(
+                        f"EOF before prompt: bytes_read={bytes_read}, "
+                        f"iterations={iterations}, buffer_len={len(self._buffer)}"
+                    )
+                    output_text = self._buffer
+                    self._buffer = ""
+                    return output_text
+
+        except asyncio.CancelledError:
+            raise
+
+        # ── Overall timeout: one final prompt check ──
+        output_text, found = _check_prompt()
+        if found:
+            logger.debug(
+                f"Found prompt after timeout ({timeout}s) - data was already buffered. "
+                f"bytes_read={bytes_read}"
             )
-            raise CUCMCommandTimeoutError(
-                f"Timeout waiting for prompt '{self.prompt}' after {timeout}s"
-            )
+            return output_text
+
+        buffer_tail = self._buffer[-500:] if len(self._buffer) > 500 else self._buffer
+        logger.error(
+            f"Timeout waiting for prompt '{self.prompt}' after {timeout}s. "
+            f"request_id={request_id or 'N/A'}, "
+            f"bytes_read={bytes_read}, "
+            f"iterations={iterations}, "
+            f"buffer_len={len(self._buffer)}, "
+            f"Buffer tail (last 500 chars): {repr(buffer_tail)}"
+        )
+        raise CUCMCommandTimeoutError(
+            f"Timeout waiting for prompt '{self.prompt}' after {timeout}s"
+        )
 
     async def send_command(
         self,
@@ -428,6 +417,7 @@ class CUCMSSHClient:
 
             # Check if CLI is still starting up - extend timeout if needed
             cli_starting_up = "starting up" in self._session._buffer.lower()
+            prompt_already_found = False
             if cli_starting_up:
                 logger.info("CUCM CLI is starting up, waiting for CLI to become ready...")
                 # Wait additional time for CLI to finish starting, reading any output
@@ -440,21 +430,30 @@ class CUCMSSHClient:
                                 # Check if we got the prompt while waiting
                                 if self.prompt in self._session._buffer:
                                     logger.info("CLI prompt appeared during startup wait")
+                                    prompt_already_found = True
                                     break
                             else:
                                 break  # EOF
                 except asyncio.TimeoutError:
                     pass
 
-            logger.debug(f"Banner collected ({len(self._session._buffer)} bytes), sending newline...")
-            stdin.write('\n')
-            await stdin.drain()
+            if prompt_already_found:
+                # Prompt was already seen during startup — clear buffer up to
+                # and including the prompt so execute_command starts clean.
+                idx = self._session._buffer.find(self.prompt)
+                if idx >= 0:
+                    self._session._buffer = self._session._buffer[idx + len(self.prompt):]
+                logger.info("Interactive shell session ready (prompt found during startup)")
+            else:
+                logger.debug(f"Banner collected ({len(self._session._buffer)} bytes), sending newline...")
+                stdin.write('\n')
+                await stdin.drain()
 
-            # Now wait for prompt - use connect_timeout with a minimum of 60s
-            prompt_timeout = max(self.connect_timeout, 60.0)
-            logger.debug(f"Waiting for prompt (timeout={prompt_timeout}s)...")
-            await self._session.read_until_prompt(timeout=prompt_timeout)
-            logger.info("Interactive shell session ready")
+                # Now wait for prompt - use connect_timeout with a minimum of 60s
+                prompt_timeout = max(self.connect_timeout, 60.0)
+                logger.debug(f"Waiting for prompt (timeout={prompt_timeout}s)...")
+                await self._session.read_until_prompt(timeout=prompt_timeout)
+                logger.info("Interactive shell session ready")
 
         except asyncio.TimeoutError:
             raise CUCMConnectionError(

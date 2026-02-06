@@ -35,7 +35,7 @@ RUN npm run build
 # ------------------------------------------------------------------------------
 # Stage 2: Final Application (Python + FastAPI + Frontend + OpenSSH SFTP)
 # ------------------------------------------------------------------------------
-FROM python:3.11-slim
+FROM python:3.11-slim-bookworm
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -67,6 +67,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application code
 COPY Backend/app/ ./app/
 COPY Backend/profiles.yaml .
+COPY Backend/scenarios.yaml .
 
 # Copy SFTP server configuration and entrypoint
 COPY Backend/sshd_config_sftp ./sshd_config_sftp
@@ -77,23 +78,30 @@ RUN sed -i 's/\r$//' ./entrypoint.sh ./sshd_config_sftp && chmod +x ./entrypoint
 # Copy built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
-# Create storage directories with correct permissions
+# Create storage directories
+# /app/storage and /app/storage/received MUST be root:root 755
+# (ChrootDirectory requires every path component to be root-owned, not group/other writable)
+# Subdirectories for app data can be more permissive since they're not in the chroot path
 RUN mkdir -p /app/storage/received \
              /app/storage/jobs \
              /app/storage/transcripts \
              /app/storage/captures \
              /app/storage/sessions \
-    && chmod -R 775 /app/storage
+             /app/storage/environments \
+             /app/storage/investigations \
+    && chmod 755 /app/storage \
+    && chmod 755 /app/storage/received
 
-# Create SFTP user for CUCM file uploads
-# Home directory is storage/received - CUCM uploads land here
-# Shell is /bin/false for PAM compat; ForceCommand internal-sftp prevents shell access
+# Create SFTP/SCP user for CUCM/CUBE file uploads
+# Home directory is storage/received - uploads land here
+# Shell is /bin/sh for SCP compatibility (IOS-XE 'monitor capture export scp://...')
+# SFTP works via Subsystem; SCP needs a real shell. Chroot provides security.
 RUN useradd --home-dir /app/storage/received \
             --no-create-home \
-            --shell /bin/false \
+            --shell /bin/sh \
             cucm-collector \
-    && chown cucm-collector:cucm-collector /app/storage/received \
-    && echo "/bin/false" >> /etc/shells
+    && chown root:root /app/storage/received \
+    && chmod 755 /app/storage/received
 
 # Create sshd privilege separation directory
 RUN mkdir -p /run/sshd

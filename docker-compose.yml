@@ -8,8 +8,10 @@ services:
     ports:
       # Main application port (Frontend UI + API)
       - "8000:8000"
-      # SFTP server port (for CUCM to upload files in local mode)
-      - "2222:2222"
+      # SFTP server: host port 22 → container sshd on 2222
+      # CUCM connects to port 22 (trusted), Docker forwards to container
+      # Host sshd moved to port 22222 to free port 22 for Docker
+      - "22:2222"
     volumes:
       # Persist storage across container restarts
       - ./storage:/app/storage
@@ -26,16 +28,10 @@ services:
       - TRANSCRIPT_DIR=/app/storage/transcripts
 
       # ======================================
-      # SFTP Mode (from .env file)
+      # SFTP Settings (where CUCM pushes files)
       # ======================================
-      # Switch modes:  cp .env.relay .env   (VPN/relay)
-      #                cp .env.local .env   (direct/embedded)
-      - SFTP_RELAY_MODE=${SFTP_RELAY_MODE:-false}
-      - SFTP_HOST=${SFTP_HOST:-}
-      - SFTP_PORT=${SFTP_PORT:-2222}
-      - SFTP_USERNAME=${SFTP_USERNAME:-cucm-collector}
-      - SFTP_PASSWORD=${SFTP_PASSWORD:-cucm-collector}
-      - SFTP_REMOTE_BASE_DIR=${SFTP_REMOTE_BASE_DIR:-}
+      # These come from .env file via env_file directive above.
+      # Do NOT duplicate them here — environment: overrides env_file values.
 
       # ======================================
       # Embedded SFTP Server (from .env file)

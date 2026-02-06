@@ -48,7 +48,7 @@ export const captureService = {
    * Download capture file
    */
   downloadCapture(captureId: string, filename: string): void {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const link = document.createElement('a')
     link.href = `${baseUrl}/captures/${captureId}/download`
     link.download = `${filename}.cap`
@@ -98,7 +98,7 @@ export const captureService = {
    * Download session bundle (ZIP with all captures)
    */
   downloadSessionBundle(sessionId: string, filename?: string): void {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const link = document.createElement('a')
     link.href = `${baseUrl}/capture-sessions/${sessionId}/download`
     link.download = filename || `capture_session_${sessionId}.zip`
@@ -111,7 +111,7 @@ export const captureService = {
    * Fetch session bundle as blob (for custom handling)
    */
   async fetchSessionBlob(sessionId: string): Promise<Blob> {
-    const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+    const baseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
     const response = await fetch(`${baseUrl}/capture-sessions/${sessionId}/download`, {
       method: 'GET',
       headers: {

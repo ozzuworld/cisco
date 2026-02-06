@@ -34,18 +34,26 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 # CUCM trace level mapping
-# Maps our debug_level to CUCM trace level names
+# Maps our debug_level to CUCM CLI trace level names
+# Valid CUCM levels: Error, Special, State_Transition, Significant,
+#                    Entry_exit, Arbitrary, Detailed
+# Ref: Cisco CLI Reference Guide – "set trace enable" command
 CUCM_TRACE_LEVELS = {
-    "basic": "Informational",      # Default - minimal logging
+    "basic": "Error",              # Default - minimal logging
     "detailed": "Detailed",        # More verbose - good for TAC
-    "verbose": "Debug",            # Maximum detail - performance impact
+    "verbose": "Arbitrary",        # Maximum detail - performance impact
 }
 
-# CUCM services to set trace levels on
-# These are the main services TAC typically requests traces for
+# CUCM trace task names to configure
+# These are the CLI task names returned by "show trace level"
+# Used as the tname parameter in "set trace enable {Level} {tname}"
 CUCM_TRACE_SERVICES = [
-    "Cisco CallManager",           # Main CallManager service
-    "Cisco CTIManager",            # CTI related
+    "dbl",          # Database Layer
+    "dbnotify",     # Database Notification
+    "servm",        # Service Manager
+    "clm",          # CallManager
+    "sappagt",      # SAPP Agent
+    "snmpdm",       # SNMP Daemon
 ]
 
 
@@ -53,18 +61,20 @@ def build_trace_set_commands(debug_level: str) -> List[str]:
     """
     Build CUCM CLI commands to set trace level for key services.
 
+    CUCM CLI syntax: set trace enable {Level} {tname}
+    Level comes first, then the trace task name.
+
     Args:
         debug_level: One of "basic", "detailed", "verbose"
 
     Returns:
         List of CLI commands to execute
     """
-    cucm_level = CUCM_TRACE_LEVELS.get(debug_level, "Informational")
+    cucm_level = CUCM_TRACE_LEVELS.get(debug_level, "Error")
     commands = []
 
-    for service in CUCM_TRACE_SERVICES:
-        # CUCM trace command format
-        commands.append(f'set trace enable "{service}" {cucm_level}')
+    for task in CUCM_TRACE_SERVICES:
+        commands.append(f'set trace enable {cucm_level} {task}')
 
     return commands
 
@@ -78,9 +88,8 @@ def build_trace_reset_commands() -> List[str]:
     """
     commands = []
 
-    for service in CUCM_TRACE_SERVICES:
-        # Reset to Informational (basic/default level)
-        commands.append(f'set trace enable "{service}" Informational')
+    for task in CUCM_TRACE_SERVICES:
+        commands.append(f'set trace enable Error {task}')
 
     return commands
 

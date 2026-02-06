@@ -57,6 +57,32 @@ from app.models import (
     LogProfilesResponse,  # Log Collection Profiles
     CubeProfileResponse,  # Log Collection Profiles
     ExpresswayProfileResponse,  # Log Collection Profiles
+    CreateSSHSessionRequest,  # SSH Sessions
+    CreateSSHSessionResponse,  # SSH Sessions
+    SSHNodeInfo,  # SSH Sessions
+    SSHSessionInfoResponse,  # SSH Sessions
+    SSHSessionListResponse,  # SSH Sessions
+    DeleteSSHSessionResponse,  # SSH Sessions
+    SSHSessionStatus as SSHSessionStatusEnum,  # SSH Sessions
+    CubeDebugStatusRequest,  # CUBE Debug
+    CubeDebugStatusResponse,  # CUBE Debug
+    CubeDebugCategory,  # CUBE Debug
+    CubeDebugEnableRequest,  # CUBE Debug
+    CubeDebugEnableResponse,  # CUBE Debug
+    CubeDebugClearResponse,  # CUBE Debug
+    DeviceHealthRequest,  # Device Health
+    DeviceHealthResponse,  # Device Health
+    EnvironmentCreate,  # Environments
+    EnvironmentUpdate,  # Environments
+    EnvironmentResponse,  # Environments
+    EnvironmentListResponse,  # Environments
+    DeviceEntryCreate,  # Environments
+    ScenarioListResponse,  # Scenarios
+    CreateInvestigationRequest,  # Investigations
+    CreateInvestigationResponse,  # Investigations
+    InvestigationStatusResponse,  # Investigations
+    InvestigationListResponse,  # Investigations
+    InvestigationStatus as InvestigationStatusEnum,  # Investigations
 )
 from app.ssh_client import (
     run_show_network_cluster,
@@ -65,6 +91,13 @@ from app.ssh_client import (
     CUCMCommandTimeoutError,
     CUCMSSHClientError,
     CUCMSSHClient
+)
+from app.csr_client import (
+    CSRSSHClient,
+    CSRAuthError,
+    CSRConnectionError,
+    CSRCommandTimeoutError,
+    CSRSSHClientError,
 )
 from app.parsers import parse_show_network_cluster
 from app.profiles import get_profile_catalog
@@ -80,10 +113,13 @@ from app.artifact_manager import (
 from app.config import get_settings
 from app.prompt_responder import compute_reltime_from_range, build_file_get_command
 from app.health_service import check_cluster_health  # Health Status
+from app.device_health_service import check_device_health  # Device Health
 from app.capture_service import get_capture_manager  # Packet Capture
 from app.capture_session_service import get_session_manager  # Capture Sessions
 from app.log_service import get_log_collection_manager  # Log Collection
 from app.sftp_server import start_sftp_server, stop_sftp_server, get_sftp_server  # Embedded SFTP
+from app.ssh_session_manager import get_ssh_session_manager  # SSH Sessions
+from app.environment_service import get_environment_manager  # Environments
 
 
 # Configure logging
@@ -128,9 +164,15 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Embedded SFTP server disabled (SFTP_SERVER_ENABLED=false)")
 
+    # Start SSH session manager cleanup loop
+    ssh_session_mgr = get_ssh_session_manager()
+    ssh_session_mgr.start_cleanup_loop()
+
     yield  # Application runs here
 
     # Shutdown
+    ssh_session_mgr.stop_cleanup_loop()
+
     if settings.sftp_server_enabled:
         logger.info("Stopping embedded SFTP server...")
         await stop_sftp_server()
@@ -645,6 +687,259 @@ async def get_cluster_health(req_body: ClusterHealthRequest, request: Request):
 
 
 # ============================================================================
+# Multi-Device Health Check Endpoint
+# ============================================================================
+
+
+@app.post(
+    "/health/device",
+    response_model=DeviceHealthResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "Device health status retrieved successfully",
+            "model": DeviceHealthResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_device_health(req_body: DeviceHealthRequest, request: Request):
+    """
+    Check health of multiple devices (CUCM, CUBE/IOS-XE, Expressway).
+
+    Supports concurrent health checks across different device types:
+    - CUCM: SSH-based checks (services, NTP, replication, diagnostics, core files)
+    - CUBE: SSH-based checks (system, interfaces, voice calls, SIP, NTP, environment, redundancy)
+    - Expressway: REST API checks (cluster, licensing, alarms, NTP)
+
+    Each device is checked independently and errors are isolated per-device.
+    """
+    request_id = get_request_id(request)
+    device_types = [d.device_type.value for d in req_body.devices]
+    logger.info(
+        f"Device health check request for {len(req_body.devices)} device(s): "
+        f"{device_types} (request_id={request_id})"
+    )
+
+    try:
+        response = await check_device_health(req_body)
+        logger.info(
+            f"Device health check complete: {response.overall_status.value} "
+            f"({response.healthy_devices} healthy, {response.degraded_devices} degraded, "
+            f"{response.critical_devices} critical, {response.unknown_devices} unknown) "
+            f"(request_id={request_id})"
+        )
+        return response
+
+    except Exception as e:
+        logger.exception(f"Unexpected error during device health check: {str(e)} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "INTERNAL_ERROR",
+                "message": "An unexpected error occurred during device health check",
+                "request_id": request_id
+            }
+        )
+
+
+# ============================================================================
+# SSH Session Management Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/ssh-sessions",
+    response_model=CreateSSHSessionResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        201: {
+            "description": "SSH session created",
+            "model": CreateSSHSessionResponse
+        },
+        500: {
+            "description": "Internal server error",
+            "model": ErrorResponse
+        }
+    }
+)
+async def create_ssh_session(req_body: CreateSSHSessionRequest, request: Request):
+    """
+    Create a persistent SSH session to CUCM nodes.
+
+    Connects to all specified nodes in parallel. The session stays alive
+    for subsequent trace level operations, avoiding repeated CLI startup overhead.
+    """
+    request_id = get_request_id(request)
+    logger.info(
+        f"Creating SSH session for {len(req_body.hosts)} nodes "
+        f"(request_id={request_id})"
+    )
+
+    try:
+        mgr = get_ssh_session_manager()
+        session = await mgr.create_session(
+            hosts=req_body.hosts,
+            username=req_body.username,
+            password=req_body.password,
+            port=req_body.port,
+            connect_timeout=float(req_body.connect_timeout_sec),
+        )
+
+        connected = [h for h, n in session.nodes.items() if n.connected]
+        failed = [
+            SSHNodeInfo(host=h, connected=False, error=n.error)
+            for h, n in session.nodes.items()
+            if not n.connected
+        ]
+
+        if connected:
+            session_status = SSHSessionStatusEnum.CONNECTED
+        else:
+            session_status = SSHSessionStatusEnum.ERROR
+
+        logger.info(
+            f"SSH session {session.session_id[:8]} ready: "
+            f"{len(connected)} connected, {len(failed)} failed "
+            f"(request_id={request_id})"
+        )
+
+        return CreateSSHSessionResponse(
+            session_id=session.session_id,
+            status=session_status,
+            connected_nodes=connected,
+            failed_nodes=failed,
+        )
+
+    except Exception as e:
+        logger.exception(f"Error creating SSH session: {e} (request_id={request_id})")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "SESSION_CREATE_FAILED",
+                "message": f"Failed to create SSH session: {str(e)}",
+                "request_id": request_id
+            }
+        )
+
+
+@app.get(
+    "/ssh-sessions/{session_id}",
+    response_model=SSHSessionInfoResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "SSH session info",
+            "model": SSHSessionInfoResponse
+        },
+        404: {
+            "description": "Session not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def get_ssh_session(session_id: str, request: Request):
+    """Get the status of an SSH session."""
+    request_id = get_request_id(request)
+    mgr = get_ssh_session_manager()
+    session = mgr.get_session(session_id)
+
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": f"SSH session {session_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    nodes = [
+        SSHNodeInfo(host=h, connected=n.connected, error=n.error)
+        for h, n in session.nodes.items()
+    ]
+    any_connected = any(n.connected for n in session.nodes.values())
+
+    return SSHSessionInfoResponse(
+        session_id=session.session_id,
+        status=SSHSessionStatusEnum.CONNECTED if any_connected else SSHSessionStatusEnum.DISCONNECTED,
+        nodes=nodes,
+        created_at=session.created_at,
+        last_used_at=session.last_used_at,
+        ttl_remaining=session.ttl_remaining(),
+    )
+
+
+@app.get(
+    "/ssh-sessions",
+    response_model=SSHSessionListResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def list_ssh_sessions(request: Request):
+    """List all active SSH sessions."""
+    mgr = get_ssh_session_manager()
+    sessions = mgr.list_sessions()
+
+    items = []
+    for s in sessions:
+        nodes = [
+            SSHNodeInfo(host=h, connected=n.connected, error=n.error)
+            for h, n in s.nodes.items()
+        ]
+        any_connected = any(n.connected for n in s.nodes.values())
+        items.append(SSHSessionInfoResponse(
+            session_id=s.session_id,
+            status=SSHSessionStatusEnum.CONNECTED if any_connected else SSHSessionStatusEnum.DISCONNECTED,
+            nodes=nodes,
+            created_at=s.created_at,
+            last_used_at=s.last_used_at,
+            ttl_remaining=s.ttl_remaining(),
+        ))
+
+    return SSHSessionListResponse(sessions=items)
+
+
+@app.delete(
+    "/ssh-sessions/{session_id}",
+    response_model=DeleteSSHSessionResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {
+            "description": "SSH session deleted",
+            "model": DeleteSSHSessionResponse
+        },
+        404: {
+            "description": "Session not found",
+            "model": ErrorResponse
+        }
+    }
+)
+async def delete_ssh_session(session_id: str, request: Request):
+    """Disconnect all nodes and destroy an SSH session."""
+    request_id = get_request_id(request)
+    mgr = get_ssh_session_manager()
+    success = await mgr.destroy_session(session_id)
+
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "SESSION_NOT_FOUND",
+                "message": f"SSH session {session_id} not found",
+                "request_id": request_id
+            }
+        )
+
+    return DeleteSSHSessionResponse(
+        session_id=session_id,
+        message="SSH session destroyed"
+    )
+
+
+# ============================================================================
 # Trace Level Management Endpoints
 # ============================================================================
 
@@ -692,6 +987,10 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
     Connects to each node and queries the current trace level for each service.
     Use this to check the current state before/after setting trace levels.
 
+    If session_id is provided, reuses existing persistent connections and
+    processes nodes in parallel.  Otherwise falls back to sequential new
+    connections for backwards compatibility.
+
     Args:
         req_body: GetTraceLevelRequest with connection parameters
         request: FastAPI request object
@@ -704,104 +1003,234 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
     request_id = get_request_id(request)
     logger.info(
         f"Get trace level request for {len(req_body.hosts)} nodes "
-        f"(request_id={request_id})"
+        f"(session_id={req_body.session_id or 'none'}, request_id={request_id})"
     )
 
     # Use provided services or defaults
     services = req_body.services or CUCM_TRACE_SERVICES
 
+    # Valid CUCM trace levels (from least to most verbose)
+    VALID_TRACE_LEVELS = [
+        "Error", "Special", "State_Transition", "Significant",
+        "Entry_exit", "Arbitrary", "Detailed",
+    ]
+
+    # ── Helper: query one node using an already-connected client ──
+    async def _query_node(host: str, client: CUCMSSHClient) -> NodeTraceLevelStatus:
+        service_levels = []
+        all_raw_output = []
+
+        try:
+            # Step 1: Get the list of trace tasks
+            output = await client.execute_command("show trace level", timeout=30.0)
+            logger.info(f"[{host}] show trace level output ({len(output)} chars)")
+            all_raw_output.append(f"admin: show trace level\n{output.strip()}")
+
+            valid_tasks = []
+            for line in output.split('\n'):
+                stripped = line.strip()
+                if 'valid tasks' in stripped.lower() or 'tasks are' in stripped.lower():
+                    colon_idx = stripped.find(':')
+                    if colon_idx >= 0:
+                        task_str = stripped[colon_idx + 1:].strip()
+                        valid_tasks = [t.strip() for t in task_str.split() if t.strip()]
+
+            if not valid_tasks:
+                logger.warning(f"[{host}] Could not parse task names from output")
+                combined_raw = "\n".join(all_raw_output)
+                return NodeTraceLevelStatus(
+                    host=host, success=False, services=[],
+                    raw_output=combined_raw, error="Could not parse trace task list",
+                )
+
+            logger.info(f"[{host}] Found {len(valid_tasks)} trace tasks: {valid_tasks}")
+
+            # Step 2: Query each task individually.
+            # Try two command forms in order:
+            #   1. "show trace <task>"  (Cisco docs: "show trace" lists current level)
+            #   2. "show trace level <task>"  (older CUCM versions)
+            # If both fail on the first task, report tasks with Unknown level.
+            query_cmd_template = None
+            QUERY_FORMS = ["show trace {task}", "show trace level {task}"]
+
+            for form_idx, form in enumerate(QUERY_FORMS):
+                test_cmd = form.format(task=valid_tasks[0])
+                try:
+                    test_output = await client.execute_command(test_cmd, timeout=15.0)
+                    if "unsuccessfully" not in test_output.lower():
+                        query_cmd_template = form
+                        logger.info(f"[{host}] Per-task query works with: {form}")
+                        # Parse this first result so we don't waste it
+                        break
+                    else:
+                        logger.info(f"[{host}] Command '{test_cmd}' not supported")
+                except Exception:
+                    logger.info(f"[{host}] Command '{test_cmd}' failed")
+
+            if query_cmd_template:
+                # We found a working command form — query all tasks
+                # (first task was already queried above as test_output)
+                for i, task in enumerate(valid_tasks):
+                    try:
+                        if i == 0:
+                            task_output = test_output  # reuse probe result
+                        else:
+                            cmd = query_cmd_template.format(task=task)
+                            task_output = await client.execute_command(
+                                cmd, timeout=15.0
+                            )
+
+                        if "unsuccessfully" in task_output.lower():
+                            service_levels.append(ServiceTraceLevel(
+                                service_name=task, current_level="Unknown",
+                                raw_output=task_output.strip()[:500],
+                            ))
+                            continue
+
+                        all_raw_output.append(
+                            f"\nadmin: {query_cmd_template.format(task=task)}\n"
+                            f"{task_output.strip()}"
+                        )
+
+                        # Parse trace level — match only valid CUCM level
+                        # names, skip lines that are error messages.
+                        current_level = "Unknown"
+                        for tline in task_output.split('\n'):
+                            tline_stripped = tline.strip()
+                            if not tline_stripped:
+                                continue
+                            if "unsuccessfully" in tline_stripped.lower():
+                                continue
+                            if "error executing" in tline_stripped.lower():
+                                continue
+                            for level_name in VALID_TRACE_LEVELS:
+                                if level_name.lower() in tline_stripped.lower():
+                                    current_level = level_name
+                                    break
+                            if current_level != "Unknown":
+                                break
+
+                        service_levels.append(ServiceTraceLevel(
+                            service_name=task,
+                            current_level=current_level,
+                            raw_output=task_output.strip()[:500],
+                        ))
+                    except Exception as te:
+                        logger.warning(f"[{host}] Failed to query task {task}: {te}")
+            else:
+                # Neither command form works — report tasks with Unknown level
+                logger.info(
+                    f"[{host}] Per-task trace query not supported on this CUCM, "
+                    f"reporting {len(valid_tasks)} tasks as Unknown"
+                )
+                for task in valid_tasks:
+                    service_levels.append(ServiceTraceLevel(
+                        service_name=task,
+                        current_level="Unknown",
+                        raw_output="",
+                    ))
+
+        except Exception as e:
+            logger.warning(f"[{host}] Failed to get trace levels: {e}")
+            all_raw_output.append(f"Error: {e}")
+            combined_raw = "\n".join(all_raw_output)
+            return NodeTraceLevelStatus(
+                host=host, success=False, services=service_levels,
+                raw_output=combined_raw, error=str(e),
+            )
+
+        combined_raw = "\n".join(all_raw_output)
+        return NodeTraceLevelStatus(
+            host=host,
+            success=len(service_levels) > 0,
+            services=service_levels,
+            raw_output=combined_raw,
+            error=None if service_levels else "No trace tasks found",
+        )
+
     results = []
     successful = 0
     failed = 0
 
-    for host in req_body.hosts:
-        try:
-            async with CUCMSSHClient(
-                host=host,
-                port=req_body.port,
-                username=req_body.username,
-                password=req_body.password,
-                connect_timeout=float(req_body.connect_timeout_sec)
-            ) as client:
+    # ── Path A: session-based parallel execution ──
+    if req_body.session_id:
+        mgr = get_ssh_session_manager()
+        session = mgr.get_session(req_body.session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "SESSION_NOT_FOUND",
+                    "message": f"SSH session {req_body.session_id} not found",
+                    "request_id": request_id,
+                }
+            )
 
-                service_levels = []
-                for service in services:
-                    try:
-                        # Query current trace level
-                        # CUCM command: show trace level "Service Name"
-                        cmd = f'show trace level "{service}"'
-                        output = await client.execute_command(cmd, timeout=30.0)
+        async def _session_query(host: str) -> NodeTraceLevelStatus:
+            node = session.nodes.get(host)
+            if not node or not node.connected or not node.client:
+                return NodeTraceLevelStatus(
+                    host=host, success=False, services=[],
+                    error=f"Node {host} not connected in session"
+                )
+            try:
+                return await _query_node(host, node.client)
+            except Exception as e:
+                logger.exception(f"Error getting trace levels from {host}: {e}")
+                return NodeTraceLevelStatus(
+                    host=host, success=False, services=[], error=str(e)
+                )
 
-                        # Parse output to extract current level
-                        current_level = "Unknown"
-                        for line in output.split('\n'):
-                            line = line.strip()
-                            # Look for trace level in output
-                            if 'trace level' in line.lower() or 'Trace Level' in line:
-                                # Extract level name
-                                for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
-                                    if level_name.lower() in line.lower():
-                                        current_level = level_name
-                                        break
-                            # Also check for direct level indicators
-                            for level_name in ["Debug", "Detailed", "Informational", "Error", "Fatal"]:
-                                if level_name in line:
-                                    current_level = level_name
-                                    break
-
-                        service_levels.append(ServiceTraceLevel(
-                            service_name=service,
-                            current_level=current_level,
-                            raw_output=output.strip()[:500] if output else None
-                        ))
-
-                    except Exception as e:
-                        logger.warning(f"Failed to get trace level for {service} on {host}: {e}")
-                        service_levels.append(ServiceTraceLevel(
-                            service_name=service,
-                            current_level="Error",
-                            raw_output=str(e)
-                        ))
-
-                results.append(NodeTraceLevelStatus(
-                    host=host,
-                    success=True,
-                    services=service_levels,
-                    error=None
-                ))
+        node_results = await asyncio.gather(
+            *[_session_query(h) for h in req_body.hosts]
+        )
+        for nr in node_results:
+            results.append(nr)
+            if nr.success:
                 successful += 1
+            else:
+                failed += 1
 
-        except CUCMAuthError as e:
-            logger.error(f"Authentication failed for {host}: {e}")
-            results.append(NodeTraceLevelStatus(
-                host=host,
-                success=False,
-                services=[],
-                error="Authentication failed"
-            ))
-            failed += 1
+    # ── Path B: legacy sequential connections ──
+    else:
+        for host in req_body.hosts:
+            try:
+                async with CUCMSSHClient(
+                    host=host,
+                    port=req_body.port,
+                    username=req_body.username,
+                    password=req_body.password,
+                    connect_timeout=float(req_body.connect_timeout_sec)
+                ) as client:
+                    nr = await _query_node(host, client)
+                    results.append(nr)
+                    successful += 1
 
-        except CUCMConnectionError as e:
-            logger.error(f"Connection error for {host}: {e}")
-            results.append(NodeTraceLevelStatus(
-                host=host,
-                success=False,
-                services=[],
-                error=f"Connection error: {str(e)}"
-            ))
-            failed += 1
+            except CUCMAuthError as e:
+                logger.error(f"Authentication failed for {host}: {e}")
+                results.append(NodeTraceLevelStatus(
+                    host=host, success=False, services=[],
+                    error="Authentication failed"
+                ))
+                failed += 1
 
-        except Exception as e:
-            logger.exception(f"Error getting trace levels from {host}: {e}")
-            results.append(NodeTraceLevelStatus(
-                host=host,
-                success=False,
-                services=[],
-                error=str(e)
-            ))
-            failed += 1
+            except CUCMConnectionError as e:
+                logger.error(f"Connection error for {host}: {e}")
+                results.append(NodeTraceLevelStatus(
+                    host=host, success=False, services=[],
+                    error=f"Connection error: {str(e)}"
+                ))
+                failed += 1
 
-    return GetTraceLevelResponse(
+            except Exception as e:
+                logger.exception(f"Error getting trace levels from {host}: {e}")
+                results.append(NodeTraceLevelStatus(
+                    host=host, success=False, services=[],
+                    error=str(e)
+                ))
+                failed += 1
+
+    response = GetTraceLevelResponse(
         results=results,
         total_nodes=len(req_body.hosts),
         successful_nodes=successful,
@@ -809,6 +1238,12 @@ async def get_trace_level(req_body: GetTraceLevelRequest, request: Request):
         checked_at=datetime.now(timezone.utc),
         message=f"Checked trace levels on {successful}/{len(req_body.hosts)} nodes"
     )
+    logger.info(
+        f"GET trace-level response: successful={successful}, failed={failed}, "
+        f"nodes=[{', '.join(f'{r.host}:success={r.success},services={len(r.services)}' for r in results)}] "
+        f"(request_id={request_id})"
+    )
+    return response
 
 
 @app.post(
@@ -840,6 +1275,10 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
     Use 'detailed' or 'verbose' when troubleshooting, then set back to
     'basic' when done to avoid performance impact.
 
+    If session_id is provided, reuses existing persistent connections and
+    processes nodes in parallel.  Otherwise falls back to sequential new
+    connections for backwards compatibility.
+
     Args:
         req_body: SetTraceLevelRequest with hosts and level
         request: FastAPI request object
@@ -850,93 +1289,177 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
     request_id = get_request_id(request)
     logger.info(
         f"Set trace level request: level={req_body.level.value} "
-        f"hosts={req_body.hosts} (request_id={request_id})"
+        f"hosts={req_body.hosts} (session_id={req_body.session_id or 'none'}, "
+        f"request_id={request_id})"
     )
 
-    # Use provided services or defaults
-    services = req_body.services or CUCM_TRACE_SERVICES
-    cucm_level = CUCM_TRACE_LEVELS.get(req_body.level.value, "Informational")
+    # Resolve the CUCM trace level name
+    cucm_level = CUCM_TRACE_LEVELS.get(req_body.level.value, "Error")
+
+    # ── Helper: set trace on one node using an already-connected client ──
+    async def _set_node(host: str, client: CUCMSSHClient) -> NodeTraceLevelResult:
+        services_updated = []
+        node_errors = []
+        raw_parts = []
+
+        # Step 1: Discover valid task names from the node itself
+        # CUCM set trace uses task names (dbl, servm, etc.) not service
+        # names ("Cisco CallManager").  Query the node for its task list.
+        try:
+            task_output = await client.execute_command(
+                "show trace level", timeout=30.0
+            )
+        except Exception as e:
+            return NodeTraceLevelResult(
+                host=host, success=False, services_updated=[],
+                raw_output=f"Error discovering trace tasks: {e}",
+                error=f"Could not discover trace tasks: {e}",
+            )
+
+        task_names = []
+        for line in task_output.split('\n'):
+            stripped = line.strip()
+            if 'valid tasks' in stripped.lower() or 'tasks are' in stripped.lower():
+                colon_idx = stripped.find(':')
+                if colon_idx >= 0:
+                    task_str = stripped[colon_idx + 1:].strip()
+                    task_names = [t.strip() for t in task_str.split() if t.strip()]
+
+        if not task_names:
+            return NodeTraceLevelResult(
+                host=host, success=False, services_updated=[],
+                raw_output=task_output.strip(),
+                error="Could not parse trace task list from CUCM",
+            )
+
+        # If specific services were requested, filter to matching tasks
+        # (for now, set ALL discovered tasks to the requested level)
+        logger.info(f"[{host}] Setting {len(task_names)} trace tasks to {cucm_level}")
+
+        # Step 2: Set each task to the requested level
+        for task in task_names:
+            cmd = f'set trace enable {cucm_level} {task}'
+            try:
+                logger.info(f"[{host}] Executing: {cmd}")
+                output = await client.execute_command_with_confirmation(
+                    cmd, confirmation="y", timeout=60.0
+                )
+                # Validate CUCM didn't reject the command
+                if "unsuccessfully" in output.lower() or "no valid command" in output.lower():
+                    error_msg = f"CUCM rejected: {output.strip()[:200]}"
+                    logger.warning(f"[{host}] {error_msg}")
+                    node_errors.append(f"{task}: {error_msg}")
+                    raw_parts.append(f"admin: {cmd}\n{output.strip()}")
+                    continue
+                services_updated.append(task)
+                raw_parts.append(f"admin: {cmd}\n{output.strip()}")
+                logger.info(f"[{host}] Successfully set trace level for {task}")
+            except Exception as e:
+                logger.warning(f"[{host}] Failed to set trace for {service}: {e}")
+                node_errors.append(f"{service}: {str(e)}")
+                raw_parts.append(f"admin: {cmd}\nError: {e}")
+
+        node_raw = "\n\n".join(raw_parts)
+
+        if services_updated:
+            return NodeTraceLevelResult(
+                host=host, success=True,
+                services_updated=services_updated,
+                raw_output=node_raw,
+                error="; ".join(node_errors) if node_errors else None,
+            )
+        else:
+            return NodeTraceLevelResult(
+                host=host, success=False,
+                services_updated=[],
+                raw_output=node_raw,
+                error="; ".join(node_errors) if node_errors else "No services updated",
+            )
 
     results = []
     successful = 0
     failed = 0
 
-    for host in req_body.hosts:
-        try:
-            async with CUCMSSHClient(
-                host=host,
-                port=req_body.port,
-                username=req_body.username,
-                password=req_body.password,
-                connect_timeout=float(req_body.connect_timeout_sec)
-            ) as client:
+    # ── Path A: session-based parallel execution ──
+    if req_body.session_id:
+        mgr = get_ssh_session_manager()
+        session = mgr.get_session(req_body.session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={
+                    "error": "SESSION_NOT_FOUND",
+                    "message": f"SSH session {req_body.session_id} not found",
+                    "request_id": request_id,
+                }
+            )
 
-                services_updated = []
-                node_errors = []
+        async def _session_set(host: str) -> NodeTraceLevelResult:
+            node = session.nodes.get(host)
+            if not node or not node.connected or not node.client:
+                return NodeTraceLevelResult(
+                    host=host, success=False, services_updated=[],
+                    error=f"Node {host} not connected in session"
+                )
+            try:
+                return await _set_node(host, node.client)
+            except Exception as e:
+                logger.exception(f"[{host}] Error setting trace level: {e}")
+                return NodeTraceLevelResult(
+                    host=host, success=False, services_updated=[], error=str(e)
+                )
 
-                for service in services:
-                    try:
-                        # Set trace level command
-                        cmd = f'set trace enable "{service}" {cucm_level}'
-                        logger.info(f"[{host}] Executing: {cmd}")
+        node_results = await asyncio.gather(
+            *[_session_set(h) for h in req_body.hosts]
+        )
+        for nr in node_results:
+            results.append(nr)
+            if nr.success:
+                successful += 1
+            else:
+                failed += 1
 
-                        # Use confirmation method since this command prompts for y/n
-                        output = await client.execute_command_with_confirmation(
-                            cmd, confirmation="y", timeout=60.0
-                        )
-                        services_updated.append(service)
-                        logger.info(f"[{host}] Successfully set trace level for {service}")
+    # ── Path B: legacy sequential connections ──
+    else:
+        for host in req_body.hosts:
+            try:
+                async with CUCMSSHClient(
+                    host=host,
+                    port=req_body.port,
+                    username=req_body.username,
+                    password=req_body.password,
+                    connect_timeout=float(req_body.connect_timeout_sec)
+                ) as client:
+                    nr = await _set_node(host, client)
+                    results.append(nr)
+                    if nr.success:
+                        successful += 1
+                    else:
+                        failed += 1
 
-                    except Exception as e:
-                        logger.warning(f"[{host}] Failed to set trace for {service}: {e}")
-                        node_errors.append(f"{service}: {str(e)}")
+            except CUCMAuthError as e:
+                logger.error(f"[{host}] Authentication failed: {e}")
+                results.append(NodeTraceLevelResult(
+                    host=host, success=False, services_updated=[],
+                    error=f"Authentication failed: {str(e)}"
+                ))
+                failed += 1
 
-                if services_updated:
-                    results.append(NodeTraceLevelResult(
-                        host=host,
-                        success=True,
-                        services_updated=services_updated,
-                        error="; ".join(node_errors) if node_errors else None
-                    ))
-                    successful += 1
-                else:
-                    results.append(NodeTraceLevelResult(
-                        host=host,
-                        success=False,
-                        services_updated=[],
-                        error="; ".join(node_errors) if node_errors else "No services updated"
-                    ))
-                    failed += 1
+            except CUCMConnectionError as e:
+                logger.error(f"[{host}] Connection failed: {e}")
+                results.append(NodeTraceLevelResult(
+                    host=host, success=False, services_updated=[],
+                    error=f"Connection failed: {str(e)}"
+                ))
+                failed += 1
 
-        except CUCMAuthError as e:
-            logger.error(f"[{host}] Authentication failed: {e}")
-            results.append(NodeTraceLevelResult(
-                host=host,
-                success=False,
-                services_updated=[],
-                error=f"Authentication failed: {str(e)}"
-            ))
-            failed += 1
-
-        except CUCMConnectionError as e:
-            logger.error(f"[{host}] Connection failed: {e}")
-            results.append(NodeTraceLevelResult(
-                host=host,
-                success=False,
-                services_updated=[],
-                error=f"Connection failed: {str(e)}"
-            ))
-            failed += 1
-
-        except Exception as e:
-            logger.exception(f"[{host}] Error setting trace level: {e}")
-            results.append(NodeTraceLevelResult(
-                host=host,
-                success=False,
-                services_updated=[],
-                error=str(e)
-            ))
-            failed += 1
+            except Exception as e:
+                logger.exception(f"[{host}] Error setting trace level: {e}")
+                results.append(NodeTraceLevelResult(
+                    host=host, success=False, services_updated=[],
+                    error=str(e)
+                ))
+                failed += 1
 
     # Summary message
     if failed == 0:
@@ -948,7 +1471,7 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
 
     logger.info(f"Set trace level complete: {message} (request_id={request_id})")
 
-    return SetTraceLevelResponse(
+    response = SetTraceLevelResponse(
         level=req_body.level,
         results=results,
         total_nodes=len(req_body.hosts),
@@ -957,6 +1480,12 @@ async def set_trace_level(req_body: SetTraceLevelRequest, request: Request):
         completed_at=datetime.now(timezone.utc),
         message=message
     )
+    logger.info(
+        f"SET trace-level response: successful={successful}, failed={failed}, "
+        f"nodes=[{', '.join(f'{r.host}:success={r.success},updated={r.services_updated}' for r in results)}] "
+        f"(request_id={request_id})"
+    )
+    return response
 
 
 # ============================================================================
@@ -987,7 +1516,8 @@ async def list_profiles():
             reltime_minutes=p.reltime_minutes,
             compress=p.compress,
             recurs=p.recurs,
-            match=p.match
+            match=p.match,
+            trace_services=p.trace_services
         )
         for p in profiles_list
     ]
@@ -1265,7 +1795,15 @@ async def get_job_status(job_id: str, request: Request):
         computed_reltime_value=job.computed_reltime_value,
         computation_timestamp=job.computation_timestamp,
         # Include debug level
-        debug_level=job.debug_level
+        debug_level=job.debug_level,
+        # Download available if job finished and has artifacts
+        download_available=(
+            job.status in (JobStatusEnum.SUCCEEDED, JobStatusEnum.PARTIAL) and
+            any(
+                artifact for ns in job.node_statuses.values()
+                for artifact in ns.artifacts
+            )
+        )
     )
 
 
@@ -2019,7 +2557,16 @@ async def get_capture_status(capture_id: str, request: Request):
             }
         )
 
-    return CaptureStatusResponse(capture=capture.to_info())
+    download_available = (
+        capture.status == "completed" and
+        capture.local_file_path is not None and
+        capture.local_file_path.exists()
+    )
+
+    return CaptureStatusResponse(
+        capture=capture.to_info(),
+        download_available=download_available
+    )
 
 
 @app.post(
@@ -2838,6 +3385,296 @@ async def get_log_collection_status(collection_id: str, request: Request):
     )
 
 
+@app.post(
+    "/logs/{collection_id}/stop",
+    status_code=status.HTTP_200_OK,
+    responses={404: {"description": "Collection not found"}},
+    tags=["Log Collection"],
+    summary="Stop a running log collection",
+)
+async def stop_log_collection(collection_id: str):
+    """
+    Stop a running log collection gracefully.
+
+    Sends a stop signal to interrupt the active collection.
+    The collection will finish any in-progress operations and save results.
+    """
+    manager = get_log_collection_manager()
+    result = await manager.stop_collection(collection_id)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Collection not found or not running"
+        )
+    return {"message": "Stop signal sent", "collection_id": collection_id}
+
+
+# ============================================================================
+# CUBE Debug Status Endpoints
+# ============================================================================
+
+
+@app.post(
+    "/cube-debug/status",
+    response_model=CubeDebugStatusResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Current debug status"},
+        401: {"description": "Authentication failed", "model": ErrorResponse},
+        502: {"description": "Network error", "model": ErrorResponse},
+        504: {"description": "Connection timeout", "model": ErrorResponse},
+    },
+    tags=["CUBE Debug"],
+    summary="Check current debug status on a CUBE",
+)
+async def get_cube_debug_status(req_body: CubeDebugStatusRequest, request: Request):
+    """
+    Check which debug categories are currently enabled on a CUBE.
+
+    Connects via SSH and runs `show debug` to list active debugs.
+    """
+    request_id = get_request_id(request)
+    logger = logging.getLogger("api.cube_debug")
+
+    try:
+        async with CSRSSHClient(
+            host=req_body.host,
+            port=req_body.port,
+            username=req_body.username,
+            password=req_body.password,
+            connect_timeout=float(req_body.connect_timeout_sec),
+        ) as client:
+            output = await client.execute_command("show debug", timeout=30.0)
+
+            categories: list[CubeDebugCategory] = []
+            if output:
+                # If output contains "no debugging", all debugs are off
+                lower_output = output.lower()
+                if "no debug" not in lower_output:
+                    # Parse each non-empty line for active debug categories
+                    for line in output.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        # Skip header/prompt lines
+                        if line.startswith("#") or "show debug" in line.lower():
+                            continue
+                        # Lines like "CCSIP SPI messages debugging is on"
+                        # or "VoIP ccAPI inout debugging is on"
+                        if "debugging is on" in line.lower():
+                            # Extract the category name (everything before "debugging is on")
+                            idx = line.lower().index("debugging is on")
+                            name = line[:idx].strip()
+                            if name:
+                                categories.append(CubeDebugCategory(name=name, enabled=True))
+                        elif "debugging is off" in line.lower():
+                            idx = line.lower().index("debugging is off")
+                            name = line[:idx].strip()
+                            if name:
+                                categories.append(CubeDebugCategory(name=name, enabled=False))
+
+            return CubeDebugStatusResponse(
+                host=req_body.host,
+                success=True,
+                categories=categories,
+                raw_output=output,
+                checked_at=datetime.now(timezone.utc),
+            )
+
+    except CSRAuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "AUTH_FAILED",
+                "message": f"Authentication failed for {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+    except CSRConnectionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "CONNECTION_TIMEOUT",
+                "message": f"Connection to {req_body.host} failed: {e}",
+                "request_id": request_id,
+            },
+        )
+    except CSRCommandTimeoutError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "COMMAND_TIMEOUT",
+                "message": f"Command timed out on {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error checking CUBE debug status on {req_body.host}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error": "NETWORK_ERROR",
+                "message": f"Failed to check debug status on {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+
+
+@app.post(
+    "/cube-debug/enable",
+    response_model=CubeDebugEnableResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "Debug commands enabled"},
+        401: {"description": "Authentication failed", "model": ErrorResponse},
+        502: {"description": "Network error", "model": ErrorResponse},
+        504: {"description": "Connection timeout", "model": ErrorResponse},
+    },
+    tags=["CUBE Debug"],
+    summary="Enable debug commands on a CUBE",
+)
+async def enable_cube_debug(req_body: CubeDebugEnableRequest, request: Request):
+    """
+    Enable one or more debug commands on a CUBE.
+
+    Connects via SSH and executes each debug command
+    (e.g., `debug ccsip messages`, `debug voip ccapi inout`).
+    """
+    request_id = get_request_id(request)
+    logger = logging.getLogger("api.cube_debug")
+
+    try:
+        async with CSRSSHClient(
+            host=req_body.host,
+            port=req_body.port,
+            username=req_body.username,
+            password=req_body.password,
+            connect_timeout=float(req_body.connect_timeout_sec),
+        ) as client:
+            enabled: list[str] = []
+            failed: list[str] = []
+            all_output: list[str] = []
+
+            for cmd in req_body.commands:
+                try:
+                    output = await client.execute_command(cmd, timeout=30.0)
+                    all_output.append(f"=== {cmd} ===\n{output or ''}")
+                    # Check for error indicators in output
+                    if output and ("invalid" in output.lower() or "error" in output.lower() or "% " in output):
+                        failed.append(cmd)
+                    else:
+                        enabled.append(cmd)
+                except Exception as cmd_err:
+                    logger.warning(f"Failed to execute debug command '{cmd}': {cmd_err}")
+                    failed.append(cmd)
+                    all_output.append(f"=== {cmd} ===\nERROR: {cmd_err}")
+
+            return CubeDebugEnableResponse(
+                host=req_body.host,
+                success=len(enabled) > 0,
+                enabled=enabled,
+                failed=failed,
+                raw_output="\n".join(all_output),
+            )
+
+    except CSRAuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "AUTH_FAILED",
+                "message": f"Authentication failed for {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+    except CSRConnectionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "CONNECTION_TIMEOUT",
+                "message": f"Connection to {req_body.host} failed: {e}",
+                "request_id": request_id,
+            },
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error enabling CUBE debug on {req_body.host}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error": "NETWORK_ERROR",
+                "message": f"Failed to enable debug on {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+
+
+@app.post(
+    "/cube-debug/clear",
+    response_model=CubeDebugClearResponse,
+    status_code=status.HTTP_200_OK,
+    responses={
+        200: {"description": "All debugs cleared"},
+        401: {"description": "Authentication failed", "model": ErrorResponse},
+        502: {"description": "Network error", "model": ErrorResponse},
+        504: {"description": "Connection timeout", "model": ErrorResponse},
+    },
+    tags=["CUBE Debug"],
+    summary="Clear all debugs on a CUBE",
+)
+async def clear_cube_debug(req_body: CubeDebugStatusRequest, request: Request):
+    """
+    Clear all active debugs on a CUBE.
+
+    Connects via SSH and runs `undebug all`.
+    """
+    request_id = get_request_id(request)
+    logger = logging.getLogger("api.cube_debug")
+
+    try:
+        async with CSRSSHClient(
+            host=req_body.host,
+            port=req_body.port,
+            username=req_body.username,
+            password=req_body.password,
+            connect_timeout=float(req_body.connect_timeout_sec),
+        ) as client:
+            output = await client.execute_command("undebug all", timeout=30.0)
+
+            return CubeDebugClearResponse(
+                host=req_body.host,
+                success=True,
+                raw_output=output,
+            )
+
+    except CSRAuthError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={
+                "error": "AUTH_FAILED",
+                "message": f"Authentication failed for {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+    except CSRConnectionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "CONNECTION_TIMEOUT",
+                "message": f"Connection to {req_body.host} failed: {e}",
+                "request_id": request_id,
+            },
+        )
+    except Exception as e:
+        logger.exception(f"Unexpected error clearing CUBE debug on {req_body.host}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error": "NETWORK_ERROR",
+                "message": f"Failed to clear debug on {req_body.host}: {e}",
+                "request_id": request_id,
+            },
+        )
+
+
 @app.get(
     "/logs/{collection_id}/download",
     status_code=status.HTTP_200_OK,
@@ -2979,6 +3816,308 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
             "details": exc.errors()
         }
     )
+
+
+# ============================================================================
+# Environment Endpoints
+# ============================================================================
+
+
+@app.get("/environments", response_model=EnvironmentListResponse)
+async def list_environments():
+    """List all environments"""
+    mgr = get_environment_manager()
+    envs = mgr.list_all()
+    return EnvironmentListResponse(
+        environments=[e.to_response() for e in envs],
+        total=len(envs),
+    )
+
+
+@app.post("/environments", response_model=EnvironmentResponse, status_code=201)
+async def create_environment(request: EnvironmentCreate):
+    """Create a new environment"""
+    mgr = get_environment_manager()
+    env = mgr.create(
+        name=request.name,
+        description=request.description,
+        devices=request.devices if request.devices else None,
+    )
+    return env.to_response()
+
+
+@app.get("/environments/{env_id}", response_model=EnvironmentResponse)
+async def get_environment(env_id: str):
+    """Get an environment by ID"""
+    mgr = get_environment_manager()
+    env = mgr.get(env_id)
+    if not env:
+        raise HTTPException(status_code=404, detail=f"Environment {env_id} not found")
+    return env.to_response()
+
+
+@app.put("/environments/{env_id}", response_model=EnvironmentResponse)
+async def update_environment(env_id: str, request: EnvironmentUpdate):
+    """Update an environment"""
+    mgr = get_environment_manager()
+    env = mgr.update(env_id, name=request.name, description=request.description)
+    if not env:
+        raise HTTPException(status_code=404, detail=f"Environment {env_id} not found")
+    return env.to_response()
+
+
+@app.delete("/environments/{env_id}", status_code=204)
+async def delete_environment(env_id: str):
+    """Delete an environment"""
+    mgr = get_environment_manager()
+    if not mgr.delete(env_id):
+        raise HTTPException(status_code=404, detail=f"Environment {env_id} not found")
+
+
+@app.post("/environments/{env_id}/devices", response_model=EnvironmentResponse)
+async def add_device_to_environment(env_id: str, request: DeviceEntryCreate):
+    """Add a device to an environment"""
+    mgr = get_environment_manager()
+    env = mgr.add_device(env_id, request)
+    if not env:
+        raise HTTPException(status_code=404, detail=f"Environment {env_id} not found")
+    return env.to_response()
+
+
+@app.delete("/environments/{env_id}/devices/{device_id}", response_model=EnvironmentResponse)
+async def remove_device_from_environment(env_id: str, device_id: str):
+    """Remove a device from an environment"""
+    mgr = get_environment_manager()
+    env = mgr.remove_device(env_id, device_id)
+    if not env:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Environment {env_id} or device {device_id} not found"
+        )
+    return env.to_response()
+
+
+@app.post("/environments/{env_id}/discover", response_model=EnvironmentResponse)
+async def discover_environment_nodes(env_id: str, request: DiscoverNodesRequest):
+    """Discover CUCM subscriber nodes and add them to the environment"""
+    mgr = get_environment_manager()
+    env = mgr.get(env_id)
+    if not env:
+        raise HTTPException(status_code=404, detail=f"Environment {env_id} not found")
+
+    # Discover nodes using existing discover logic
+    try:
+        raw_output = await run_show_network_cluster(
+            host=request.publisher_host,
+            port=request.port,
+            username=request.username,
+            password=request.password,
+            connect_timeout=request.connect_timeout_sec,
+            command_timeout=request.command_timeout_sec,
+        )
+        nodes = parse_show_network_cluster(raw_output)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Discovery failed: {str(e)}")
+
+    # Add discovered nodes as devices (skip publisher if already exists)
+    existing_hosts = {d.host for d in env.devices}
+    from app.models import DeviceEntryCreate, EnvironmentDeviceType
+    for node in nodes:
+        node_host = node.get("ip", "")
+        if not node_host or node_host in existing_hosts:
+            continue
+        role_str = node.get("role", "Subscriber")
+        device_name = node.get("host", node_host)
+        create = DeviceEntryCreate(
+            name=device_name,
+            device_type=EnvironmentDeviceType.CUCM,
+            host=node_host,
+            port=request.port,
+            role="publisher" if "pub" in role_str.lower() else "subscriber",
+        )
+        env.add_device(create)
+
+    env.save()
+    return env.to_response()
+
+
+# ============================================================================
+# Scenario Endpoints
+# ============================================================================
+
+
+@app.get("/scenarios", response_model=ScenarioListResponse)
+async def list_scenarios():
+    """List available scenario templates"""
+    from app.scenario_service import get_scenario_manager
+    mgr = get_scenario_manager()
+    return ScenarioListResponse(scenarios=mgr.list_all())
+
+
+# ============================================================================
+# Investigation Endpoints
+# ============================================================================
+
+
+@app.post("/investigations", response_model=CreateInvestigationResponse, status_code=202)
+async def create_investigation(request: CreateInvestigationRequest, background_tasks: BackgroundTasks):
+    """Create a new investigation"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    try:
+        inv = mgr.create(request)
+        return CreateInvestigationResponse(
+            investigation_id=inv.investigation_id,
+            status=inv.status,
+            message=f"Investigation '{inv.name}' created",
+            created_at=inv.created_at,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/investigations", response_model=InvestigationListResponse)
+async def list_investigations():
+    """List all investigations"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    investigations = mgr.list_all()
+    from app.models import InvestigationSummary
+    summaries = [
+        InvestigationSummary(
+            investigation_id=inv.investigation_id,
+            name=inv.name,
+            scenario=inv.scenario,
+            status=inv.status,
+            device_count=len(inv.devices),
+            created_at=inv.created_at,
+            completed_at=inv.completed_at,
+            download_available=inv.bundle_path is not None,
+        )
+        for inv in investigations
+    ]
+    return InvestigationListResponse(investigations=summaries, total=len(summaries))
+
+
+@app.get("/investigations/new", include_in_schema=False)
+async def serve_investigation_wizard():
+    """Serve SPA for /investigations/new (must be before {inv_id} param route)"""
+    index_file = FRONTEND_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    raise HTTPException(status_code=404, detail="Frontend not found")
+
+
+@app.get("/investigations/{inv_id}", response_model=InvestigationStatusResponse)
+async def get_investigation(inv_id: str):
+    """Get investigation status"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    return inv.to_status_response()
+
+
+@app.post("/investigations/{inv_id}/prepare", response_model=InvestigationStatusResponse)
+async def prepare_investigation(inv_id: str, background_tasks: BackgroundTasks):
+    """Start the preparation phase (set traces, run health baseline)"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    try:
+        background_tasks.add_task(mgr.start_preparation, inv_id)
+        return inv.to_status_response()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/investigations/{inv_id}/ready", response_model=InvestigationStatusResponse)
+async def signal_investigation_ready(inv_id: str):
+    """Signal that the investigation is ready to start recording"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    try:
+        mgr.signal_ready(inv_id)
+        return inv.to_status_response()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/investigations/{inv_id}/record", response_model=InvestigationStatusResponse)
+async def start_investigation_recording(inv_id: str, background_tasks: BackgroundTasks):
+    """Start the recording phase (start captures)"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    try:
+        background_tasks.add_task(mgr.start_recording, inv_id)
+        return inv.to_status_response()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/investigations/{inv_id}/collect", response_model=InvestigationStatusResponse)
+async def collect_investigation(inv_id: str, background_tasks: BackgroundTasks):
+    """Stop recording and start collecting artifacts"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    try:
+        background_tasks.add_task(mgr.stop_and_collect, inv_id)
+        return inv.to_status_response()
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/investigations/{inv_id}/cancel", response_model=InvestigationStatusResponse)
+async def cancel_investigation(inv_id: str):
+    """Cancel an investigation"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    mgr.cancel(inv_id)
+    return inv.to_status_response()
+
+
+@app.get("/investigations/{inv_id}/download")
+async def download_investigation_bundle(inv_id: str):
+    """Download the investigation artifact bundle"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    inv = mgr.get(inv_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
+    if not inv.bundle_path:
+        raise HTTPException(status_code=404, detail="No bundle available for download")
+    bundle = Path(inv.bundle_path)
+    if not bundle.exists():
+        raise HTTPException(status_code=404, detail="Bundle file not found on disk")
+    return FileResponse(
+        path=str(bundle),
+        filename=bundle.name,
+        media_type="application/zip",
+    )
+
+
+@app.delete("/investigations/{inv_id}", status_code=204)
+async def delete_investigation(inv_id: str):
+    """Delete an investigation"""
+    from app.investigation_service import get_investigation_manager
+    mgr = get_investigation_manager()
+    if not mgr.delete(inv_id):
+        raise HTTPException(status_code=404, detail=f"Investigation {inv_id} not found")
 
 
 # ============================================================================

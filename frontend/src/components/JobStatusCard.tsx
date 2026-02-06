@@ -102,7 +102,7 @@ export default function JobStatusCard({ job, onView, onCancel, onDownload }: Job
     label: job.status || 'Unknown',
   }
   const isRunning = job.status === 'running'
-  const isCompleted = job.status === 'completed'
+  const isCompleted = ['succeeded', 'completed', 'partial'].includes(job.status)
   const canCancel = isRunning && onCancel
   const canDownload = isCompleted && onDownload
 

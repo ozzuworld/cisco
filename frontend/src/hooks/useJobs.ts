@@ -6,7 +6,12 @@ export function useJobs(page = 1, pageSize = 20) {
   return useQuery<PaginatedResponse<Job>>({
     queryKey: ['jobs', page, pageSize],
     queryFn: () => jobService.getJobs(page, pageSize),
-    refetchInterval: 5000, // Poll every 5 seconds for updates
+    refetchInterval: query => {
+      // Only poll if there are running jobs
+      const items = query.state.data?.items
+      if (items?.some(j => j.status === 'running')) return 5000
+      return 30000 // Slow poll otherwise (30s)
+    },
   })
 }
 
