@@ -125,6 +125,10 @@ class ExpresswayClient:
         """
         Make an API request to Expressway.
 
+        Automatically retries with POST if PUT returns 405 (Method Not Allowed),
+        since some Expressway firmware versions use POST instead of PUT for the
+        diagnostic logging API.
+
         Args:
             method: HTTP method (GET, PUT, POST, etc.)
             endpoint: API endpoint path
@@ -146,6 +150,20 @@ class ExpresswayClient:
                 json=json_data,
                 timeout=request_timeout,
             )
+
+            # If PUT returns 405 (Method Not Allowed), retry with POST
+            # Some Expressway versions accept POST instead of PUT
+            if response.status_code == 405 and method.upper() == "PUT":
+                logger.info(
+                    f"Expressway returned 405 for PUT {endpoint}, retrying with POST"
+                )
+                response = await self._client.request(
+                    method="POST",
+                    url=endpoint,
+                    json=json_data,
+                    timeout=request_timeout,
+                )
+
             return response
         except httpx.TimeoutException as e:
             raise ExpresswayAPIError(f"Request timeout: {e}")

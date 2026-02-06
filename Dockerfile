@@ -67,6 +67,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend application code
 COPY Backend/app/ ./app/
 COPY Backend/profiles.yaml .
+COPY Backend/scenarios.yaml .
 
 # Copy SFTP server configuration and entrypoint
 COPY Backend/sshd_config_sftp ./sshd_config_sftp
@@ -86,20 +87,21 @@ RUN mkdir -p /app/storage/received \
              /app/storage/transcripts \
              /app/storage/captures \
              /app/storage/sessions \
+             /app/storage/environments \
+             /app/storage/investigations \
     && chmod 755 /app/storage \
     && chmod 755 /app/storage/received
 
-# Create SFTP user for CUCM file uploads
-# Home directory is storage/received - CUCM uploads land here
-# Shell is /bin/false for PAM compat; ForceCommand internal-sftp prevents shell access
-# ChrootDirectory requires /app/storage/received to be root-owned with 755
+# Create SFTP/SCP user for CUCM/CUBE file uploads
+# Home directory is storage/received - uploads land here
+# Shell is /bin/sh for SCP compatibility (IOS-XE 'monitor capture export scp://...')
+# SFTP works via Subsystem; SCP needs a real shell. Chroot provides security.
 RUN useradd --home-dir /app/storage/received \
             --no-create-home \
-            --shell /bin/false \
+            --shell /bin/sh \
             cucm-collector \
     && chown root:root /app/storage/received \
-    && chmod 755 /app/storage/received \
-    && echo "/bin/false" >> /etc/shells
+    && chmod 755 /app/storage/received
 
 # Create sshd privilege separation directory
 RUN mkdir -p /run/sshd

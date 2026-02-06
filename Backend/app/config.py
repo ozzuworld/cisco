@@ -107,6 +107,16 @@ class Settings(BaseSettings):
         return self.storage_root / "received"
 
     @property
+    def environments_dir(self) -> Path:
+        """Directory for storing environment JSON files"""
+        return self.storage_root / "environments"
+
+    @property
+    def investigations_dir(self) -> Path:
+        """Directory for storing investigation metadata and bundles"""
+        return self.storage_root / "investigations"
+
+    @property
     def ssh_host_key_path(self) -> Path:
         """Path to SSH host key for embedded SFTP server"""
         if self.sftp_server_host_key_path:
@@ -144,6 +154,8 @@ class Settings(BaseSettings):
         self.transcripts_dir.mkdir(parents=True, exist_ok=True)
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.environments_dir.mkdir(parents=True, exist_ok=True)
+        self.investigations_dir.mkdir(parents=True, exist_ok=True)
 
 
 # Global settings instance

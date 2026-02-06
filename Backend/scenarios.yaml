@@ -1,0 +1,41 @@
+scenarios:
+  - name: call_quality
+    display_name: "Call Quality / Audio Issues"
+    description: "Captures + traces + logs for audio problems"
+    device_types: [cucm, cube]
+    operations: [trace, capture, logs, health]
+    cucm_profile: callmanager_full
+    trace_level: verbose
+    capture_mode: standard
+    capture_duration_sec: 120
+
+  - name: call_routing
+    display_name: "Call Routing / Dial Plan"
+    description: "Traces and logs for call routing issues"
+    device_types: [cucm]
+    operations: [trace, logs]
+    cucm_profile: callmanager_sdl
+    trace_level: detailed
+
+  - name: registration
+    display_name: "Registration Issues"
+    description: "Health checks, traces and logs for registration problems"
+    device_types: [cucm]
+    operations: [health, trace, logs]
+    cucm_profile: callmanager_full
+    trace_level: detailed
+    health_checks: [services, replication, ntp]
+
+  - name: b2b_federation
+    display_name: "B2B / Federation"
+    description: "Captures and logs for B2B and federation issues"
+    device_types: [cucm, expressway]
+    operations: [capture, logs]
+    cucm_profile: callmanager_full
+    expressway_profile: diagnostic_full
+
+  - name: custom
+    display_name: "Custom Investigation"
+    description: "Build your own investigation with custom operations"
+    device_types: [cucm, cube, csr1000v, expressway]
+    operations: []

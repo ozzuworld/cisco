@@ -12,6 +12,7 @@ profiles:
     compress: true
     recurs: false
     match: null
+    trace_services: []  # OS-level logs, not trace-configurable
 
   - name: callmanager_full
     description: "Complete CallManager application logs"
@@ -24,6 +25,9 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services:
+      - "Cisco CallManager"
+      - "Cisco CTIManager"
 
   - name: callmanager_sdl
     description: "CallManager SDL (Signal Distribution Layer) logs only"
@@ -33,6 +37,8 @@ profiles:
     compress: true
     recurs: false
     match: ".*\\.txt$"
+    trace_services:
+      - "Cisco CallManager"
 
   - name: tomcat_logs
     description: "Tomcat web application server logs"
@@ -42,6 +48,7 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services: []  # Log4J services, configured via Serviceability web GUI
 
   - name: database_logs
     description: "Database diagnostic and error logs"
@@ -52,6 +59,7 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services: []  # Database-level logs, different mechanism
 
   - name: cups_logs
     description: "Cisco Unity Presence Service logs"
@@ -62,6 +70,7 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services: []  # IM&P services, separate trace config
 
   - name: emergency_debug
     description: "Emergency troubleshooting - all recent logs"
@@ -73,6 +82,9 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services:
+      - "Cisco CallManager"
+      - "Cisco CTIManager"
 
   - name: install_upgrade
     description: "Installation and upgrade logs for troubleshooting"
@@ -83,6 +95,7 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services: []  # Install logs, not trace-configurable
 
   - name: security_audit
     description: "Security and audit logs"
@@ -93,6 +106,7 @@ profiles:
     compress: true
     recurs: true
     match: null
+    trace_services: []  # Audit logs, not trace-configurable
 
 
 # =============================================================================

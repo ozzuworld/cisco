@@ -137,6 +137,110 @@ class DebugLevel(str, Enum):
 # ============================================================================
 
 
+# ============================================================================
+# SSH Session Models
+# ============================================================================
+
+
+class SSHSessionStatus(str, Enum):
+    """Status of an SSH session"""
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    ERROR = "error"
+    DISCONNECTED = "disconnected"
+
+
+class CreateSSHSessionRequest(BaseModel):
+    """Request to create a persistent SSH session to CUCM nodes"""
+
+    hosts: List[str] = Field(
+        ...,
+        description="List of CUCM node IPs or hostnames to connect to",
+        min_length=1
+    )
+    port: int = Field(
+        default=22,
+        description="SSH port",
+        ge=1,
+        le=65535
+    )
+    username: str = Field(
+        ...,
+        description="OS Admin username"
+    )
+    password: str = Field(
+        ...,
+        description="OS Admin password (not logged)"
+    )
+    connect_timeout_sec: int = Field(
+        default=30,
+        description="Connection timeout in seconds per node",
+        ge=5,
+        le=300
+    )
+
+    @field_validator("hosts")
+    @classmethod
+    def validate_hosts(cls, v: List[str]) -> List[str]:
+        cleaned = [h.strip() for h in v if h and h.strip()]
+        if not cleaned:
+            raise ValueError("hosts cannot be empty")
+        return cleaned
+
+
+class SSHNodeInfo(BaseModel):
+    """Connection status for a single node in an SSH session"""
+
+    host: str = Field(..., description="Node IP/hostname")
+    connected: bool = Field(..., description="Whether the node is connected")
+    error: Optional[str] = Field(None, description="Error message if connection failed")
+
+
+class CreateSSHSessionResponse(BaseModel):
+    """Response after creating an SSH session"""
+
+    session_id: str = Field(..., description="Unique session identifier")
+    status: SSHSessionStatus = Field(..., description="Overall session status")
+    connected_nodes: List[str] = Field(
+        default_factory=list,
+        description="Nodes that connected successfully"
+    )
+    failed_nodes: List[SSHNodeInfo] = Field(
+        default_factory=list,
+        description="Nodes that failed to connect with error details"
+    )
+
+
+class SSHSessionInfoResponse(BaseModel):
+    """Detailed status of an SSH session"""
+
+    session_id: str = Field(..., description="Session identifier")
+    status: SSHSessionStatus = Field(..., description="Overall session status")
+    nodes: List[SSHNodeInfo] = Field(
+        default_factory=list,
+        description="Connection status for each node"
+    )
+    created_at: datetime = Field(..., description="When the session was created")
+    last_used_at: datetime = Field(..., description="Last time the session was used")
+    ttl_remaining: float = Field(..., description="Seconds until session expires")
+
+
+class SSHSessionListResponse(BaseModel):
+    """List of active SSH sessions"""
+
+    sessions: List[SSHSessionInfoResponse] = Field(
+        default_factory=list,
+        description="Active SSH sessions"
+    )
+
+
+class DeleteSSHSessionResponse(BaseModel):
+    """Response after deleting an SSH session"""
+
+    session_id: str = Field(..., description="Session identifier")
+    message: str = Field(..., description="Status message")
+
+
 class ServiceTraceLevel(BaseModel):
     """Trace level for a single CUCM service"""
     service_name: str = Field(..., description="CUCM service name (e.g., 'Cisco CallManager')")
@@ -177,6 +281,10 @@ class GetTraceLevelRequest(BaseModel):
         ge=5,
         le=120
     )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Reuse an existing SSH session instead of creating new connections"
+    )
 
     @field_validator("hosts")
     @classmethod
@@ -196,6 +304,7 @@ class NodeTraceLevelStatus(BaseModel):
         default_factory=list,
         description="Trace levels for each service"
     )
+    raw_output: Optional[str] = Field(None, description="Combined raw CLI output from all trace level queries")
     error: Optional[str] = Field(None, description="Error message if check failed")
 
 
@@ -249,6 +358,10 @@ class SetTraceLevelRequest(BaseModel):
         ge=5,
         le=120
     )
+    session_id: Optional[str] = Field(
+        default=None,
+        description="Reuse an existing SSH session instead of creating new connections"
+    )
 
     @field_validator("hosts")
     @classmethod
@@ -267,6 +380,7 @@ class NodeTraceLevelResult(BaseModel):
         default_factory=list,
         description="Services that were successfully updated"
     )
+    raw_output: Optional[str] = Field(None, description="Raw CLI output from set trace commands")
     error: Optional[str] = Field(None, description="Error message if failed")
 
 
@@ -283,6 +397,68 @@ class SetTraceLevelResponse(BaseModel):
     failed_nodes: int = Field(..., description="Nodes that failed")
     completed_at: datetime = Field(..., description="When the operation completed")
     message: str = Field(..., description="Summary message")
+
+
+# ============================================================================
+# CUBE Debug Status Models
+# ============================================================================
+
+
+class CubeDebugStatusRequest(BaseModel):
+    """Request to check current debug status on a CUBE"""
+    host: str = Field(..., description="CUBE IP or hostname")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(..., description="CLI username")
+    password: str = Field(..., description="CLI password")
+    connect_timeout_sec: int = Field(default=30, ge=5, le=120)
+
+
+class CubeDebugCategory(BaseModel):
+    """A single debug category and its status"""
+    name: str = Field(..., description="Debug category name (e.g., 'ccsip messages')")
+    enabled: bool = Field(..., description="Whether this debug is currently enabled")
+
+
+class CubeDebugStatusResponse(BaseModel):
+    """Response with current debug status"""
+    host: str
+    success: bool
+    categories: List[CubeDebugCategory] = Field(default_factory=list)
+    raw_output: Optional[str] = None
+    error: Optional[str] = None
+    checked_at: datetime
+
+
+class CubeDebugEnableRequest(BaseModel):
+    """Request to enable debug categories on a CUBE"""
+    host: str = Field(..., description="CUBE IP or hostname")
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(..., description="CLI username")
+    password: str = Field(..., description="CLI password")
+    commands: List[str] = Field(
+        ...,
+        description="Debug commands to enable (e.g., ['debug ccsip messages'])",
+        min_length=1
+    )
+    connect_timeout_sec: int = Field(default=30, ge=5, le=120)
+
+
+class CubeDebugEnableResponse(BaseModel):
+    """Response after enabling debug categories"""
+    host: str
+    success: bool
+    enabled: List[str] = Field(default_factory=list, description="Commands successfully enabled")
+    failed: List[str] = Field(default_factory=list, description="Commands that failed")
+    raw_output: Optional[str] = None
+    error: Optional[str] = None
+
+
+class CubeDebugClearResponse(BaseModel):
+    """Response after clearing all debugs"""
+    host: str
+    success: bool
+    raw_output: Optional[str] = None
+    error: Optional[str] = None
 
 
 class NodeStatus(str, Enum):
@@ -614,6 +790,10 @@ class ProfileResponse(BaseModel):
     compress: bool = Field(..., description="Default compression setting")
     recurs: bool = Field(..., description="Default recursive setting")
     match: Optional[str] = Field(None, description="Default match pattern")
+    trace_services: List[str] = Field(
+        default_factory=list,
+        description="CUCM services to configure trace levels for when using this profile"
+    )
 
 
 class ProfilesResponse(BaseModel):
@@ -985,6 +1165,250 @@ class ClusterHealthResponse(BaseModel):
         description="List of health checks that were performed"
     )
     message: Optional[str] = Field(None, description="Summary message")
+
+
+# ============================================================================
+# Multi-Device Health Check Models
+# ============================================================================
+
+
+class DeviceType(str, Enum):
+    """Type of device for health checks"""
+    CUCM = "cucm"
+    CUBE = "cube"
+    EXPRESSWAY = "expressway"
+
+
+class CUBEHealthCheckType(str, Enum):
+    """CUBE/IOS-XE health check types"""
+    SYSTEM = "system"
+    ENVIRONMENT = "environment"
+    INTERFACES = "interfaces"
+    VOICE_CALLS = "voice_calls"
+    SIP_STATUS = "sip_status"
+    SIP_REGISTRATION = "sip_registration"
+    DSP = "dsp"
+    NTP = "ntp"
+    REDUNDANCY = "redundancy"
+
+
+class ExpresswayHealthCheckType(str, Enum):
+    """Expressway health check types"""
+    CLUSTER = "cluster"
+    LICENSING = "licensing"
+    ALARMS = "alarms"
+    NTP = "ntp"
+
+
+class DeviceHealthTarget(BaseModel):
+    """A single device target for health checking"""
+    device_type: DeviceType = Field(..., description="Type of device")
+    host: str = Field(..., description="IP address or hostname")
+    port: Optional[int] = Field(None, description="Connection port")
+    username: Optional[str] = Field(None, description="Device username")
+    password: Optional[str] = Field(None, description="Device password")
+    cucm_checks: Optional[List[HealthCheckType]] = Field(None, description="CUCM checks to run")
+    cube_checks: Optional[List[CUBEHealthCheckType]] = Field(None, description="CUBE checks to run")
+    expressway_checks: Optional[List[ExpresswayHealthCheckType]] = Field(None, description="Expressway checks to run")
+
+
+class DeviceHealthRequest(BaseModel):
+    """Request to check health of multiple devices"""
+    devices: List[DeviceHealthTarget] = Field(..., description="Devices to check", min_length=1)
+    username: Optional[str] = Field(None, description="Global fallback username")
+    password: Optional[str] = Field(None, description="Global fallback password")
+    connect_timeout_sec: int = Field(default=30, ge=5, le=300)
+    command_timeout_sec: int = Field(default=120, ge=10, le=600)
+
+
+# --- CUBE Check Result Models ---
+
+class CUBESystemStatus(BaseModel):
+    """CUBE system information from show version"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    hostname: Optional[str] = None
+    version: Optional[str] = None
+    uptime_seconds: Optional[int] = None
+    message: Optional[str] = None
+
+
+class CUBEEnvironmentStatus(BaseModel):
+    """CUBE environment status from show environment"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    temperature_ok: Optional[bool] = None
+    power_ok: Optional[bool] = None
+    message: Optional[str] = None
+
+
+class CUBEInterfaceInfo(BaseModel):
+    """Single interface info"""
+    name: str
+    status: str  # 'up', 'down', 'administratively down'
+    ip_address: Optional[str] = None
+
+
+class CUBEInterfacesStatus(BaseModel):
+    """CUBE interfaces status from show ip interface brief"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    total_interfaces: Optional[int] = None
+    up_interfaces: Optional[int] = None
+    down_interfaces: Optional[int] = None
+    interfaces: List[CUBEInterfaceInfo] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
+class CUBEVoiceCallsStatus(BaseModel):
+    """CUBE voice calls from show call active voice brief"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    active_calls: Optional[int] = None
+    total_calls: Optional[int] = None
+    message: Optional[str] = None
+
+
+class CUBESIPStatus(BaseModel):
+    """CUBE SIP UA status from show sip-ua status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    active_calls: Optional[int] = None
+    total_registrations: Optional[int] = None
+    message: Optional[str] = None
+
+
+class CUBESIPRegistrationStatus(BaseModel):
+    """CUBE SIP registration from show sip-ua register status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    registered_endpoints: Optional[int] = None
+    message: Optional[str] = None
+
+
+class CUBEDSPStatus(BaseModel):
+    """CUBE DSP resources"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    dsp_utilization: Optional[int] = None
+    message: Optional[str] = None
+
+
+class CUBENTPStatus(BaseModel):
+    """CUBE NTP status from show ntp status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    synchronized: Optional[bool] = None
+    stratum: Optional[int] = None
+    message: Optional[str] = None
+
+
+class CUBERedundancyStatus(BaseModel):
+    """CUBE redundancy/HA status from show redundancy"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    ha_enabled: Optional[bool] = None
+    peer_status: Optional[str] = None
+    message: Optional[str] = None
+
+
+class CUBECheckResults(BaseModel):
+    """All CUBE check results"""
+    system: Optional[CUBESystemStatus] = None
+    environment: Optional[CUBEEnvironmentStatus] = None
+    interfaces: Optional[CUBEInterfacesStatus] = None
+    voice_calls: Optional[CUBEVoiceCallsStatus] = None
+    sip_status: Optional[CUBESIPStatus] = None
+    sip_registration: Optional[CUBESIPRegistrationStatus] = None
+    dsp: Optional[CUBEDSPStatus] = None
+    ntp: Optional[CUBENTPStatus] = None
+    redundancy: Optional[CUBERedundancyStatus] = None
+
+
+# --- Expressway Check Result Models ---
+
+class ExpresswayPeerInfo(BaseModel):
+    """Single Expressway cluster peer"""
+    address: str
+    status: str  # 'active', 'inactive', 'unknown'
+
+
+class ExpresswayClusterStatus(BaseModel):
+    """Expressway cluster status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    peer_count: Optional[int] = None
+    all_peers_active: Optional[bool] = None
+    peers: List[ExpresswayPeerInfo] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
+class ExpresswayLicensingStatus(BaseModel):
+    """Expressway licensing status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    license_valid: Optional[bool] = None
+    days_remaining: Optional[int] = None
+    message: Optional[str] = None
+
+
+class ExpresswayAlarmInfo(BaseModel):
+    """Single Expressway alarm"""
+    severity: str  # 'critical', 'warning', 'info'
+    description: str
+
+
+class ExpresswayAlarmsStatus(BaseModel):
+    """Expressway alarms status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    alarm_count: Optional[int] = None
+    critical_count: Optional[int] = None
+    warning_count: Optional[int] = None
+    alarms: List[ExpresswayAlarmInfo] = Field(default_factory=list)
+    message: Optional[str] = None
+
+
+class ExpresswayNTPStatus(BaseModel):
+    """Expressway NTP status"""
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    synchronized: Optional[bool] = None
+    stratum: Optional[int] = None
+    message: Optional[str] = None
+
+
+class ExpresswayCheckResults(BaseModel):
+    """All Expressway check results"""
+    cluster: Optional[ExpresswayClusterStatus] = None
+    licensing: Optional[ExpresswayLicensingStatus] = None
+    alarms: Optional[ExpresswayAlarmsStatus] = None
+    ntp: Optional[ExpresswayNTPStatus] = None
+
+
+# --- Device Health Result & Response ---
+
+class CUCMCheckResults(BaseModel):
+    """CUCM check results (wraps existing types)"""
+    replication: Optional[ReplicationStatus] = None
+    services: Optional[ServicesStatus] = None
+    ntp: Optional[NTPStatus] = None
+    diagnostics: Optional[DiagnosticsStatus] = None
+    cores: Optional[CoreFilesStatus] = None
+
+
+class DeviceHealthResult(BaseModel):
+    """Health check result for a single device"""
+    device_type: DeviceType = Field(...)
+    host: str = Field(...)
+    status: HealthStatus = Field(default=HealthStatus.UNKNOWN)
+    reachable: bool = Field(default=True)
+    checked_at: datetime = Field(...)
+    message: str = Field(default="")
+    error: Optional[str] = None
+    cucm_checks: Optional[CUCMCheckResults] = None
+    cube_checks: Optional[CUBECheckResults] = None
+    expressway_checks: Optional[ExpresswayCheckResults] = None
+
+
+class DeviceHealthResponse(BaseModel):
+    """Response for multi-device health check"""
+    overall_status: HealthStatus = Field(...)
+    checked_at: datetime = Field(...)
+    message: str = Field(default="")
+    total_devices: int = Field(default=0)
+    healthy_devices: int = Field(default=0)
+    degraded_devices: int = Field(default=0)
+    critical_devices: int = Field(default=0)
+    unknown_devices: int = Field(default=0)
+    devices: List[DeviceHealthResult] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -1506,7 +1930,7 @@ class StartLogCollectionRequest(BaseModel):
         default=30,
         description="For debug collection: how long to enable debug before collecting",
         ge=5,
-        le=300
+        le=7200
     )
     include_debug: bool = Field(
         default=False,
@@ -1608,3 +2032,334 @@ class LogProfilesResponse(BaseModel):
         default_factory=list,
         description="List of Expressway profiles"
     )
+
+
+# ============================================================================
+# Environment (Device Inventory) Models
+# ============================================================================
+
+
+class EnvironmentDeviceType(str, Enum):
+    """Type of device in an environment"""
+    CUCM = "cucm"
+    CUBE = "cube"
+    CSR1000V = "csr1000v"
+    EXPRESSWAY = "expressway"
+
+
+class DeviceEntryCreate(BaseModel):
+    """Request model for creating a device in an environment"""
+
+    name: str = Field(..., description="Human-readable device name", max_length=100)
+    device_type: EnvironmentDeviceType = Field(..., description="Type of device")
+    host: str = Field(..., description="IP address or FQDN")
+    port: Optional[int] = Field(
+        default=None,
+        description="Connection port (defaults by type: cucm/cube/csr=22, expressway=443)",
+        ge=1,
+        le=65535
+    )
+    interface: Optional[str] = Field(
+        default=None,
+        description="Network interface (defaults by type: cucm/expressway=eth0, cube/csr=GigabitEthernet1)"
+    )
+    role: Optional[str] = Field(
+        default=None,
+        description="Device role (e.g., 'publisher', 'subscriber', 'primary', 'secondary')"
+    )
+    tags: List[str] = Field(default_factory=list, description="Tags for grouping/filtering")
+
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("host cannot be empty")
+        return v.strip()
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        return v.strip()
+
+
+class DeviceEntry(BaseModel):
+    """A device stored in an environment (includes generated ID)"""
+
+    id: str = Field(..., description="Unique device ID within the environment")
+    name: str = Field(..., description="Human-readable device name")
+    device_type: EnvironmentDeviceType = Field(..., description="Type of device")
+    host: str = Field(..., description="IP address or FQDN")
+    port: int = Field(..., description="Connection port")
+    interface: str = Field(..., description="Network interface for captures")
+    role: Optional[str] = Field(default=None, description="Device role")
+    tags: List[str] = Field(default_factory=list, description="Tags for grouping/filtering")
+
+
+class EnvironmentCreate(BaseModel):
+    """Request model for creating an environment"""
+
+    name: str = Field(..., description="Environment name", max_length=100)
+    description: Optional[str] = Field(default=None, description="Environment description", max_length=500)
+    devices: List[DeviceEntryCreate] = Field(default_factory=list, description="Initial devices")
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        return v.strip()
+
+
+class EnvironmentUpdate(BaseModel):
+    """Request model for updating an environment"""
+
+    name: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
+
+
+class EnvironmentResponse(BaseModel):
+    """Response model for a single environment"""
+
+    id: str = Field(..., description="Unique environment identifier")
+    name: str = Field(..., description="Environment name")
+    description: Optional[str] = Field(default=None, description="Environment description")
+    devices: List[DeviceEntry] = Field(default_factory=list, description="Devices in this environment")
+    created_at: datetime = Field(..., description="When the environment was created")
+    updated_at: datetime = Field(..., description="When the environment was last updated")
+
+
+class EnvironmentListResponse(BaseModel):
+    """Response for listing environments"""
+
+    environments: List[EnvironmentResponse] = Field(
+        default_factory=list,
+        description="List of environments"
+    )
+    total: int = Field(default=0, description="Total number of environments")
+
+
+# ============================================================================
+# Scenario Template Models
+# ============================================================================
+
+
+class ScenarioTemplate(BaseModel):
+    """A pre-configured scenario template for investigations"""
+
+    name: str = Field(..., description="Scenario identifier")
+    display_name: str = Field(..., description="Human-readable name")
+    description: Optional[str] = Field(default=None, description="What this scenario does")
+    device_types: List[EnvironmentDeviceType] = Field(
+        default_factory=list,
+        description="Device types this scenario applies to"
+    )
+    operations: List[str] = Field(
+        default_factory=list,
+        description="Operations to run: trace, capture, logs, health"
+    )
+    cucm_profile: Optional[str] = Field(default=None, description="CUCM log collection profile")
+    expressway_profile: Optional[str] = Field(default=None, description="Expressway log profile")
+    trace_level: Optional[str] = Field(default=None, description="CUCM trace level: basic, detailed, verbose")
+    capture_mode: Optional[str] = Field(default=None, description="Capture mode: standard, rotating")
+    capture_duration_sec: Optional[int] = Field(default=None, description="Default capture duration")
+    health_checks: List[str] = Field(default_factory=list, description="Health checks to run")
+
+
+class ScenarioListResponse(BaseModel):
+    """Response for listing scenarios"""
+
+    scenarios: List[ScenarioTemplate] = Field(
+        default_factory=list,
+        description="Available scenario templates"
+    )
+
+
+# ============================================================================
+# Investigation Models
+# ============================================================================
+
+
+class InvestigationStatus(str, Enum):
+    """Status of an investigation"""
+    CREATED = "created"
+    PREPARING = "preparing"
+    READY = "ready"
+    RECORDING = "recording"
+    COLLECTING = "collecting"
+    BUNDLING = "bundling"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class InvestigationDeviceStatus(str, Enum):
+    """Status of a device within an investigation"""
+    PENDING = "pending"
+    PREPARING = "preparing"
+    READY = "ready"
+    RECORDING = "recording"
+    COLLECTING = "collecting"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class DeviceCredentials(BaseModel):
+    """Credentials for a single device (never persisted)"""
+    username: str = Field(..., description="Device username")
+    password: str = Field(..., description="Device password")
+
+
+class CreateInvestigationRequest(BaseModel):
+    """Request to create a new investigation.
+
+    Supports two modes:
+    1. Environment-based: provide environment_id + device_ids to select from existing environment
+    2. Inline devices: provide inline_devices list to add devices directly (no environment needed)
+    """
+
+    name: str = Field(..., description="Investigation name", max_length=200)
+    scenario: str = Field(..., description="Scenario template name (e.g., 'call_quality', 'custom')")
+    # Environment-based (optional - use either this or inline_devices)
+    environment_id: Optional[str] = Field(default=None, description="Environment to investigate")
+    device_ids: List[str] = Field(
+        default_factory=list,
+        description="Device IDs from the environment to include"
+    )
+    # Inline devices (alternative to environment_id + device_ids)
+    inline_devices: List[DeviceEntryCreate] = Field(
+        default_factory=list,
+        description="Devices to add directly (name, type, host) without a pre-existing environment"
+    )
+    operations: List[str] = Field(
+        default_factory=list,
+        description="Operations to run: trace, capture, logs, health"
+    )
+    # Operation configuration
+    cucm_profile: Optional[str] = Field(default=None, description="CUCM log collection profile")
+    expressway_profile: Optional[str] = Field(default=None, description="Expressway log profile")
+    trace_level: Optional[str] = Field(default=None, description="CUCM trace level")
+    capture_mode: Optional[str] = Field(default="standard", description="Capture mode")
+    capture_duration_sec: Optional[int] = Field(default=120, description="Capture duration", ge=10, le=600)
+    capture_filter: Optional[CaptureFilter] = Field(default=None, description="Capture filter")
+    health_checks: List[str] = Field(default_factory=list, description="Health checks to run")
+    # Credentials (held in memory only, never persisted)
+    credentials: dict = Field(
+        ...,
+        description="Credentials dict: {'global': {username, password}} or {'device_id': {username, password}}"
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("name cannot be empty")
+        return v.strip()
+
+    @model_validator(mode="after")
+    def validate_devices_source(self) -> "CreateInvestigationRequest":
+        has_env = bool(self.environment_id and self.device_ids)
+        has_inline = bool(self.inline_devices)
+        if not has_env and not has_inline:
+            raise ValueError(
+                "Must provide either environment_id + device_ids or inline_devices"
+            )
+        return self
+
+
+class InvestigationDevice(BaseModel):
+    """Status of a device within an investigation"""
+
+    device_id: str = Field(..., description="Device ID (from environment or auto-generated)")
+    name: str = Field(..., description="Device name")
+    host: str = Field(..., description="Device host")
+    device_type: EnvironmentDeviceType = Field(..., description="Device type")
+    port: int = Field(default=22, description="Connection port")
+    interface: str = Field(default="eth0", description="Network interface for captures")
+    status: InvestigationDeviceStatus = Field(
+        default=InvestigationDeviceStatus.PENDING
+    )
+    current_operation: Optional[str] = Field(default=None, description="What's currently running")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    message: Optional[str] = Field(default=None, description="Status message")
+
+
+class InvestigationPhase(BaseModel):
+    """Status of a phase in the investigation"""
+
+    name: str = Field(..., description="Phase name: prepare, record, collect")
+    status: str = Field(default="pending", description="pending, in_progress, completed, skipped, failed")
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    message: Optional[str] = Field(default=None)
+
+
+class InvestigationEvent(BaseModel):
+    """A timestamped event in the investigation timeline"""
+
+    timestamp: datetime = Field(..., description="When the event occurred")
+    message: str = Field(..., description="Event description")
+    level: str = Field(default="info", description="info, warning, error")
+
+
+class InvestigationStatusResponse(BaseModel):
+    """Response for investigation status"""
+
+    investigation_id: str = Field(..., description="Unique investigation identifier")
+    name: str = Field(..., description="Investigation name")
+    scenario: str = Field(..., description="Scenario template used")
+    status: InvestigationStatus = Field(..., description="Current investigation status")
+    environment_id: str = Field(..., description="Environment ID")
+    devices: List[InvestigationDevice] = Field(default_factory=list)
+    phases: List[InvestigationPhase] = Field(default_factory=list)
+    active_phases: List[str] = Field(default_factory=list, description="Which phases are active for this investigation")
+    operations: List[str] = Field(default_factory=list, description="Selected operations")
+    # Sub-operation references
+    capture_session_id: Optional[str] = Field(default=None)
+    job_ids: List[str] = Field(default_factory=list)
+    log_collection_ids: List[str] = Field(default_factory=list)
+    health_results: Optional[dict] = Field(default=None)
+    # Capture timing (for frontend countdown)
+    capture_duration_sec: Optional[int] = Field(default=None, description="Configured capture duration")
+    recording_started_at: Optional[datetime] = Field(default=None, description="When recording phase started")
+    # Timestamps
+    created_at: datetime = Field(...)
+    started_at: Optional[datetime] = Field(default=None)
+    completed_at: Optional[datetime] = Field(default=None)
+    # Bundle
+    bundle_path: Optional[str] = Field(default=None)
+    download_available: bool = Field(default=False)
+    # Timeline
+    events: List[InvestigationEvent] = Field(default_factory=list)
+
+
+class CreateInvestigationResponse(BaseModel):
+    """Response when creating an investigation"""
+
+    investigation_id: str = Field(..., description="Unique investigation identifier")
+    status: InvestigationStatus = Field(..., description="Initial status")
+    message: str = Field(..., description="Status message")
+    created_at: datetime = Field(...)
+
+
+class InvestigationSummary(BaseModel):
+    """Summary of an investigation for list view"""
+
+    investigation_id: str
+    name: str
+    scenario: str
+    status: InvestigationStatus
+    device_count: int
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    download_available: bool = False
+
+
+class InvestigationListResponse(BaseModel):
+    """Response for listing investigations"""
+
+    investigations: List[InvestigationSummary] = Field(default_factory=list)
+    total: int = Field(default=0)

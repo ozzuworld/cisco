@@ -363,9 +363,25 @@ class CaptureManager:
             return
 
         # Route based on device type and capture mode
-        if capture.device_type == CaptureDeviceType.CSR1000V:
+        # CUBE is IOS-XE based (like CSR1000v), uses EPC for packet capture
+        if capture.device_type in (CaptureDeviceType.CSR1000V, CaptureDeviceType.CUBE):
+            if capture.mode == CaptureMode.ROTATING:
+                # EPC doesn't support rotating capture natively - use standard with long duration
+                logger.warning(
+                    f"Rotating mode not supported for {capture.device_type.value}, "
+                    f"using standard capture for {capture_id}"
+                )
+                if capture.request.duration_sec is None:
+                    capture.request.duration_sec = 300  # Default 5 min for unsupported rotating
             await self._execute_csr_capture(capture_id)
         elif capture.device_type == CaptureDeviceType.EXPRESSWAY:
+            if capture.mode == CaptureMode.ROTATING:
+                logger.warning(
+                    f"Rotating mode not supported for Expressway, "
+                    f"using standard capture for {capture_id}"
+                )
+                if capture.request.duration_sec is None:
+                    capture.request.duration_sec = 300
             await self._execute_expressway_capture(capture_id)
         elif capture.mode == CaptureMode.ROTATING:
             # Rotating capture only supported on CUCM
@@ -1226,7 +1242,7 @@ class CaptureManager:
                 else:
                     logger.info(f"sshd confirmed listening on port {settings.sftp_port}")
             except Exception as e:
-                logger.warning(f"Could not verify sshd status: {e}")
+                logger.debug(f"Could not verify sshd status: {e}")
 
             # Set up prompt responder for SFTP transfer
             responder = PromptResponder(
@@ -1574,6 +1590,38 @@ class CaptureManager:
                 password=request.password,
                 connect_timeout=float(request.connect_timeout_sec),
             ) as client:
+                capture.message = "Cleaning up stale captures..."
+
+                # Clean up any leftover captures from previous runs
+                # 'show monitor capture' lists all capture points
+                try:
+                    show_output = await client.execute_command(
+                        "show monitor capture", timeout=15.0
+                    )
+                    if show_output:
+                        # Find active capture names and stop/clear them
+                        import re
+                        for line in show_output.splitlines():
+                            # Lines like: "Status Information for Capture abc12345"
+                            m = re.match(
+                                r"\s*Status Information for Capture\s+(\S+)", line
+                            )
+                            if m:
+                                old_name = m.group(1)
+                                logger.info(
+                                    f"Cleaning up stale capture: {old_name}"
+                                )
+                                await client.execute_command(
+                                    f"monitor capture {old_name} stop",
+                                    timeout=10.0,
+                                )
+                                await client.execute_command(
+                                    f"no monitor capture {old_name}",
+                                    timeout=10.0,
+                                )
+                except Exception as e:
+                    logger.debug(f"Stale capture cleanup: {e}")
+
                 capture.message = "Configuring capture..."
 
                 # Run configuration commands
@@ -1593,6 +1641,12 @@ class CaptureManager:
                 logger.info(f"Starting EPC: {start_cmd}")
                 start_output = await client.execute_command(start_cmd, timeout=30.0)
                 logger.info(f"Start output: {start_output.strip() if start_output else '(empty)'}")
+
+                # Check if capture actually started
+                if start_output and "unable to activate" in start_output.lower():
+                    raise CSRSSHClientError(
+                        f"EPC capture failed to start: {start_output.strip()[:200]}"
+                    )
 
                 # Wait for either:
                 # 1. Duration to elapse
@@ -1638,20 +1692,19 @@ class CaptureManager:
                 # Export the capture file via SCP
                 capture.message = "Retrieving capture file..."
 
-                # For CSR/IOS-XE SCP export, put files directly in received/
-                # IOS-XE SCP cannot create directories, so we use flat structure
-                # with capture_id in the filename
-                sftp_upload_dir = settings.artifacts_dir
+                # For CSR/IOS-XE SCP export, files go into uploads/ subdirectory
+                # ChrootDirectory root must be root-owned 755, so user can't write
+                # to /. The uploads/ dir is writable (set up in entrypoint.sh).
+                sftp_upload_dir = settings.artifacts_dir / "uploads"
                 sftp_upload_dir.mkdir(parents=True, exist_ok=True)
 
-                # Build SCP path - put file directly in received/ directory
-                # Use capture_id prefix in filename for uniqueness
+                # Build SCP path with uploads/ prefix
                 scp_filename = f"{capture.capture_id[:8]}_{pcap_filename}"
                 sftp_base = settings.sftp_remote_base_dir or ""
                 if sftp_base:
-                    scp_remote_path = f"{sftp_base}/{scp_filename}"
+                    scp_remote_path = f"{sftp_base}/uploads/{scp_filename}"
                 else:
-                    scp_remote_path = scp_filename
+                    scp_remote_path = f"uploads/{scp_filename}"
 
                 # Build SCP URL: scp://user:pass@host/path/file.pcap
                 # URL-encode the password to handle special characters like ! @ # etc.
@@ -1668,23 +1721,37 @@ class CaptureManager:
                     output = await client.execute_command(export_cmd, timeout=120.0)
                     logger.info(f"Export command output: {output.strip() if output else '(empty)'}")
 
-                    # Check for common error patterns in the output
+                    # Check for error patterns in the output
+                    # IOS-XE may print "Exported Successfully" even when SCP failed
+                    # (e.g., server returns "sftp connections only" but CLI still prints success)
+                    # Check for errors FIRST, then success
                     output_lower = output.lower() if output else ""
-                    # Check for success first (IOS-XE may show both "failed" and "Exported Successfully")
-                    if "exported successfully" in output_lower:
-                        logger.info("SCP export successful")
+                    scp_export_ok = True
+                    if "sftp connections only" in output_lower or "sftp-only" in output_lower:
+                        logger.error(f"SCP rejected - server only allows SFTP: {output}")
+                        capture.error = "SCP rejected - server requires SCP support (check sshd config)"
+                        scp_export_ok = False
                     elif "permission denied" in output_lower:
                         logger.error(f"SCP permission denied - check server config")
                         capture.error = "SCP permission denied - server may require SCP config"
+                        scp_export_ok = False
                     elif "connection refused" in output_lower:
                         logger.error(f"SCP connection refused")
                         capture.error = "SCP connection refused"
-                    elif "error" in output_lower or "failed" in output_lower:
-                        logger.error(f"SCP export reported error: {output}")
+                        scp_export_ok = False
+                    elif "no route to host" in output_lower or "timed out" in output_lower:
+                        logger.error(f"SCP connection failed: {output}")
+                        capture.error = f"SCP connection failed: {output[:200]}"
+                        scp_export_ok = False
+                    elif "export failed" in output_lower and "exported successfully" not in output_lower:
+                        logger.error(f"SCP export failed: {output}")
                         capture.error = f"SCP export failed: {output[:200]}"
+                        scp_export_ok = False
+                    elif "exported successfully" in output_lower:
+                        logger.info("SCP export successful")
                     else:
-                        # No error indicators - assume success
-                        logger.info("SCP export appears successful")
+                        # No clear indicators - will verify by file existence
+                        logger.info("SCP export status unclear, will verify file")
                 except CSRCommandTimeoutError:
                     logger.warning("Export command timed out, file may still be transferring")
 
@@ -1697,39 +1764,41 @@ class CaptureManager:
 
                 # Search for the capture file (use scp_filename we exported)
                 found_file = None
-                expected_path = sftp_upload_dir / scp_filename
-                logger.info(f"Looking for capture file at: {expected_path}")
+                if scp_export_ok:
+                    expected_path = sftp_upload_dir / scp_filename
+                    logger.info(f"Looking for capture file at: {expected_path}")
 
-                if expected_path.exists():
-                    found_file = expected_path
-                    logger.info(f"Found capture file at: {found_file}")
-                else:
-                    # Also search recursively in case of different structure
-                    for pcap in sftp_upload_dir.rglob(f"*{pcap_filename}"):
-                        found_file = pcap
-                        logger.info(f"Found capture file via search: {found_file}")
-                        break
+                    if expected_path.exists():
+                        found_file = expected_path
+                        logger.info(f"Found capture file at: {found_file}")
+                    else:
+                        # Also search recursively in case of different structure
+                        for pcap in sftp_upload_dir.rglob(f"*{pcap_filename}"):
+                            found_file = pcap
+                            logger.info(f"Found capture file via search: {found_file}")
+                            break
 
                 if found_file:
                     capture.local_file_path = found_file
                     capture.file_size_bytes = found_file.stat().st_size
                     capture.message = f"Capture file retrieved: {scp_filename}"
+                    capture.status = CaptureStatus.COMPLETED
                     logger.info(f"Retrieved capture file: {found_file} ({capture.file_size_bytes} bytes)")
+                elif not scp_export_ok:
+                    logger.error(f"SCP export failed for capture {capture_id}")
+                    capture.status = CaptureStatus.FAILED
+                    capture.message = capture.error or "SCP export failed"
                 else:
                     logger.warning(f"Capture file {scp_filename} not found in {sftp_upload_dir}")
-                    # List what files ARE in the directory
                     try:
                         files = list(sftp_upload_dir.iterdir())
                         logger.info(f"Files in {sftp_upload_dir}: {[f.name for f in files[:10]]}")
                     except Exception as e:
                         logger.debug(f"Could not list directory: {e}")
+                    capture.status = CaptureStatus.COMPLETED
                     capture.message = "Capture complete, file retrieval pending"
 
-                # Mark as completed
-                capture.status = CaptureStatus.COMPLETED
                 capture.completed_at = datetime.now(timezone.utc)
-                if not capture.message.startswith("Capture file"):
-                    capture.message = "Capture completed successfully"
 
                 logger.info(
                     f"Capture {capture_id} completed: "
@@ -1805,6 +1874,13 @@ class CaptureManager:
                 port=request.port or 443,
             ) as client:
                 capture.message = "Starting diagnostic logging..."
+
+                # Stop any stale diagnostic logging from previous runs
+                try:
+                    await client.stop_diagnostic_logging()
+                    logger.info("Stopped stale diagnostic logging session")
+                except ExpresswayAPIError:
+                    pass  # No active session, that's fine
 
                 # Start diagnostic logging with tcpdump
                 await client.start_diagnostic_logging(tcpdump=True)

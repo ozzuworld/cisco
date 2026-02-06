@@ -60,6 +60,7 @@ class LogCollection:
         self.file_size_bytes: Optional[int] = None
         self.local_file_path: Optional[Path] = None
         self._task: Optional[asyncio.Task] = None
+        self._stop_event = asyncio.Event()
 
     def to_info(self) -> LogCollectionInfo:
         """Convert to LogCollectionInfo model"""
@@ -169,6 +170,17 @@ class LogCollectionManager:
 
         del self._collections[collection_id]
         logger.info(f"Deleted log collection {collection_id}")
+        return True
+
+    async def stop_collection(self, collection_id: str) -> bool:
+        """Signal a running collection to stop gracefully"""
+        collection = self._collections.get(collection_id)
+        if not collection:
+            return False
+        if collection.status != LogCollectionStatus.RUNNING:
+            return False
+        collection._stop_event.set()
+        logger.info(f"Stop signal sent to collection {collection_id}")
         return True
 
     async def execute_collection(self, collection_id: str) -> None:
@@ -289,7 +301,27 @@ class LogCollectionManager:
         Uses 'show voip trace all' command which is available on IOS-XE 17.3.2+.
         This is the recommended method as it has minimal CPU impact.
         """
-        collection.message = "Collecting VoIP Trace logs..."
+        # Wait for stop signal or duration before collecting
+        # VoIP trace reads the trace buffer, so waiting ensures we capture
+        # activity that occurs during the session window
+        # Use the larger of request vs profile duration (request carries session duration)
+        duration_sec = collection.request.duration_sec
+        if profile and profile.duration_sec:
+            duration_sec = max(duration_sec, profile.duration_sec)
+
+        if duration_sec and duration_sec > 5:
+            collection.message = f"Monitoring for VoIP Trace (up to {duration_sec}s)..."
+            logger.info(f"Waiting {duration_sec}s before collecting VoIP Trace from {collection.request.host}")
+            try:
+                await asyncio.wait_for(collection._stop_event.wait(), timeout=float(duration_sec))
+                logger.info(f"VoIP Trace collection {collection.collection_id} stopped by user")
+                collection.message = "Stopped by user, collecting VoIP Trace..."
+            except asyncio.TimeoutError:
+                logger.info(f"VoIP Trace wait {duration_sec}s elapsed normally")
+                collection.message = "Duration elapsed, collecting VoIP Trace..."
+        else:
+            collection.message = "Collecting VoIP Trace logs..."
+
         logger.info(f"Collecting VoIP Trace from {collection.request.host}")
 
         # Get commands from profile or use default
@@ -349,10 +381,10 @@ class LogCollectionManager:
         """
         request = collection.request
 
-        # Get duration from profile or request
+        # Use the larger of request vs profile duration (request carries session duration)
         duration_sec = request.duration_sec
         if profile and profile.duration_sec:
-            duration_sec = profile.duration_sec
+            duration_sec = max(duration_sec, profile.duration_sec)
 
         # Get debug commands from profile or use defaults
         debug_commands = ["debug ccsip messages", "debug voip ccapi inout"]
@@ -374,8 +406,14 @@ class LogCollectionManager:
 
             collection.message = f"Capturing debug logs for {duration_sec}s..."
 
-            # Wait for duration
-            await asyncio.sleep(duration_sec)
+            # Wait for duration or stop signal
+            try:
+                await asyncio.wait_for(collection._stop_event.wait(), timeout=float(duration_sec))
+                logger.info(f"Collection {collection.collection_id} stopped by user")
+                collection.message = "Debug stopped by user, collecting logs..."
+            except asyncio.TimeoutError:
+                logger.info(f"Debug duration {duration_sec}s elapsed normally")
+                collection.message = "Debug duration elapsed, collecting logs..."
 
         finally:
             # CRITICAL: Always disable debugs to prevent CPU impact
@@ -462,9 +500,16 @@ class LogCollectionManager:
                 collection.message = "Starting diagnostic logging..."
                 await client.start_diagnostic_logging(tcpdump=enable_tcpdump)
 
-                # Brief pause to capture some activity
-                collection.message = "Collecting logs..."
-                await asyncio.sleep(5)
+                # Wait for stop signal or default timeout
+                duration = collection.request.duration_sec or 30
+                collection.message = f"Diagnostic logging active (up to {duration}s)..."
+                try:
+                    await asyncio.wait_for(collection._stop_event.wait(), timeout=float(duration))
+                    logger.info(f"Expressway collection {collection_id} stopped by user")
+                    collection.message = "Stopped by user, downloading logs..."
+                except asyncio.TimeoutError:
+                    logger.info(f"Expressway collection {collection_id} duration elapsed")
+                    collection.message = "Duration elapsed, downloading logs..."
 
                 # Stop logging
                 collection.message = "Stopping diagnostic logging..."

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import JSZip from 'jszip'
 import {
@@ -36,6 +36,7 @@ import {
   ToggleButtonGroup,
   Alert,
   Tooltip,
+  Slider,
 } from '@mui/material'
 import {
   Visibility,
@@ -48,6 +49,8 @@ import {
   Add,
   Delete,
   PlayArrow,
+  Stop,
+  Timer,
   ExpandMore,
   ExpandLess,
   FolderOpen,
@@ -68,11 +71,13 @@ import {
   BugReport as DebugIcon,
   Info as InfoIcon,
   Save as SaveIcon,
+  PanTool as ManualIcon,
 } from '@mui/icons-material'
 import { useSnackbar } from 'notistack'
 import { logService, jobService } from '@/services'
-import { useGetTraceLevels, useSetTraceLevels } from '@/hooks'
+import { useGetTraceLevels, useSetTraceLevels, useGetCubeDebugStatus, useEnableCubeDebug, useClearCubeDebug } from '@/hooks'
 import type { TraceLevelNodeResult } from '@/services/traceService'
+import type { CubeDebugCategory } from '@/services/logService'
 import type {
   ClusterNode,
   LogProfile,
@@ -120,6 +125,9 @@ export default function LogCollection() {
   // Device list
   const [devices, setDevices] = useState<DeviceEntry[]>([])
   const [deviceProgress, setDeviceProgress] = useState<Record<string, DeviceProgress>>({})
+  const deviceProgressRef = useRef(deviceProgress)
+
+  useEffect(() => { deviceProgressRef.current = deviceProgress }, [deviceProgress])
 
   // Add device dialog
   const [showAddDevice, setShowAddDevice] = useState(false)
@@ -159,6 +167,13 @@ export default function LogCollection() {
   const getTraceLevelsMutation = useGetTraceLevels()
   const setTraceLevelsMutation = useSetTraceLevels()
 
+  // CUBE debug status state
+  const [cubeDebugStatus, setCubeDebugStatus] = useState<CubeDebugCategory[]>([])
+  const [debugSettingsExpanded, setDebugSettingsExpanded] = useState(true)
+  const getCubeDebugStatusMutation = useGetCubeDebugStatus()
+  const enableCubeDebugMutation = useEnableCubeDebug()
+  const clearCubeDebugMutation = useClearCubeDebug()
+
   // Time range options
   const [timeMode, setTimeMode] = useState<'relative' | 'range'>('relative')
   const [reltimeMinutes, setReltimeMinutes] = useState<number>(60)
@@ -175,6 +190,14 @@ export default function LogCollection() {
 
   // Profiles section collapsed state
   const [profilesExpanded, setProfilesExpanded] = useState(true)
+
+  // Session mode (orchestrated collection)
+  const [sessionMode, setSessionMode] = useState<'timed' | 'manual'>('timed')
+  const [sessionDuration, setSessionDuration] = useState(60)
+  const [sessionPhase, setSessionPhase] = useState<'idle' | 'realtime' | 'stopping' | 'historical' | 'done'>('idle')
+  const [sessionStartTime, setSessionStartTime] = useState<Date | null>(null)
+  const [sessionElapsed, setSessionElapsed] = useState(0)
+  const [isStopping, setIsStopping] = useState(false)
 
   // Fallback profiles
   const fallbackCubeProfiles: DeviceProfile[] = [
@@ -210,6 +233,31 @@ export default function LogCollection() {
     }
     fetchProfiles()
   }, [])
+
+  // Format seconds into M:SS
+  const formatTime = (seconds: number): string => {
+    const m = Math.floor(seconds / 60)
+    const s = seconds % 60
+    return `${m}:${s.toString().padStart(2, '0')}`
+  }
+
+  // Session countdown / elapsed timer
+  useEffect(() => {
+    if (sessionPhase !== 'realtime') return
+
+    const interval = setInterval(() => {
+      setSessionElapsed(prev => {
+        const next = prev + 1
+        // In timed mode, auto-trigger stop when elapsed >= duration
+        if (sessionMode === 'timed' && next >= sessionDuration) {
+          handleStopSession()
+        }
+        return next
+      })
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [sessionPhase, sessionMode, sessionDuration])
 
   const handleDeviceTypeChange = (type: DeviceType) => {
     setNewDeviceType(type)
@@ -413,6 +461,201 @@ export default function LogCollection() {
     )
   }
 
+  // Get the first CUBE device for debug operations
+  const getCubeDeviceForDebugOps = (): DeviceEntry | null => {
+    return devices.find(d => d.type === 'cube') || null
+  }
+
+  // Fetch current debug status from CUBE
+  const handleFetchCubeDebugStatus = () => {
+    const cubeDevice = getCubeDeviceForDebugOps()
+    if (!cubeDevice) {
+      enqueueSnackbar('No CUBE device found', { variant: 'warning' })
+      return
+    }
+
+    getCubeDebugStatusMutation.mutate(
+      {
+        host: cubeDevice.host,
+        port: cubeDevice.port,
+        username: cubeDevice.username,
+        password: cubeDevice.password,
+      },
+      {
+        onSuccess: (response) => {
+          setCubeDebugStatus(response.categories)
+          if (response.success) {
+            enqueueSnackbar(
+              response.categories.length > 0
+                ? `Found ${response.categories.filter(c => c.enabled).length} active debug(s) on ${response.host}`
+                : `No active debugs on ${response.host}`,
+              { variant: 'success' }
+            )
+          } else {
+            enqueueSnackbar(response.error || 'Failed to check debug status', { variant: 'error' })
+          }
+        },
+        onError: (error) => {
+          enqueueSnackbar(error instanceof Error ? error.message : 'Failed to check debug status', { variant: 'error' })
+        },
+      }
+    )
+  }
+
+  // Enable debug commands on CUBE
+  const handleEnableCubeDebug = (commands: string[]) => {
+    const cubeDevice = getCubeDeviceForDebugOps()
+    if (!cubeDevice) {
+      enqueueSnackbar('No CUBE device found', { variant: 'warning' })
+      return
+    }
+
+    enableCubeDebugMutation.mutate(
+      {
+        host: cubeDevice.host,
+        port: cubeDevice.port,
+        username: cubeDevice.username,
+        password: cubeDevice.password,
+        commands,
+      },
+      {
+        onSuccess: (response) => {
+          if (response.success) {
+            enqueueSnackbar(`Enabled ${response.enabled.length} debug command(s) on ${response.host}`, { variant: 'success' })
+            handleFetchCubeDebugStatus()
+          } else {
+            enqueueSnackbar(`Failed to enable debug commands: ${response.failed.join(', ')}`, { variant: 'warning' })
+          }
+        },
+        onError: (error) => {
+          enqueueSnackbar(error instanceof Error ? error.message : 'Failed to enable debug', { variant: 'error' })
+        },
+      }
+    )
+  }
+
+  // Clear all debugs on CUBE
+  const handleClearCubeDebug = () => {
+    const cubeDevice = getCubeDeviceForDebugOps()
+    if (!cubeDevice) {
+      enqueueSnackbar('No CUBE device found', { variant: 'warning' })
+      return
+    }
+
+    clearCubeDebugMutation.mutate(
+      {
+        host: cubeDevice.host,
+        port: cubeDevice.port,
+        username: cubeDevice.username,
+        password: cubeDevice.password,
+      },
+      {
+        onSuccess: (response) => {
+          if (response.success) {
+            enqueueSnackbar(`Cleared all debugs on ${response.host}`, { variant: 'success' })
+            handleFetchCubeDebugStatus()
+          } else {
+            enqueueSnackbar('Failed to clear debugs', { variant: 'error' })
+          }
+        },
+        onError: (error) => {
+          enqueueSnackbar(error instanceof Error ? error.message : 'Failed to clear debugs', { variant: 'error' })
+        },
+      }
+    )
+  }
+
+  // Check if we have mixed device types (real-time + CUCM)
+  const hasRealtimeDevices = devices.some(d => d.type === 'cube' || d.type === 'expressway')
+  const hasCucmDevices = devices.some(d => d.type === 'cucm')
+  const isMixedSession = hasRealtimeDevices && hasCucmDevices
+
+  const handleStopSession = async () => {
+    if (isStopping || sessionPhase !== 'realtime') return
+    setIsStopping(true)
+    setSessionPhase('stopping')
+
+    // Stop all running CUBE/Expressway collections
+    const realtimeDevices = devices.filter(d => d.type !== 'cucm')
+    await Promise.allSettled(
+      realtimeDevices.map(d => {
+        const collectionId = deviceProgress[d.id]?.collectionId
+        if (collectionId) return logService.stopCollection(collectionId)
+        return Promise.resolve()
+      })
+    )
+
+    // Wait for real-time devices to complete by polling the ref
+    const waitForCompletion = () => {
+      return new Promise<void>((resolve) => {
+        const check = () => {
+          const allRtDone = realtimeDevices.every(d => {
+            const p = deviceProgressRef.current[d.id]
+            return p?.status === 'completed' || p?.status === 'failed'
+          })
+          if (allRtDone) {
+            resolve()
+          } else {
+            setTimeout(check, 1000)
+          }
+        }
+        // Give a brief delay for polling to catch up, then start checking
+        setTimeout(check, 2000)
+      })
+    }
+
+    await waitForCompletion()
+    setIsStopping(false)
+
+    const sessionEndTime = new Date()
+
+    // If we have CUCM devices, start historical collection phase
+    if (hasCucmDevices && sessionStartTime) {
+      setSessionPhase('historical')
+
+      // Compute relative time range: session duration + 2 minute buffer
+      const elapsedMs = sessionEndTime.getTime() - sessionStartTime.getTime()
+      const reltimeMinutesComputed = Math.ceil(elapsedMs / 60000) + 2
+
+      // Start CUCM collections
+      for (const device of devices.filter(d => d.type === 'cucm')) {
+        try {
+          const effectiveNodes = (device.selectedNodes || []).map(originalIp =>
+            device.nodeIpOverrides?.[originalIp] || originalIp
+          )
+
+          const job = await jobService.createJob({
+            publisher_host: device.host,
+            username: device.username,
+            password: device.password,
+            port: device.port,
+            nodes: effectiveNodes,
+            profile: selectedCucmProfile,
+            options: {
+              time_mode: 'relative',
+              reltime_minutes: reltimeMinutesComputed,
+            },
+          })
+
+          setDeviceProgress(prev => ({
+            ...prev,
+            [device.id]: { status: 'running', progress: 5, message: `Collecting CUCM logs (last ${reltimeMinutesComputed} min)...`, jobId: job.id }
+          }))
+
+          pollCucmJob(device.id, job.id)
+        } catch (error) {
+          setDeviceProgress(prev => ({
+            ...prev,
+            [device.id]: { status: 'failed', progress: 0, message: error instanceof Error ? error.message : 'Failed to start CUCM collection' }
+          }))
+        }
+      }
+    } else {
+      // No CUCM devices, we're done
+      setSessionPhase('done')
+    }
+  }
+
   const canStartCollection = () => {
     if (devices.length === 0) return false
 
@@ -435,19 +678,63 @@ export default function LogCollection() {
 
     setIsCollecting(true)
     setCollectionComplete(false)
+    setSessionElapsed(0)
+    setSessionStartTime(new Date())
 
-    // Initialize progress
+    // Initialize progress for all devices
     const initialProgress: Record<string, DeviceProgress> = {}
     devices.forEach(d => {
-      initialProgress[d.id] = { status: 'running', progress: 5, message: 'Starting collection...' }
+      if (d.type === 'cucm' && isMixedSession) {
+        // CUCM waits in mixed session mode
+        initialProgress[d.id] = { status: 'pending', progress: 0, message: 'Waiting for real-time collection...' }
+      } else {
+        initialProgress[d.id] = { status: 'running', progress: 5, message: 'Starting collection...' }
+      }
     })
     setDeviceProgress(initialProgress)
 
-    // Start collections
-    for (const device of devices) {
-      try {
-        if (device.type === 'cucm') {
-          // Use edited IPs (from nodeIpOverrides) instead of original discovered IPs
+    // Determine session duration for real-time devices
+    const rtDuration = sessionMode === 'timed' ? sessionDuration : 3600
+
+    // Phase 1: Start real-time devices (CUBE/Expressway)
+    const realtimeDevices = devices.filter(d => d.type !== 'cucm')
+    if (realtimeDevices.length > 0) {
+      setSessionPhase('realtime')
+
+      for (const device of realtimeDevices) {
+        try {
+          const profileName = device.type === 'cube' ? selectedCubeProfile : selectedExpresswayProfile
+
+          const response = await logService.startCollection({
+            device_type: device.type as LogDeviceType,
+            host: device.host,
+            port: device.port,
+            username: device.username,
+            password: device.password,
+            profile: profileName,
+            duration_sec: rtDuration,
+          })
+
+          setDeviceProgress(prev => ({
+            ...prev,
+            [device.id]: { ...prev[device.id], collectionId: response.collection_id }
+          }))
+
+          pollDeviceCollection(device.id, response.collection_id)
+        } catch (error) {
+          setDeviceProgress(prev => ({
+            ...prev,
+            [device.id]: { status: 'failed', progress: 0, message: error instanceof Error ? error.message : 'Failed to start' }
+          }))
+        }
+      }
+    }
+
+    // If no real-time devices, start CUCM directly (non-orchestrated)
+    if (!hasRealtimeDevices) {
+      setSessionPhase('historical')
+      for (const device of devices.filter(d => d.type === 'cucm')) {
+        try {
           const effectiveNodes = (device.selectedNodes || []).map(originalIp =>
             device.nodeIpOverrides?.[originalIp] || originalIp
           )
@@ -469,34 +756,16 @@ export default function LogCollection() {
 
           setDeviceProgress(prev => ({
             ...prev,
-            [device.id]: { ...prev[device.id], jobId: job.id }
+            [device.id]: { ...prev[device.id], status: 'running', progress: 5, message: 'Collecting logs...', jobId: job.id }
           }))
 
           pollCucmJob(device.id, job.id)
-        } else {
-          const profileName = device.type === 'cube' ? selectedCubeProfile : selectedExpresswayProfile
-
-          const response = await logService.startCollection({
-            device_type: device.type as LogDeviceType,
-            host: device.host,
-            port: device.port,
-            username: device.username,
-            password: device.password,
-            profile: profileName,
-          })
-
+        } catch (error) {
           setDeviceProgress(prev => ({
             ...prev,
-            [device.id]: { ...prev[device.id], collectionId: response.collection_id }
+            [device.id]: { status: 'failed', progress: 0, message: error instanceof Error ? error.message : 'Failed to start' }
           }))
-
-          pollDeviceCollection(device.id, response.collection_id)
         }
-      } catch (error) {
-        setDeviceProgress(prev => ({
-          ...prev,
-          [device.id]: { status: 'failed', progress: 0, message: error instanceof Error ? error.message : 'Failed to start' }
-        }))
       }
     }
   }
@@ -559,7 +828,7 @@ export default function LogCollection() {
               ...prev[deviceId],
               status: 'running',
               progress: Math.min((prev[deviceId]?.progress || 0) + 10, 90),
-              message: 'Collecting logs...'
+              message: response.collection?.message || 'Collecting logs...'
             }
           }))
           setTimeout(poll, 3000)
@@ -594,21 +863,46 @@ export default function LogCollection() {
     poll()
   }
 
-  // Check for collection complete
+  // Check for collection complete (phased)
   useEffect(() => {
     if (!isCollecting) return
 
-    const progressValues = Object.values(deviceProgress)
-    if (progressValues.length !== devices.length) return
+    if (sessionPhase === 'realtime') {
+      // During realtime phase, only check non-CUCM devices
+      // Auto-stop is handled by the timer, not here
+      return
+    }
+
+    if (sessionPhase === 'stopping') {
+      // handleStopSession manages the transition
+      return
+    }
+
+    // In 'historical' or 'done' phase, or non-mixed sessions: check relevant devices
+    const devicesToCheck = sessionPhase === 'historical'
+      ? devices.filter(d => d.type === 'cucm')
+      : devices
+
+    const progressValues = devicesToCheck.map(d => deviceProgress[d.id]).filter(Boolean)
+    if (progressValues.length !== devicesToCheck.length) return
 
     const allDone = progressValues.every(p => p.status === 'completed' || p.status === 'failed')
     if (allDone) {
-      setIsCollecting(false)
-      setCollectionComplete(true)
-      const successCount = progressValues.filter(p => p.status === 'completed').length
-      enqueueSnackbar(`Collection complete: ${successCount}/${devices.length} devices`, { variant: 'success' })
+      // Check if ALL devices are done (including real-time ones from earlier phase)
+      const allDevicesDone = devices.every(d => {
+        const p = deviceProgress[d.id]
+        return p && (p.status === 'completed' || p.status === 'failed')
+      })
+
+      if (allDevicesDone || !isMixedSession) {
+        setIsCollecting(false)
+        setCollectionComplete(true)
+        setSessionPhase('done')
+        const successCount = devices.filter(d => deviceProgress[d.id]?.status === 'completed').length
+        enqueueSnackbar(`Collection complete: ${successCount}/${devices.length} devices`, { variant: 'success' })
+      }
     }
-  }, [deviceProgress, devices.length, isCollecting, enqueueSnackbar])
+  }, [deviceProgress, devices, isCollecting, sessionPhase, isMixedSession, enqueueSnackbar])
 
   const handleDownloadDevice = (device: DeviceEntry) => {
     const progress = deviceProgress[device.id]
@@ -903,11 +1197,391 @@ export default function LogCollection() {
                 setDevices([])
                 setDeviceProgress({})
                 setCollectionComplete(false)
+                setSessionPhase('idle')
+                setSessionElapsed(0)
+                setSessionStartTime(null)
               }}
             >
               New Collection
             </Button>
           </Box>
+        </Paper>
+      )}
+
+      {/* Trace Settings Section - CUCM trace level configuration */}
+      {devices.some(d => d.type === 'cucm' && d.discoveredNodes && d.discoveredNodes.length > 0) && !isCollecting && (
+        <Paper
+          sx={{
+            p: 2,
+            mb: 3,
+            background: theme => theme.palette.mode === 'dark'
+              ? 'linear-gradient(135deg, rgba(255,152,0,0.1) 0%, rgba(255,193,7,0.05) 100%)'
+              : 'linear-gradient(135deg, rgba(255,152,0,0.08) 0%, rgba(255,193,7,0.04) 100%)',
+            border: theme => `1px solid ${alpha(theme.palette.warning.main, 0.3)}`,
+            borderRadius: 3,
+          }}
+        >
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              cursor: 'pointer',
+              '&:hover': { opacity: 0.8 },
+            }}
+            onClick={() => setTraceSettingsExpanded(!traceSettingsExpanded)}
+          >
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <Box
+                sx={{
+                  width: 8,
+                  height: 28,
+                  borderRadius: 1,
+                  bgcolor: 'warning.main',
+                }}
+              />
+              <DebugIcon sx={{ color: 'warning.main', fontSize: 24 }} />
+              <Typography variant="h6" fontWeight={600}>Trace Settings</Typography>
+              <Tooltip title="Trace levels must be configured on CUCM BEFORE collecting logs. Higher levels provide more detail for troubleshooting.">
+                <InfoIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
+              </Tooltip>
+            </Box>
+            <IconButton size="small">
+              {traceSettingsExpanded ? <ExpandLess /> : <ExpandMore />}
+            </IconButton>
+          </Box>
+          <Collapse in={traceSettingsExpanded}>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5, mb: 2, ml: 3 }}>
+              Check and configure CUCM trace levels before collecting logs
+            </Typography>
+
+            <Alert severity="info" sx={{ mb: 2, mx: 1 }}>
+              <Typography variant="body2">
+                Trace levels must be set on CUCM <strong>before</strong> the issue occurs or reproduces.
+                After changing trace levels, wait for the issue to occur, then collect logs.
+              </Typography>
+            </Alert>
+
+            <Grid container spacing={3}>
+              {/* Current Trace Levels */}
+              <Grid item xs={12} md={6}>
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: 2,
+                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
+                    border: '1px solid',
+                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+                    <Typography variant="subtitle2" fontWeight={600}>Current Trace Levels</Typography>
+                    <Button
+                      size="small"
+                      startIcon={getTraceLevelsMutation.isPending ? <CircularProgress size={16} /> : <Refresh />}
+                      onClick={handleFetchTraceLevels}
+                      disabled={getTraceLevelsMutation.isPending}
+                    >
+                      {getTraceLevelsMutation.isPending ? 'Checking...' : 'Check Status'}
+                    </Button>
+                  </Box>
+
+                  {traceLevels.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
+                      Click "Check Status" to fetch current trace levels from CUCM nodes
+                    </Typography>
+                  ) : (
+                    <List dense sx={{ bgcolor: 'background.paper', borderRadius: 1 }}>
+                      {traceLevels.map((nodeResult, index) => (
+                        <ListItem key={nodeResult.host} divider={index < traceLevels.length - 1}>
+                          <ListItemIcon sx={{ minWidth: 36 }}>
+                            {nodeResult.success ? (
+                              <CheckCircle color="success" sx={{ fontSize: 20 }} />
+                            ) : (
+                              <ErrorIcon color="error" sx={{ fontSize: 20 }} />
+                            )}
+                          </ListItemIcon>
+                          <ListItemText
+                            primary={nodeResult.host}
+                            secondary={
+                              nodeResult.success ? (
+                                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                                  {nodeResult.services.map((svc) => (
+                                    <Chip
+                                      key={svc.service_name}
+                                      size="small"
+                                      label={`${svc.service_name}: ${svc.current_level}`}
+                                      color={svc.current_level === 'Debug' ? 'warning' : svc.current_level === 'Detailed' ? 'info' : 'default'}
+                                      sx={{ height: 20, fontSize: '0.65rem' }}
+                                    />
+                                  ))}
+                                </Box>
+                              ) : (
+                                <Typography variant="caption" color="error">
+                                  {nodeResult.error || 'Error fetching level'}
+                                </Typography>
+                              )
+                            }
+                            primaryTypographyProps={{ variant: 'body2' }}
+                          />
+                        </ListItem>
+                      ))}
+                    </List>
+                  )}
+                </Box>
+              </Grid>
+
+              {/* Set Trace Levels */}
+              <Grid item xs={12} md={6}>
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: 2,
+                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
+                    border: '1px solid',
+                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
+                  }}
+                >
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
+                    Set Trace Level
+                  </Typography>
+
+                  <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+                    <InputLabel>Target Debug Level</InputLabel>
+                    <Select
+                      value={targetDebugLevel}
+                      label="Target Debug Level"
+                      onChange={e => setTargetDebugLevel(e.target.value as DebugLevel)}
+                    >
+                      <MenuItem value="basic">
+                        <Box>
+                          <Typography variant="body2">Basic (Default)</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Standard trace levels, minimal performance impact
+                          </Typography>
+                        </Box>
+                      </MenuItem>
+                      <MenuItem value="detailed">
+                        <Box>
+                          <Typography variant="body2">Detailed - TAC Troubleshooting</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Increased verbosity for troubleshooting
+                          </Typography>
+                        </Box>
+                      </MenuItem>
+                      <MenuItem value="verbose">
+                        <Box>
+                          <Typography variant="body2">Verbose - Full Debug</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            Maximum detail (may impact performance)
+                          </Typography>
+                        </Box>
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
+
+                  <Button
+                    variant="contained"
+                    fullWidth
+                    color="warning"
+                    startIcon={setTraceLevelsMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />}
+                    onClick={handleSetTraceLevels}
+                    disabled={setTraceLevelsMutation.isPending}
+                  >
+                    {setTraceLevelsMutation.isPending ? 'Applying...' : 'Apply to All Selected Nodes'}
+                  </Button>
+
+                  {targetDebugLevel !== 'basic' && (
+                    <Alert severity="warning" sx={{ mt: 2 }}>
+                      <Typography variant="caption">
+                        Higher trace levels generate more logs and may impact system performance.
+                        Remember to reset to "Basic" after troubleshooting.
+                      </Typography>
+                    </Alert>
+                  )}
+                </Box>
+              </Grid>
+            </Grid>
+          </Collapse>
+        </Paper>
+      )}
+
+      {/* Debug Settings Section - CUBE debug category configuration */}
+      {devices.some(d => d.type === 'cube') && !isCollecting && (
+        <Paper
+          sx={{
+            p: 2,
+            mb: 3,
+            background: theme => theme.palette.mode === 'dark'
+              ? 'linear-gradient(135deg, rgba(237,108,2,0.1) 0%, rgba(255,152,0,0.05) 100%)'
+              : 'linear-gradient(135deg, rgba(237,108,2,0.08) 0%, rgba(255,152,0,0.04) 100%)',
+            border: theme => `1px solid ${alpha(theme.palette.warning.main, 0.3)}`,
+            borderRadius: 3,
+          }}
+        >
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              cursor: 'pointer',
+              '&:hover': { opacity: 0.8 },
+            }}
+            onClick={() => setDebugSettingsExpanded(!debugSettingsExpanded)}
+          >
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <Box
+                sx={{
+                  width: 8,
+                  height: 28,
+                  borderRadius: 1,
+                  bgcolor: 'warning.main',
+                }}
+              />
+              <DebugIcon sx={{ color: 'warning.main', fontSize: 24 }} />
+              <Typography variant="h6" fontWeight={600}>Debug Settings</Typography>
+              <Tooltip title="Enable or disable IOS-XE debug categories on CUBE before collecting logs. Debug must be active while the issue occurs.">
+                <InfoIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
+              </Tooltip>
+            </Box>
+            <IconButton size="small">
+              {debugSettingsExpanded ? <ExpandLess /> : <ExpandMore />}
+            </IconButton>
+          </Box>
+          <Collapse in={debugSettingsExpanded}>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5, mb: 2, ml: 3 }}>
+              Check and configure CUBE debug categories before collecting logs
+            </Typography>
+
+            <Alert severity="info" sx={{ mb: 2, mx: 1 }}>
+              <Typography variant="body2">
+                Debug categories must be enabled on the CUBE <strong>before</strong> the issue occurs.
+                After enabling debugs, reproduce the issue, then collect logs.
+              </Typography>
+            </Alert>
+
+            <Grid container spacing={3}>
+              {/* Current Debug Status */}
+              <Grid item xs={12} md={6}>
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: 2,
+                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
+                    border: '1px solid',
+                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
+                    <Typography variant="subtitle2" fontWeight={600}>Current Debug Status</Typography>
+                    <Button
+                      size="small"
+                      startIcon={getCubeDebugStatusMutation.isPending ? <CircularProgress size={16} /> : <Refresh />}
+                      onClick={handleFetchCubeDebugStatus}
+                      disabled={getCubeDebugStatusMutation.isPending}
+                    >
+                      {getCubeDebugStatusMutation.isPending ? 'Checking...' : 'Check Status'}
+                    </Button>
+                  </Box>
+
+                  {cubeDebugStatus.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
+                      Click "Check Status" to fetch current debug state from CUBE
+                    </Typography>
+                  ) : (
+                    <List dense sx={{ bgcolor: 'background.paper', borderRadius: 1 }}>
+                      {cubeDebugStatus.map((cat, index) => (
+                        <ListItem key={cat.name} divider={index < cubeDebugStatus.length - 1}>
+                          <ListItemIcon sx={{ minWidth: 36 }}>
+                            {cat.enabled ? (
+                              <CheckCircle color="success" sx={{ fontSize: 20 }} />
+                            ) : (
+                              <ErrorIcon color="disabled" sx={{ fontSize: 20 }} />
+                            )}
+                          </ListItemIcon>
+                          <ListItemText
+                            primary={cat.name}
+                            primaryTypographyProps={{ variant: 'body2' }}
+                          />
+                          <Chip
+                            size="small"
+                            label={cat.enabled ? 'ON' : 'OFF'}
+                            color={cat.enabled ? 'success' : 'default'}
+                            sx={{ height: 20, fontSize: '0.7rem', fontWeight: 600 }}
+                          />
+                        </ListItem>
+                      ))}
+                    </List>
+                  )}
+                </Box>
+              </Grid>
+
+              {/* Quick Actions */}
+              <Grid item xs={12} md={6}>
+                <Box
+                  sx={{
+                    p: 2,
+                    borderRadius: 2,
+                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
+                    border: '1px solid',
+                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
+                  }}
+                >
+                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
+                    Quick Actions
+                  </Typography>
+
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+                    <Button
+                      variant="outlined"
+                      color="warning"
+                      fullWidth
+                      startIcon={enableCubeDebugMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <PlayArrow />}
+                      onClick={() => handleEnableCubeDebug(['debug ccsip messages'])}
+                      disabled={enableCubeDebugMutation.isPending || clearCubeDebugMutation.isPending}
+                    >
+                      Enable SIP Debug
+                    </Button>
+
+                    <Button
+                      variant="outlined"
+                      color="warning"
+                      fullWidth
+                      startIcon={enableCubeDebugMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <PlayArrow />}
+                      onClick={() => handleEnableCubeDebug([
+                        'debug ccsip messages',
+                        'debug voip ccapi inout',
+                        'debug voip dialpeer',
+                      ])}
+                      disabled={enableCubeDebugMutation.isPending || clearCubeDebugMutation.isPending}
+                    >
+                      Enable Full Voice Debug
+                    </Button>
+
+                    <Divider sx={{ my: 0.5 }} />
+
+                    <Button
+                      variant="contained"
+                      color="error"
+                      fullWidth
+                      startIcon={clearCubeDebugMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <Stop />}
+                      onClick={handleClearCubeDebug}
+                      disabled={enableCubeDebugMutation.isPending || clearCubeDebugMutation.isPending}
+                    >
+                      Clear All Debugs
+                    </Button>
+                  </Box>
+
+                  <Alert severity="warning" sx={{ mt: 2 }}>
+                    <Typography variant="caption">
+                      Active debugs consume CPU resources. Always clear debugs after troubleshooting
+                      to avoid performance degradation on the CUBE.
+                    </Typography>
+                  </Alert>
+                </Box>
+              </Grid>
+            </Grid>
+          </Collapse>
         </Paper>
       )}
 
@@ -1219,203 +1893,6 @@ export default function LogCollection() {
         </Grid>
       )}
 
-      {/* Trace Settings Section - CUCM trace level configuration */}
-      {devices.some(d => d.type === 'cucm' && d.discoveredNodes && d.discoveredNodes.length > 0) && !isCollecting && !collectionComplete && (
-        <Paper
-          sx={{
-            p: 2,
-            mt: 3,
-            background: theme => theme.palette.mode === 'dark'
-              ? 'linear-gradient(135deg, rgba(255,152,0,0.1) 0%, rgba(255,193,7,0.05) 100%)'
-              : 'linear-gradient(135deg, rgba(255,152,0,0.08) 0%, rgba(255,193,7,0.04) 100%)',
-            border: theme => `1px solid ${alpha(theme.palette.warning.main, 0.3)}`,
-            borderRadius: 3,
-          }}
-        >
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              cursor: 'pointer',
-              '&:hover': { opacity: 0.8 },
-            }}
-            onClick={() => setTraceSettingsExpanded(!traceSettingsExpanded)}
-          >
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-              <Box
-                sx={{
-                  width: 8,
-                  height: 28,
-                  borderRadius: 1,
-                  bgcolor: 'warning.main',
-                }}
-              />
-              <DebugIcon sx={{ color: 'warning.main', fontSize: 24 }} />
-              <Typography variant="h6" fontWeight={600}>Trace Settings</Typography>
-              <Tooltip title="Trace levels must be configured on CUCM BEFORE collecting logs. Higher levels provide more detail for troubleshooting.">
-                <InfoIcon sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
-              </Tooltip>
-            </Box>
-            <IconButton size="small">
-              {traceSettingsExpanded ? <ExpandLess /> : <ExpandMore />}
-            </IconButton>
-          </Box>
-          <Collapse in={traceSettingsExpanded}>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5, mb: 2, ml: 3 }}>
-              Check and configure CUCM trace levels before collecting logs
-            </Typography>
-
-            <Alert severity="info" sx={{ mb: 2, mx: 1 }}>
-              <Typography variant="body2">
-                Trace levels must be set on CUCM <strong>before</strong> the issue occurs or reproduces.
-                After changing trace levels, wait for the issue to occur, then collect logs.
-              </Typography>
-            </Alert>
-
-            <Grid container spacing={3}>
-              {/* Current Trace Levels */}
-              <Grid item xs={12} md={6}>
-                <Box
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
-                    border: '1px solid',
-                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2 }}>
-                    <Typography variant="subtitle2" fontWeight={600}>Current Trace Levels</Typography>
-                    <Button
-                      size="small"
-                      startIcon={getTraceLevelsMutation.isPending ? <CircularProgress size={16} /> : <Refresh />}
-                      onClick={handleFetchTraceLevels}
-                      disabled={getTraceLevelsMutation.isPending}
-                    >
-                      {getTraceLevelsMutation.isPending ? 'Checking...' : 'Check Status'}
-                    </Button>
-                  </Box>
-
-                  {traceLevels.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>
-                      Click "Check Status" to fetch current trace levels from CUCM nodes
-                    </Typography>
-                  ) : (
-                    <List dense sx={{ bgcolor: 'background.paper', borderRadius: 1 }}>
-                      {traceLevels.map((nodeResult, index) => (
-                        <ListItem key={nodeResult.host} divider={index < traceLevels.length - 1}>
-                          <ListItemIcon sx={{ minWidth: 36 }}>
-                            {nodeResult.success ? (
-                              <CheckCircle color="success" sx={{ fontSize: 20 }} />
-                            ) : (
-                              <ErrorIcon color="error" sx={{ fontSize: 20 }} />
-                            )}
-                          </ListItemIcon>
-                          <ListItemText
-                            primary={nodeResult.host}
-                            secondary={
-                              nodeResult.success ? (
-                                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                                  {nodeResult.services.map((svc) => (
-                                    <Chip
-                                      key={svc.service_name}
-                                      size="small"
-                                      label={`${svc.service_name}: ${svc.current_level}`}
-                                      color={svc.current_level === 'Debug' ? 'warning' : svc.current_level === 'Detailed' ? 'info' : 'default'}
-                                      sx={{ height: 20, fontSize: '0.65rem' }}
-                                    />
-                                  ))}
-                                </Box>
-                              ) : (
-                                <Typography variant="caption" color="error">
-                                  {nodeResult.error || 'Error fetching level'}
-                                </Typography>
-                              )
-                            }
-                            primaryTypographyProps={{ variant: 'body2' }}
-                          />
-                        </ListItem>
-                      ))}
-                    </List>
-                  )}
-                </Box>
-              </Grid>
-
-              {/* Set Trace Levels */}
-              <Grid item xs={12} md={6}>
-                <Box
-                  sx={{
-                    p: 2,
-                    borderRadius: 2,
-                    bgcolor: theme => alpha(theme.palette.warning.main, 0.05),
-                    border: '1px solid',
-                    borderColor: theme => alpha(theme.palette.warning.main, 0.2),
-                  }}
-                >
-                  <Typography variant="subtitle2" fontWeight={600} sx={{ mb: 2 }}>
-                    Set Trace Level
-                  </Typography>
-
-                  <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-                    <InputLabel>Target Debug Level</InputLabel>
-                    <Select
-                      value={targetDebugLevel}
-                      label="Target Debug Level"
-                      onChange={e => setTargetDebugLevel(e.target.value as DebugLevel)}
-                    >
-                      <MenuItem value="basic">
-                        <Box>
-                          <Typography variant="body2">Basic (Default)</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Standard trace levels, minimal performance impact
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                      <MenuItem value="detailed">
-                        <Box>
-                          <Typography variant="body2">Detailed - TAC Troubleshooting</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Increased verbosity for troubleshooting
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                      <MenuItem value="verbose">
-                        <Box>
-                          <Typography variant="body2">Verbose - Full Debug</Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            Maximum detail (may impact performance)
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    </Select>
-                  </FormControl>
-
-                  <Button
-                    variant="contained"
-                    fullWidth
-                    color="warning"
-                    startIcon={setTraceLevelsMutation.isPending ? <CircularProgress size={20} color="inherit" /> : <SaveIcon />}
-                    onClick={handleSetTraceLevels}
-                    disabled={setTraceLevelsMutation.isPending}
-                  >
-                    {setTraceLevelsMutation.isPending ? 'Applying...' : 'Apply to All Selected Nodes'}
-                  </Button>
-
-                  {targetDebugLevel !== 'basic' && (
-                    <Alert severity="warning" sx={{ mt: 2 }}>
-                      <Typography variant="caption">
-                        Higher trace levels generate more logs and may impact system performance.
-                        Remember to reset to "Basic" after troubleshooting.
-                      </Typography>
-                    </Alert>
-                  )}
-                </Box>
-              </Grid>
-            </Grid>
-          </Collapse>
-        </Paper>
-      )}
 
       {/* Collection Profiles - show before collection starts */}
       {devices.length > 0 && !isCollecting && !collectionComplete && (
@@ -1621,7 +2098,226 @@ export default function LogCollection() {
               </Grid>
             )}
             </Grid>
+
+            {/* Session Collection Mode */}
+            <Divider sx={{ my: 2 }} />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 1.5 }}>
+              <Timer sx={{ color: '#10b981', fontSize: 20 }} />
+              <Typography variant="subtitle1" fontWeight={600}>Collection Mode</Typography>
+            </Box>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2, ml: 3 }}>
+              {isMixedSession
+                ? 'Real-time devices (CUBE/Expressway) start first, then CUCM collects for the same time window'
+                : 'Choose how long to collect logs'}
+            </Typography>
+            <Grid container spacing={3}>
+              <Grid item xs={12} md={6}>
+                <ToggleButtonGroup
+                  value={sessionMode}
+                  exclusive
+                  onChange={(_, value) => value && setSessionMode(value)}
+                  size="small"
+                  fullWidth
+                >
+                  <ToggleButton
+                    value="timed"
+                    sx={{
+                      flex: 1,
+                      py: 1.5,
+                      textTransform: 'none',
+                      '&.Mui-selected': {
+                        bgcolor: alpha('#10b981', 0.15),
+                        color: '#10b981',
+                        borderColor: '#10b981',
+                        '&:hover': { bgcolor: alpha('#10b981', 0.25) },
+                      },
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Timer sx={{ fontSize: 20 }} />
+                      <Box sx={{ textAlign: 'left' }}>
+                        <Typography variant="body2" fontWeight={600}>Timed</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Auto-stop after duration
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </ToggleButton>
+                  <ToggleButton
+                    value="manual"
+                    sx={{
+                      flex: 1,
+                      py: 1.5,
+                      textTransform: 'none',
+                      '&.Mui-selected': {
+                        bgcolor: alpha('#f59e0b', 0.15),
+                        color: '#f59e0b',
+                        borderColor: '#f59e0b',
+                        '&:hover': { bgcolor: alpha('#f59e0b', 0.25) },
+                      },
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <ManualIcon sx={{ fontSize: 20 }} />
+                      <Box sx={{ textAlign: 'left' }}>
+                        <Typography variant="body2" fontWeight={600}>Manual Stop</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          Runs until you click Stop
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </ToggleButton>
+                </ToggleButtonGroup>
+              </Grid>
+              <Grid item xs={12} md={6}>
+                {sessionMode === 'timed' ? (
+                  <Box
+                    sx={{
+                      p: 2,
+                      borderRadius: 2,
+                      bgcolor: alpha('#10b981', 0.05),
+                      border: `1px solid ${alpha('#10b981', 0.15)}`,
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5 }}>
+                      <Timer sx={{ color: '#10b981', fontSize: 20 }} />
+                      <Typography variant="subtitle2" fontWeight={600}>Duration: {formatTime(sessionDuration)}</Typography>
+                    </Box>
+                    <Slider
+                      value={sessionDuration}
+                      onChange={(_, value) => setSessionDuration(value as number)}
+                      min={10}
+                      max={600}
+                      step={10}
+                      marks={[
+                        { value: 60, label: '1m' },
+                        { value: 300, label: '5m' },
+                        { value: 600, label: '10m' },
+                      ]}
+                      sx={{
+                        color: '#10b981',
+                        '& .MuiSlider-markLabel': { fontSize: '0.7rem' },
+                      }}
+                    />
+                  </Box>
+                ) : (
+                  <Alert severity="info">
+                    Collection runs until you click <strong>Stop</strong>. Reproduce your issue, then stop collection.
+                    {isMixedSession && ' CUCM historical logs will be auto-collected for the captured time window.'}
+                  </Alert>
+                )}
+              </Grid>
+            </Grid>
           </Collapse>
+        </Paper>
+      )}
+
+      {/* Session Phase Banner - shown during active collection */}
+      {isCollecting && sessionPhase !== 'idle' && (
+        <Paper
+          sx={{
+            p: 2,
+            mt: 3,
+            background: sessionPhase === 'realtime'
+              ? `linear-gradient(135deg, ${alpha('#10b981', 0.12)} 0%, ${alpha('#10b981', 0.04)} 100%)`
+              : sessionPhase === 'stopping'
+              ? `linear-gradient(135deg, ${alpha('#f59e0b', 0.12)} 0%, ${alpha('#f59e0b', 0.04)} 100%)`
+              : sessionPhase === 'historical'
+              ? `linear-gradient(135deg, ${alpha('#1976d2', 0.12)} 0%, ${alpha('#1976d2', 0.04)} 100%)`
+              : 'transparent',
+            border: '1px solid',
+            borderColor: sessionPhase === 'realtime' ? alpha('#10b981', 0.3)
+              : sessionPhase === 'stopping' ? alpha('#f59e0b', 0.3)
+              : alpha('#1976d2', 0.3),
+            borderRadius: 3,
+          }}
+        >
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              {/* Phase indicator */}
+              <Box sx={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 0.5 }}>
+                {sessionPhase === 'realtime' && (
+                  <>
+                    {/* Circular timer */}
+                    <Box sx={{ position: 'relative', display: 'inline-flex' }}>
+                      <CircularProgress
+                        variant="determinate"
+                        value={100}
+                        size={72}
+                        thickness={3}
+                        sx={{ color: alpha('#10b981', 0.15) }}
+                      />
+                      <CircularProgress
+                        variant={sessionMode === 'manual' ? 'indeterminate' : 'determinate'}
+                        value={sessionMode === 'timed' ? (sessionElapsed / sessionDuration) * 100 : undefined}
+                        size={72}
+                        thickness={3}
+                        sx={{
+                          position: 'absolute',
+                          left: 0,
+                          color: '#10b981',
+                          '& .MuiCircularProgress-circle': {
+                            strokeLinecap: 'round',
+                          },
+                        }}
+                      />
+                      <Box
+                        sx={{
+                          position: 'absolute',
+                          top: 0, left: 0, bottom: 0, right: 0,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          flexDirection: 'column',
+                        }}
+                      >
+                        <Timer sx={{ fontSize: 16, color: '#10b981', mb: 0.25 }} />
+                        <Typography variant="caption" fontWeight={700} sx={{ color: '#10b981', fontSize: '0.65rem' }}>
+                          {sessionMode === 'timed' ? `${Math.round((sessionElapsed / sessionDuration) * 100)}%` : formatTime(sessionElapsed)}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </>
+                )}
+                {sessionPhase === 'stopping' && <CircularProgress size={48} sx={{ color: '#f59e0b' }} />}
+                {sessionPhase === 'historical' && <CircularProgress size={48} sx={{ color: '#1976d2' }} />}
+              </Box>
+
+              <Box>
+                <Typography variant="h6" fontWeight={600}>
+                  {sessionPhase === 'realtime' && (isMixedSession
+                    ? 'Phase 1: Collecting real-time logs...'
+                    : 'Collecting logs...')}
+                  {sessionPhase === 'stopping' && (isMixedSession ? 'Phase 2: Stopping real-time collection...' : 'Stopping collection...')}
+                  {sessionPhase === 'historical' && 'Phase 3: Collecting CUCM historical logs...'}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  {sessionPhase === 'realtime' && sessionMode === 'timed' && (
+                    <>Remaining: {formatTime(Math.max(0, sessionDuration - sessionElapsed))} &mdash; {formatTime(sessionElapsed)} elapsed</>
+                  )}
+                  {sessionPhase === 'realtime' && sessionMode === 'manual' && (
+                    <>{formatTime(sessionElapsed)} elapsed &mdash; Click Stop when done</>
+                  )}
+                  {sessionPhase === 'stopping' && 'Waiting for devices to finish...'}
+                  {sessionPhase === 'historical' && 'Auto-collecting CUCM logs for the captured time window'}
+                </Typography>
+              </Box>
+            </Box>
+
+            {/* Stop button */}
+            {sessionPhase === 'realtime' && (
+              <Button
+                variant="contained"
+                color="error"
+                startIcon={isStopping ? <CircularProgress size={20} color="inherit" /> : <Stop />}
+                onClick={handleStopSession}
+                disabled={isStopping}
+                size="large"
+              >
+                {isStopping ? 'Stopping...' : 'Stop Collection'}
+              </Button>
+            )}
+          </Box>
         </Paper>
       )}
 

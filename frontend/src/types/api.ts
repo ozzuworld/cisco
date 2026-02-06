@@ -20,6 +20,7 @@ export interface LogProfile {
   description: string
   logTypes: string[]
   isCustom: boolean
+  trace_services?: string[]
 }
 
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'

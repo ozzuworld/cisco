@@ -33,7 +33,7 @@ export interface StartLogCollectionRequest {
   password: string
   profile?: string              // Profile name from GET /logs/profiles
   include_debug?: boolean       // Legacy: VoIP trace (false) vs Debug mode (true)
-  duration_sec?: number         // For debug mode (5-300)
+  duration_sec?: number         // For debug mode (5-7200)
   connect_timeout_sec?: number
 }
 
@@ -53,6 +53,7 @@ export interface LogCollectionInfo {
   file_size_bytes?: number
   total_size_bytes?: number
   error?: string
+  message?: string
   files?: LogFileInfo[]
   download_available?: boolean  // Backend includes this inside collection object
 }

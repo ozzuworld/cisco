@@ -11,6 +11,65 @@ import type {
   DiscoverNodesRequest,
 } from '@/types'
 
+// ==========================================
+// CUBE Debug Status Types
+// ==========================================
+
+export interface CubeDebugStatusRequest {
+  host: string
+  port?: number
+  username: string
+  password: string
+  connect_timeout_sec?: number
+}
+
+export interface CubeDebugCategory {
+  name: string
+  enabled: boolean
+}
+
+export interface CubeDebugStatusResponse {
+  host: string
+  success: boolean
+  categories: CubeDebugCategory[]
+  raw_output?: string
+  error?: string
+  checked_at: string
+}
+
+export interface CubeDebugEnableRequest {
+  host: string
+  port?: number
+  username: string
+  password: string
+  commands: string[]
+  connect_timeout_sec?: number
+}
+
+export interface CubeDebugEnableResponse {
+  host: string
+  success: boolean
+  enabled: string[]
+  failed: string[]
+  raw_output?: string
+  error?: string
+}
+
+export interface CubeDebugClearRequest {
+  host: string
+  port?: number
+  username: string
+  password: string
+  connect_timeout_sec?: number
+}
+
+export interface CubeDebugClearResponse {
+  host: string
+  success: boolean
+  raw_output?: string
+  error?: string
+}
+
 export const logService = {
   // ==========================================
   // CUCM Job-based Log Retrieval (existing)
@@ -98,6 +157,13 @@ export const logService = {
   },
 
   /**
+   * Stop a running log collection gracefully
+   */
+  async stopCollection(collectionId: string): Promise<void> {
+    return apiClient.post(`/logs/${collectionId}/stop`)
+  },
+
+  /**
    * Download collected logs (triggers browser download)
    */
   downloadCollection(collectionId: string, filename: string): void {
@@ -168,5 +234,21 @@ export const logService = {
    */
   async getDeviceProfiles(): Promise<DeviceProfilesResponse> {
     return apiClient.get<DeviceProfilesResponse>('/logs/profiles')
+  },
+
+  // ==========================================
+  // CUBE Debug Status
+  // ==========================================
+
+  async getCubeDebugStatus(request: CubeDebugStatusRequest): Promise<CubeDebugStatusResponse> {
+    return apiClient.post<CubeDebugStatusResponse>('/cube-debug/status', request, { timeout: 60000 })
+  },
+
+  async enableCubeDebug(request: CubeDebugEnableRequest): Promise<CubeDebugEnableResponse> {
+    return apiClient.post<CubeDebugEnableResponse>('/cube-debug/enable', request, { timeout: 60000 })
+  },
+
+  async clearCubeDebug(request: CubeDebugClearRequest): Promise<CubeDebugClearResponse> {
+    return apiClient.post<CubeDebugClearResponse>('/cube-debug/clear', request, { timeout: 60000 })
   },
 }

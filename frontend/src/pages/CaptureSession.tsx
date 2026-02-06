@@ -374,6 +374,12 @@ export default function CaptureSession() {
     return new Date(dateStr).toLocaleString()
   }
 
+  const formatFileSize = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  }
+
   const getStatusMessage = (status: CaptureSessionStatus): string => {
     switch (status) {
       case 'pending': return 'Preparing...'
@@ -944,6 +950,30 @@ export default function CaptureSession() {
                             {hasStatus ? targetStatusConfig[status]?.label : 'Ready'}
                           </Typography>
                         </Box>
+                        {/* Phase progress dots */}
+                        {hasStatus && (
+                          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25 }}>
+                            {(['configuring', 'capturing', 'collecting', 'completed'] as const).map((phase, i) => {
+                              const phaseOrder: Record<string, number> = { pending: -1, configuring: 0, ready: 0, capturing: 1, stopping: 2, collecting: 2, completed: 3, stopped: 3, failed: -1, cancelled: -1 }
+                              const current = phaseOrder[status] ?? -1
+                              const isActive = current === i
+                              const isDone = current > i
+                              return (
+                                <Box key={phase} sx={{
+                                  width: 4, height: 4, borderRadius: '50%',
+                                  bgcolor: isDone ? getStatusColor('completed') : isActive ? getStatusColor(status) : '#d1d5db',
+                                  ...(isActive ? {
+                                    animation: 'pulse 1.5s ease-in-out infinite',
+                                    '@keyframes pulse': {
+                                      '0%, 100%': { opacity: 1, transform: 'scale(1)' },
+                                      '50%': { opacity: 0.5, transform: 'scale(1.3)' },
+                                    },
+                                  } : {}),
+                                }} />
+                              )
+                            })}
+                          </Box>
+                        )}
                       </Box>
                     </Box>
                     {!isCapturing && (
@@ -979,22 +1009,49 @@ export default function CaptureSession() {
                       </Box>
                     </Box>
 
-                    {/* Status during capture */}
-                    {hasStatus && targetStatus.packets_captured != null && (
-                      <Box sx={{ mt: 1.5 }}>
-                        <Chip
-                          icon={<NetworkCheck sx={{ fontSize: 14 }} />}
-                          label={`${targetStatus.packets_captured.toLocaleString()} packets`}
-                          size="small"
-                          sx={{
-                            height: 24,
-                            fontSize: '0.7rem',
-                            fontWeight: 600,
-                            bgcolor: alpha(ACCENT_COLOR, 0.1),
-                            color: ACCENT_COLOR,
-                            '& .MuiChip-icon': { color: ACCENT_COLOR },
-                          }}
-                        />
+                    {/* Per-device message */}
+                    {hasStatus && targetStatus.message && (
+                      <Typography variant="caption" sx={{
+                        mt: 1, display: 'block', fontStyle: 'italic',
+                        color: getStatusColor(status), fontSize: '0.75rem',
+                      }}>
+                        {targetStatus.message}
+                      </Typography>
+                    )}
+
+                    {/* Status during capture - packets + file size */}
+                    {hasStatus && (targetStatus.packets_captured != null || targetStatus.file_size_bytes != null) && (
+                      <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', mt: 1.5 }}>
+                        {targetStatus.packets_captured != null && (
+                          <Chip
+                            icon={<NetworkCheck sx={{ fontSize: 14 }} />}
+                            label={`${targetStatus.packets_captured.toLocaleString()} packets`}
+                            size="small"
+                            sx={{
+                              height: 24,
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              bgcolor: alpha(ACCENT_COLOR, 0.1),
+                              color: ACCENT_COLOR,
+                              '& .MuiChip-icon': { color: ACCENT_COLOR },
+                            }}
+                          />
+                        )}
+                        {targetStatus.file_size_bytes != null && (
+                          <Chip
+                            icon={<Storage sx={{ fontSize: 14 }} />}
+                            label={formatFileSize(targetStatus.file_size_bytes)}
+                            size="small"
+                            sx={{
+                              height: 24,
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              bgcolor: alpha(ACCENT_COLOR, 0.1),
+                              color: ACCENT_COLOR,
+                              '& .MuiChip-icon': { color: ACCENT_COLOR },
+                            }}
+                          />
+                        )}
                       </Box>
                     )}
 
@@ -1008,6 +1065,17 @@ export default function CaptureSession() {
                     {status === 'failed' && (
                       <Box sx={{ mt: 1.5 }}>
                         <Chip size="small" label="Failed" color="error" sx={{ height: 24, fontSize: '0.7rem' }} />
+                        {targetStatus?.error && (
+                          <Tooltip title={targetStatus.error}>
+                            <Typography variant="caption" color="error" sx={{
+                              mt: 0.5, display: 'block', fontSize: '0.7rem',
+                              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              maxWidth: '100%',
+                            }}>
+                              {targetStatus.error}
+                            </Typography>
+                          </Tooltip>
+                        )}
                       </Box>
                     )}
                   </CardContent>
